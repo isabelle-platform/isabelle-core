@@ -473,3 +473,11 @@ pub async fn call_otp_hook(srv: &mut crate::state::data::Data, hndl: &str, itm: 
         _ => {}
     }
 }
+
+
+/// Call Periodic Job hook
+pub async fn call_periodic_job_hook(srv: &mut crate::state::data::Data, timing: &str) {
+    for plugin in &mut srv.plugin_pool.plugins {
+        plugin.call_periodic_job_hook(&srv.plugin_api, timing);
+    }
+}
