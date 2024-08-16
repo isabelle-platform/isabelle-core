@@ -24,6 +24,9 @@
 #[macro_use]
 extern crate lazy_static;
 use crate::util::crypto::*;
+use chrono::{Local, FixedOffset};
+use cron::Schedule;
+use std::{time::Duration, str::FromStr};
 
 use crate::notif::email::send_email;
 
@@ -41,6 +44,7 @@ use crate::handler::route::url_post_route;
 use crate::handler::route::url_route;
 use crate::handler::route::url_unprotected_post_route;
 use crate::handler::route::url_unprotected_route;
+use crate::handler::route::call_periodic_job_hook;
 use crate::notif::gcal::*;
 use crate::server::itm::*;
 use crate::server::login::*;
@@ -251,6 +255,30 @@ async fn main() -> std::io::Result<()> {
 
     let data = Data::new(G_STATE.clone());
     info!("Starting server");
+
+    // periodic tasks
+    let data_clone = data.clone();
+    actix_rt::spawn(async move {
+        let expression = "0   *   *     *       *  *  *";
+        let schedule = Schedule::from_str(expression).unwrap();
+        let offset = Some(FixedOffset::east_opt(0)).unwrap();
+
+        loop {
+            let mut upcoming = schedule.upcoming(offset.unwrap()).take(1);
+            actix_rt::time::sleep(Duration::from_millis(500)).await;
+            let local = &Local::now();
+
+            if let Some(datetime) = upcoming.next() {
+                if datetime.timestamp() <= local.timestamp() {
+                    let srv_lock = data_clone.server.lock();
+                    let mut srv = srv_lock.borrow_mut();
+
+                    call_periodic_job_hook(&mut srv, "min").await;
+                }
+            }
+        }
+    });
+
     HttpServer::new(move || {
         // Set up all generic routes
         let mut app = App::new()
