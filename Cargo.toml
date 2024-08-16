@@ -9,16 +9,18 @@ edition = "2021"
 actix-cors = "0.6.4"
 actix-identity = "0.6.0"
 actix-multipart = "0.6.1"
+actix-rt = "2.10.0"
 actix-session = { version = "0.8", features = ["cookie-session"] }
 actix-web = { version = "4", features = ["cookies"]}
 argon2 = "0.5.2"
 async-trait = "0.1.74"
 bson = { version = "2.9.0", features = ["serde_with"] }
 chrono = "0.4.26"
+cron = "0.12.1"
 env_logger = "0.8.4"
 futures-util = "0.3.29"
 isabelle-dm = { "git" = "https://github.com/isabelle-platform/isabelle-dm", tag = "1.1.0" }
-isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.1.0" }
+isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.2.0" }
 lazy_static = "1.4.0"
 lettre = "0.10.4"
 log = "0.4.0"
