@@ -24,9 +24,9 @@
 #[macro_use]
 extern crate lazy_static;
 use crate::util::crypto::*;
-use chrono::{Local, FixedOffset};
+use chrono::{FixedOffset, Local};
 use cron::Schedule;
-use std::{time::Duration, str::FromStr};
+use std::{str::FromStr, time::Duration};
 
 use crate::notif::email::send_email;
 
@@ -40,11 +40,11 @@ mod server;
 mod state;
 mod util;
 
+use crate::handler::route::call_periodic_job_hook;
 use crate::handler::route::url_post_route;
 use crate::handler::route::url_route;
 use crate::handler::route::url_unprotected_post_route;
 use crate::handler::route::url_unprotected_route;
-use crate::handler::route::call_periodic_job_hook;
 use crate::notif::gcal::*;
 use crate::server::itm::*;
 use crate::server::login::*;
