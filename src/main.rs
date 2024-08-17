@@ -60,7 +60,7 @@ use actix_session::config::{BrowserSession, CookieContentSecurity};
 use actix_session::storage::CookieSessionStore;
 use actix_session::SessionMiddleware;
 use actix_web::web::Data;
-use actix_web::{rt, cookie::Key, cookie::SameSite, web, App, HttpServer};
+use actix_web::{cookie::Key, cookie::SameSite, rt, web, App, HttpServer};
 use log::info;
 use std::env;
 use std::ops::DerefMut;
