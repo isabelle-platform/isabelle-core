@@ -41,14 +41,8 @@ fn conv_response(resp: WebResponse) -> HttpResponse {
         WebResponse::Ok => {
             return HttpResponse::Ok().into();
         }
-        WebResponse::OkData(_text) => {
-            return HttpResponse::Ok().body(
-                serde_json::to_string(&ProcessResult {
-                    succeeded: true,
-                    error: "".to_string(),
-                })
-                .unwrap(),
-            )
+        WebResponse::OkData(text) => {
+            return HttpResponse::Ok().body(text);
         }
         WebResponse::NotFound => {
             return HttpResponse::NotFound().into();
