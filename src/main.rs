@@ -60,10 +60,11 @@ use actix_session::config::{BrowserSession, CookieContentSecurity};
 use actix_session::storage::CookieSessionStore;
 use actix_session::SessionMiddleware;
 use actix_web::web::Data;
-use actix_web::{cookie::Key, cookie::SameSite, web, App, HttpServer};
+use actix_web::{rt, cookie::Key, cookie::SameSite, web, App, HttpServer};
 use log::info;
 use std::env;
 use std::ops::DerefMut;
+use std::thread;
 
 /// Session middleware based on cookies
 fn session_middleware(_pub_fqdn: String) -> SessionMiddleware<CookieSessionStore> {
@@ -254,32 +255,31 @@ async fn main() -> std::io::Result<()> {
     }
 
     let data = Data::new(G_STATE.clone());
+    let data_clone = data.clone();
     info!("Starting server");
 
     // periodic tasks
-    let data_clone = data.clone();
-    actix_rt::spawn(async move {
+    thread::spawn(move || {
         let expression = "0   *   *     *       *  *  *";
         let schedule = Schedule::from_str(expression).unwrap();
         let offset = Some(FixedOffset::east_opt(0)).unwrap();
-
         loop {
             let mut upcoming = schedule.upcoming(offset.unwrap()).take(1);
-            actix_rt::time::sleep(Duration::from_millis(500)).await;
+            thread::sleep(Duration::from_millis(500));
+
             let local = &Local::now();
 
             if let Some(datetime) = upcoming.next() {
                 if datetime.timestamp() <= local.timestamp() {
                     let srv_lock = data_clone.server.lock();
                     let mut srv = srv_lock.borrow_mut();
-
-                    call_periodic_job_hook(&mut srv, "min").await;
+                    call_periodic_job_hook(&mut srv, "min")
                 }
             }
         }
     });
 
-    HttpServer::new(move || {
+    let srv = HttpServer::new(move || {
         // Set up all generic routes
         let mut app = App::new()
             .app_data(data.clone())
@@ -319,6 +319,9 @@ async fn main() -> std::io::Result<()> {
         app
     })
     .bind(("0.0.0.0", port))?
-    .run()
-    .await
+    .run();
+    let th = rt::spawn(srv);
+    let _ = th.await;
+
+    Ok(())
 }
