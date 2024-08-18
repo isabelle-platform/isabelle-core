@@ -21,19 +21,22 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use std::path::Path;
+use std::fs;
+use std::io::Write;
 use crate::server::user_control::*;
 use crate::state::store::Store;
 use crate::State;
 use actix_identity::Identity;
 use actix_multipart::Multipart;
-use actix_web::HttpRequest;
-use actix_web::HttpResponse;
+use actix_web::{HttpRequest, HttpResponse};
 use futures_util::TryStreamExt;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::process_result::ProcessResult;
 use isabelle_plugin_api::api::WebResponse;
-use log::info;
+use log::{info, error};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// Convert internal Web response to proper HttpResponse
 fn conv_response(resp: WebResponse) -> HttpResponse {
@@ -228,19 +231,50 @@ pub async fn call_url_post_route(
     usr = get_user(&mut srv, user.id().unwrap()).await;
 
     let mut post_itm = Item::new();
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        while let Ok(Some(chunk)) = field.try_next().await {
-            let data = chunk;
+    let mut files : HashMap<String, String> = HashMap::new();
+    let mut files_count = 0;
+    let path = Path::new("./tmp");
 
-            if field.name() == "item" {
+    if let Err(e) = fs::create_dir_all(&path) {
+        error!("Failed to create directory: {}", e);
+    }
+
+    while let Ok(Some(mut field)) = payload.try_next().await {
+        if field.name() == "item" {
+            while let Ok(Some(chunk)) = field.try_next().await {
+                let data = chunk;
                 let v = &data.to_vec();
                 let strv = std::str::from_utf8(v).unwrap_or("{}");
                 let new_itm: Item = serde_json::from_str(strv).unwrap_or(Item::new());
                 post_itm.merge(&new_itm);
             }
+        } else {
+            let cd = field.content_disposition();
+            let filename = cd
+                .get_filename()
+                .map_or_else(|| Uuid::new_v4().to_string(), sanitize_filename::sanitize);
+            let filepath = format!("./tmp/{filename}");
+            let f = std::fs::File::create(filepath.clone());
+
+            info!("Created file {}", filepath);
+            files.insert(files_count.to_string(), filepath);
+            files_count = files_count + 1;
+
+            if let Ok(mut file) = f {
+                while let Ok(Some(chunk)) = field.try_next().await {
+                    let _ = file.write_all(&chunk);
+                }
+            } else {
+                error!("Failed to open file");
+            }
         }
     }
 
+    if files_count > 0 {
+        post_itm.set_strstr("multipart-files", &files);
+    }
+
+    let mut response : WebResponse = WebResponse::Ok;
     for plugin in &mut srv.plugin_pool.plugins {
         let wr = plugin.route_url_post_hook(&srv.plugin_api, hndl, &usr, query, &post_itm);
         match wr {
@@ -248,16 +282,17 @@ pub async fn call_url_post_route(
                 continue;
             }
             _ => {
-                return conv_response(wr);
+                response = wr;
             }
         }
     }
 
-    match hndl {
-        &_ => {
-            return HttpResponse::NotFound().into();
-        }
+    for file in files {
+        info!("Removed file {}", file.1);
+        let _ = std::fs::remove_file(file.1);
     }
+
+    return conv_response(response);
 }
 
 /// Call URL POST route that requires authenticated user.
@@ -338,18 +373,50 @@ pub async fn call_url_unprotected_post_route(
     }
 
     let mut post_itm = Item::new();
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        while let Ok(Some(chunk)) = field.try_next().await {
-            let data = chunk;
+    let mut files : HashMap<String, String> = HashMap::new();
+    let mut files_count = 0;
+    let path = Path::new("./tmp");
 
-            if field.name() == "item" {
+    if let Err(e) = fs::create_dir_all(&path) {
+        error!("Failed to create directory: {}", e);
+    }
+
+    while let Ok(Some(mut field)) = payload.try_next().await {
+        if field.name() == "item" {
+            while let Ok(Some(chunk)) = field.try_next().await {
+                let data = chunk;
                 let v = &data.to_vec();
                 let strv = std::str::from_utf8(v).unwrap_or("{}");
                 let new_itm: Item = serde_json::from_str(strv).unwrap_or(Item::new());
                 post_itm.merge(&new_itm);
             }
+        } else {
+            let cd = field.content_disposition();
+            let filename = cd
+                .get_filename()
+                .map_or_else(|| Uuid::new_v4().to_string(), sanitize_filename::sanitize);
+            let filepath = format!("./tmp/{filename}");
+            let f = std::fs::File::create(filepath.clone());
+
+            info!("Created file {}", filepath);
+            files.insert(files_count.to_string(), filepath);
+            files_count = files_count + 1;
+
+            if let Ok(mut file) = f {
+                while let Ok(Some(chunk)) = field.try_next().await {
+                    let _ = file.write_all(&chunk);
+                }
+            } else {
+                error!("Failed to open file");
+            }
         }
     }
+
+    if files_count > 0 {
+        post_itm.set_strstr("multipart-files", &files);
+    }
+
+    let mut response : WebResponse = WebResponse::Ok;
 
     for plugin in &mut srv.plugin_pool.plugins {
         let wr =
@@ -359,16 +426,17 @@ pub async fn call_url_unprotected_post_route(
                 continue;
             }
             _ => {
-                return conv_response(wr);
+                response = wr;
             }
         }
     }
 
-    match hndl {
-        &_ => {
-            return HttpResponse::NotFound().into();
-        }
+    for file in files {
+        info!("Removed file {}", file.1);
+        let _ = std::fs::remove_file(file.1);
     }
+
+    return conv_response(response);
 }
 
 /// Call URL route that doesn't require authenticated user.
