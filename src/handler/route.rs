@@ -21,9 +21,6 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use std::path::Path;
-use std::fs;
-use std::io::Write;
 use crate::server::user_control::*;
 use crate::state::store::Store;
 use crate::State;
@@ -34,8 +31,11 @@ use futures_util::TryStreamExt;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::process_result::ProcessResult;
 use isabelle_plugin_api::api::WebResponse;
-use log::{info, error};
+use log::{error, info};
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
+use std::path::Path;
 use uuid::Uuid;
 
 /// Convert internal Web response to proper HttpResponse
@@ -231,7 +231,7 @@ pub async fn call_url_post_route(
     usr = get_user(&mut srv, user.id().unwrap()).await;
 
     let mut post_itm = Item::new();
-    let mut files : HashMap<String, String> = HashMap::new();
+    let mut files: HashMap<String, String> = HashMap::new();
     let mut files_count = 0;
     let path = Path::new("./tmp");
 
@@ -274,7 +274,7 @@ pub async fn call_url_post_route(
         post_itm.set_strstr("multipart-files", &files);
     }
 
-    let mut response : WebResponse = WebResponse::Ok;
+    let mut response: WebResponse = WebResponse::Ok;
     for plugin in &mut srv.plugin_pool.plugins {
         let wr = plugin.route_url_post_hook(&srv.plugin_api, hndl, &usr, query, &post_itm);
         match wr {
@@ -373,7 +373,7 @@ pub async fn call_url_unprotected_post_route(
     }
 
     let mut post_itm = Item::new();
-    let mut files : HashMap<String, String> = HashMap::new();
+    let mut files: HashMap<String, String> = HashMap::new();
     let mut files_count = 0;
     let path = Path::new("./tmp");
 
@@ -416,7 +416,7 @@ pub async fn call_url_unprotected_post_route(
         post_itm.set_strstr("multipart-files", &files);
     }
 
-    let mut response : WebResponse = WebResponse::Ok;
+    let mut response: WebResponse = WebResponse::Ok;
 
     for plugin in &mut srv.plugin_pool.plugins {
         let wr =
