@@ -11,6 +11,7 @@ pipeline {
     /* Collect versions saved in tools/ folder */
     FULL_VERSION = sh(script: "./tools/get_version.sh full", returnStdout: true).trim()
     SHORT_VERSION = sh(script: "./tools/get_version.sh", returnStdout: true).trim()
+    BRANCH_FOLDER = sh(script: "./tools/get_branch_folder.sh ${BRANCH_NAME}", returnStdout: true).trim()
   }
 
   stages {
@@ -58,9 +59,9 @@ pipeline {
           steps {
             sh 'mkdir -p build && (rm -rf build/* || true)'
             /* Create branch-build-linux and doc-branch-build */
-            sh './tools/release.sh --out build/isabelle-core-${BRANCH_NAME}-${BUILD_NUMBER}-linux-x86_64.tar.xz'
+            sh './tools/release.sh --out build/isabelle-core-${BRANCH_FOLDER}-${BUILD_NUMBER}-linux-x86_64.tar.xz'
             /* Copy branch-build-linux to branch-latest-linux */
-            sh 'cp build/isabelle-core-${BRANCH_NAME}-${BUILD_NUMBER}-linux-x86_64.tar.xz build/isabelle-core-${BRANCH_NAME}-latest-linux-x86_64.tar.xz'
+            sh 'cp build/isabelle-core-${BRANCH_FOLDER}-${BUILD_NUMBER}-linux-x86_64.tar.xz build/isabelle-core-${BRANCH_FOLDER}-latest-linux-x86_64.tar.xz'
           }
         }
         stage('Prepare artifacts (versioned)') {
@@ -74,7 +75,7 @@ pipeline {
             sh 'mkdir -p build/versioned_artifacts'
 
             /* Copy branch-latest-linux to fullver-linux */
-            sh 'cp build/isabelle-core-${BRANCH_NAME}-latest-linux-x86_64.tar.xz build/versioned_artifacts/isabelle-core-${FULL_VERSION}-linux-x86_64.tar.xz'
+            sh 'cp build/isabelle-core-${BRANCH_FOLDER}-latest-linux-x86_64.tar.xz build/versioned_artifacts/isabelle-core-${FULL_VERSION}-linux-x86_64.tar.xz'
           }
         }
       }
@@ -100,10 +101,10 @@ pipeline {
                                 makeEmptyDirs: false,
                                 noDefaultExcludes: false,
                                 patternSeparator: '[, ]+',
-                                remoteDirectory: 'branches/${BRANCH_NAME}-${BUILD_NUMBER}',
+                                remoteDirectory: 'branches/${BRANCH_FOLDER}-${BUILD_NUMBER}',
                                 remoteDirectorySDF: false,
                                 removePrefix: 'build',
-                                sourceFiles: 'build/isabelle-core-*${BRANCH_NAME}-${BUILD_NUMBER}*.tar.xz'
+                                sourceFiles: 'build/isabelle-core-*${BRANCH_FOLDER}-${BUILD_NUMBER}*.tar.xz'
                               ]],
                             usePromotionTimestamp: false,
                             useWorkspaceInPromotion: false,
@@ -127,10 +128,10 @@ pipeline {
                                 makeEmptyDirs: false,
                                 noDefaultExcludes: false,
                                 patternSeparator: '[, ]+',
-                                remoteDirectory: 'branches/${BRANCH_NAME}',
+                                remoteDirectory: 'branches/${BRANCH_FOLDER}',
                                 remoteDirectorySDF: false,
                                 removePrefix: 'build',
-                                sourceFiles: 'build/isabelle-core-*${BRANCH_NAME}-latest*.tar.xz'
+                                sourceFiles: 'build/isabelle-core-*${BRANCH_FOLDER}-latest*.tar.xz'
                               ]],
                             usePromotionTimestamp: false,
                             useWorkspaceInPromotion: false,
