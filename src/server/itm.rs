@@ -21,7 +21,6 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use crate::handler::route::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
@@ -30,6 +29,7 @@ use actix_identity::Identity;
 use actix_multipart::Multipart;
 use actix_web::{web, HttpRequest, HttpResponse};
 use futures_util::TryStreamExt;
+use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::list_query::ListQuery;
 use isabelle_dm::data_model::list_result::ListResult;
@@ -116,7 +116,11 @@ pub async fn itm_edit(
                         &mc.collection,
                         old_itm.clone(),
                         &mut itm_clone,
-                        if old_itm.is_some() { DataObjectAction::Modify } else { DataObjectAction::Create },
+                        if old_itm.is_some() {
+                            DataObjectAction::Modify
+                        } else {
+                            DataObjectAction::Create
+                        },
                         mc.merge,
                     )
                     .await;
@@ -175,7 +179,11 @@ pub async fn itm_edit(
                         &mc.collection,
                         old_itm.clone(),
                         itm.id,
-                        if old_itm.is_some() { DataObjectAction::Modify } else { DataObjectAction::Create },
+                        if old_itm.is_some() {
+                            DataObjectAction::Modify
+                        } else {
+                            DataObjectAction::Create
+                        },
                     )
                     .await;
                 }
@@ -272,8 +280,15 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
             for route in routes {
                 let parts: Vec<&str> = route.1.split(":").collect();
                 if parts[0] == mc.collection {
-                    call_item_post_edit_hook(srv_mut, &parts[1], &mc.collection, old_itm.clone(), itm.id, DataObjectAction::Delete)
-                        .await;
+                    call_item_post_edit_hook(
+                        srv_mut,
+                        &parts[1],
+                        &mc.collection,
+                        old_itm.clone(),
+                        itm.id,
+                        DataObjectAction::Delete,
+                    )
+                    .await;
                 }
             }
         }

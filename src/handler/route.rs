@@ -21,7 +21,6 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use crate::server::user_control::*;
 use crate::state::store::Store;
 use crate::State;
@@ -29,6 +28,7 @@ use actix_identity::Identity;
 use actix_multipart::Multipart;
 use actix_web::{HttpRequest, HttpResponse};
 use futures_util::TryStreamExt;
+use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::process_result::ProcessResult;
 use isabelle_plugin_api::api::WebResponse;
@@ -111,7 +111,14 @@ pub async fn call_item_post_edit_hook(
     action: DataObjectAction,
 ) {
     for plugin in &mut srv.plugin_pool.plugins {
-        plugin.item_post_edit_hook(&srv.plugin_api, hndl, collection, old_itm.clone(), id, action.clone());
+        plugin.item_post_edit_hook(
+            &srv.plugin_api,
+            hndl,
+            collection,
+            old_itm.clone(),
+            id,
+            action.clone(),
+        );
     }
 
     match hndl {
