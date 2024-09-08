@@ -21,13 +21,14 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use crate::handler::route::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
 use crate::state::store::Store;
 use actix_identity::Identity;
 use actix_multipart::Multipart;
-use actix_web::{web, HttpRequest, HttpResponse, Responder};
+use actix_web::{web, HttpRequest, HttpResponse};
 use futures_util::TryStreamExt;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::list_query::ListQuery;
@@ -115,7 +116,7 @@ pub async fn itm_edit(
                         &mc.collection,
                         old_itm.clone(),
                         &mut itm_clone,
-                        false,
+                        if old_itm.is_some() { DataObjectAction::Modify } else { DataObjectAction::Create },
                         mc.merge,
                     )
                     .await;
@@ -129,6 +130,7 @@ pub async fn itm_edit(
         }
 
         /* call hooks */
+        /*
         if old_itm != None {
             let routes = (*srv_mut)
                 .rw
@@ -149,6 +151,7 @@ pub async fn itm_edit(
                 }
             }
         }
+        */
 
         (*srv_mut)
             .rw
@@ -170,8 +173,9 @@ pub async fn itm_edit(
                         &mut (*srv_mut),
                         &parts[1],
                         &mc.collection,
+                        old_itm.clone(),
                         itm.id,
-                        false,
+                        if old_itm.is_some() { DataObjectAction::Modify } else { DataObjectAction::Create },
                     )
                     .await;
                 }
@@ -194,7 +198,7 @@ pub async fn itm_edit(
 
 /// Action that is called on removing the item. This function calls
 /// all necessary hooks and actually performs removal.
-pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -> impl Responder {
+pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -> HttpResponse {
     let srv_lock = data.server.lock();
     let mut srv = srv_lock.borrow_mut();
     let usr = get_user(&mut srv, user.id().unwrap()).await;
@@ -220,6 +224,44 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
 
     let srv_mut = srv.deref_mut();
     if srv_mut.has_collection(&mc.collection) {
+        let old_itm = srv_mut.rw.get_item(&mc.collection, itm.id).await;
+        let mut new_itm = Item::new();
+
+        /* call pre edit hooks before removal */
+        {
+            let routes = (*srv_mut)
+                .rw
+                .get_internals()
+                .await
+                .safe_strstr("item_pre_edit_hook", &HashMap::new());
+            for route in &routes {
+                let parts: Vec<&str> = route.1.split(":").collect();
+                if parts[0] == mc.collection {
+                    let res = call_item_pre_edit_hook(
+                        &mut (*srv_mut),
+                        parts[1],
+                        &usr,
+                        &mc.collection,
+                        old_itm.clone(),
+                        &mut new_itm,
+                        DataObjectAction::Delete,
+                        mc.merge,
+                    )
+                    .await;
+                    if !res.succeeded {
+                        info!("Item pre edit hook failed: {} - {}", parts[1], res.error);
+                        let s = serde_json::to_string(&res);
+                        return HttpResponse::Ok().body(s.unwrap_or("{}".to_string()));
+                    }
+                }
+            }
+        }
+
+        if srv_mut.rw.del_item(&mc.collection, itm.id).await {
+            info!("Collection {} element {} removed", mc.collection, itm.id);
+            return HttpResponse::Ok().into();
+        }
+
         /* call hooks */
         {
             let routes = srv_mut
@@ -230,21 +272,16 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
             for route in routes {
                 let parts: Vec<&str> = route.1.split(":").collect();
                 if parts[0] == mc.collection {
-                    call_item_post_edit_hook(srv_mut, &parts[1], &mc.collection, itm.id, true)
+                    call_item_post_edit_hook(srv_mut, &parts[1], &mc.collection, old_itm.clone(), itm.id, DataObjectAction::Delete)
                         .await;
                 }
             }
-        }
-
-        if srv_mut.rw.del_item(&mc.collection, itm.id).await {
-            info!("Collection {} element {} removed", mc.collection, itm.id);
-            return HttpResponse::Ok();
         }
     } else {
         error!("Collection {} doesn't exist", mc.collection);
     }
 
-    return HttpResponse::BadRequest();
+    return HttpResponse::BadRequest().into();
 }
 
 /// Action that is called on any attempt to list database items.

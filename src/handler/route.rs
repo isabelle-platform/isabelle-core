@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use crate::server::user_control::*;
 use crate::state::store::Store;
 use crate::State;
@@ -71,7 +72,7 @@ pub async fn call_item_pre_edit_hook(
     collection: &str,
     old_itm: Option<Item>,
     itm: &mut Item,
-    del: bool,
+    action: DataObjectAction,
     merge: bool,
 ) -> ProcessResult {
     for plugin in &mut srv.plugin_pool.plugins {
@@ -82,7 +83,7 @@ pub async fn call_item_pre_edit_hook(
             collection,
             old_itm.clone(),
             itm,
-            del,
+            action.clone(),
             merge,
         );
         if !r.succeeded && r.error != "not implemented" {
@@ -105,11 +106,12 @@ pub async fn call_item_post_edit_hook(
     srv: &mut crate::state::data::Data,
     hndl: &str,
     collection: &str,
+    old_itm: Option<Item>,
     id: u64,
-    del: bool,
+    action: DataObjectAction,
 ) {
     for plugin in &mut srv.plugin_pool.plugins {
-        plugin.item_post_edit_hook(&srv.plugin_api, hndl, collection, id, del);
+        plugin.item_post_edit_hook(&srv.plugin_api, hndl, collection, old_itm.clone(), id, action.clone());
     }
 
     match hndl {
