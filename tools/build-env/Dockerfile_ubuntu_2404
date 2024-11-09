@@ -10,4 +10,8 @@ RUN apt-get update && \
 
 RUN /bin/bash -c "curl --proto '=https' --tlsv1.2 -sSf curl https://sh.rustup.rs | sh -s -- -y && source $HOME/.cargo/env && rustup update"
 
-ENV PATH="/home/root/.cargo/bin:${PATH}"
+RUN chmod -R 777 /root/.cargo
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN /bin/bash -c 'chmod 777 $(which cargo)'

@@ -25,14 +25,17 @@ pipeline {
     }
     stage('Perform checks') {
       steps {
+        /* Cargo fix */
+        sh 'echo PATH: ${PATH}'
+
         /* Update Cargo */
-        sh 'env PATH=${HOME}/.cargo/bin:${PATH} cargo update -p isabelle-dm'
+        sh 'cargo update -p isabelle-dm'
 
         /* Fail if 'cargo fix' changes anything */
-        sh 'env PATH=${HOME}/.cargo/bin:${PATH} cargo fix && git diff --exit-code'
+        sh 'cargo fix && git diff --exit-code'
 
         /* Fail if 'cargo fmt' changes anything */
-        sh 'env PATH=${HOME}/.cargo/bin:${PATH} cargo fmt && git diff --exit-code'
+        sh 'cargo fmt && git diff --exit-code'
 
         /* Fail if tag is not updated with current version */
         sh 'git tag | grep ${SHORT_VERSION}'
@@ -46,7 +49,7 @@ pipeline {
       parallel {
         stage('Build (Linux)') {
           steps {
-            sh 'env PATH=${HOME}/.cargo/bin:${PATH} cargo build --release'
+            sh 'cargo build --release'
           }
         }
       }
