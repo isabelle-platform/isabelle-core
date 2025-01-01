@@ -133,30 +133,6 @@ pub async fn itm_edit(
             }
         }
 
-        /* call hooks */
-        /*
-        if old_itm != None {
-            let routes = (*srv_mut)
-                .rw
-                .get_internals()
-                .await
-                .safe_strstr("item_post_edit_hook", &HashMap::new());
-            for route in routes {
-                let parts: Vec<&str> = route.1.split(":").collect();
-                if parts[0] == mc.collection {
-                    call_item_post_edit_hook(
-                        &mut (*srv_mut),
-                        &parts[1],
-                        &mc.collection,
-                        itm.id,
-                        true,
-                    )
-                    .await;
-                }
-            }
-        }
-        */
-
         (*srv_mut)
             .rw
             .set_item(&mc.collection, &itm_clone, mc.merge)
