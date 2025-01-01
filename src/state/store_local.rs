@@ -27,7 +27,7 @@ use std::path::Path;
 use crate::state::store::Store;
 use async_trait::async_trait;
 use isabelle_dm::data_model::item::*;
-use log::{error, info};
+use log::{debug, error, trace};
 use std::collections::HashMap;
 use std::fs;
 
@@ -71,7 +71,7 @@ impl Store for StoreLocal {
             let coll_index = self.items.len().try_into().unwrap();
             self.items.insert(coll_index, new_col);
             self.collections.insert(idx.clone(), coll_index);
-            info!("New collection {}", idx.clone());
+            trace!("New collection {}", idx.clone());
 
             let cnt_str =
                 std::fs::read_to_string(self.path.clone() + "/collection/" + &idx + "/cnt");
@@ -88,8 +88,8 @@ impl Store for StoreLocal {
 
             self.items_count
                 .insert(self.collections[&idx], *parsed.as_ref().unwrap());
-            info!(" - index: {}", self.collections[&idx]);
-            info!(" - counter: {}", parsed.as_ref().unwrap());
+            trace!(" - index: {}", self.collections[&idx]);
+            trace!(" - counter: {}", parsed.as_ref().unwrap());
 
             let data_files = fs::read_dir(self.path.to_string() + "/collection/" + &idx).unwrap();
             for data_file in data_files {
@@ -103,7 +103,7 @@ impl Store for StoreLocal {
                 if Path::new(&tmp_path).is_dir() {
                     let m = self.items.get_mut(&coll_index).unwrap();
                     (*m).insert(data_file_idx.parse::<u64>().unwrap(), true);
-                    info!("{}: idx {}", &idx, &data_file_idx);
+                    trace!("{}: idx {}", &idx, &data_file_idx);
                 }
             }
         }
@@ -196,7 +196,7 @@ impl Store for StoreLocal {
             eff_id_min = 0;
         }
 
-        info!(
+        debug!(
             "Getting {} in range {} - {} limit {}",
             &collection, eff_id_min, eff_id_max, limit
         );
@@ -214,7 +214,7 @@ impl Store for StoreLocal {
                 }
             }
         }
-        info!(" - result: {} items", count - eff_skip);
+        debug!(" - result: {} items", count - eff_skip);
         lr.total_count = itms.len() as u64;
 
         return lr;

@@ -33,6 +33,7 @@ pub trait Store {
     async fn connect(&mut self, addr: &str, altaddr: &str);
 
     /// Disconnect the store
+    #[allow(dead_code)]
     async fn disconnect(&mut self);
 
     /// Get all collections

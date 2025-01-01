@@ -346,7 +346,6 @@ pub async fn call_collection_read_hook(
     itm: &mut Item,
 ) -> bool {
     for plugin in &mut data.plugin_pool.plugins {
-        info!("Call collection read hook {}", hndl);
         if plugin.collection_read_hook(&data.plugin_api, hndl, collection, itm) {
             return true;
         }
