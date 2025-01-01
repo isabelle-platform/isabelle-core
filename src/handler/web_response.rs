@@ -1,5 +1,5 @@
-use isabelle_plugin_api::api::WebResponse;
 use actix_web::HttpResponse;
+use isabelle_plugin_api::api::WebResponse;
 
 /// Convert internal Web response to proper HttpResponse
 pub fn conv_response(resp: WebResponse) -> HttpResponse {

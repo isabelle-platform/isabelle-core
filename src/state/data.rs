@@ -21,8 +21,6 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use log::trace;
-use std::sync::Arc;
 use crate::check_role;
 use crate::get_new_salt;
 use crate::get_password_hash;
@@ -40,15 +38,17 @@ use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::list_result::ListResult;
 use isabelle_plugin_api::api::*;
 use isabelle_plugin_api::plugin_pool::PluginPool;
+use log::trace;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::mpsc;
-use tokio::runtime::Runtime;
+use std::sync::Arc;
 use threadpool::ThreadPool;
+use tokio::runtime::Runtime;
 
 struct IsabellePluginApi {
     thread_pool: ThreadPool,
-    runtime: Arc<Runtime>
+    runtime: Arc<Runtime>,
 }
 
 unsafe impl Send for IsabellePluginApi {}
@@ -73,14 +73,13 @@ impl PluginApi for IsabellePluginApi {
 
         self.thread_pool.execute(move || {
             sender
-                .send(
-                    rt.block_on(async {
-                        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
-                        srv_mut
-                            .rw
-                            .get_all_items(&collection1, &sort_key1, &filter1)
-                            .await
-                    }))
+                .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    srv_mut
+                        .rw
+                        .get_all_items(&collection1, &sort_key1, &filter1)
+                        .await
+                }))
                 .unwrap();
         });
         let res = receiver.recv().unwrap();

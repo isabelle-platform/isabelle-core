@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use crate::handler::web_response::*;
 use crate::server::user_control::*;
 use actix_identity::Identity;
 use actix_multipart::Multipart;
@@ -36,7 +37,6 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use uuid::Uuid;
-use crate::handler::web_response::*;
 
 /// Call hook associated with pre-editing of item data.
 pub async fn call_item_pre_edit_hook(
