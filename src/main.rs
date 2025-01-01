@@ -100,82 +100,84 @@ async fn main() -> std::io::Result<()> {
 
     {
         let srv_lock = G_STATE.server.lock();
-        let mut srv = srv_lock.borrow_mut();
+        let mut srv_mut = srv_lock.borrow_mut();
+        let mut srv = srv_mut.deref_mut();
+
+        info!("Connecting databases");
+        // Put options to internal structures and connect to database
+        #[cfg(not(feature = "full_file_database"))]
         {
-            // Put options to internal structures and connect to database
-            #[cfg(not(feature = "full_file_database"))]
-            {
-                (*srv.deref_mut()).file_rw.connect(&args.data_path, "").await;
-                (*srv.deref_mut()).rw.database_name = args.db_name.clone();
-                (*srv.deref_mut()).rw.connect(&args.db_url, &args.data_path).await;
-            }
-            #[cfg(feature = "full_file_database")]
-            {
-                info!(
-                    "Database url {} name {} unused",
-                    database_name.clone(),
-                    db_url.clone()
-                );
-                (*srv.deref_mut()).rw.connect(&data_path, "").await;
-            }
-            (*srv.deref_mut()).gc_path = args.gc_path.to_string();
-            (*srv.deref_mut()).py_path = args.py_path.to_string();
-            (*srv.deref_mut()).data_path = args.data_path.to_string();
-            (*srv.deref_mut()).public_url = args.pub_url.to_string();
-            (*srv.deref_mut()).port = args.port;
+            srv.file_rw.connect(&args.data_path, "").await;
+            srv.rw.database_name = args.db_name.clone();
+            srv.rw.connect(&args.db_url, &args.data_path).await;
+        }
 
-            // Load plugins
-            info!("Loading plugins");
-            info!("URL: {}", (*srv.deref_mut()).public_url);
-            {
-                let s = &mut (*srv.deref_mut());
-                s.plugin_pool.load_plugins(&args.plugin_dir);
-                info!("Ping plugins");
-                s.plugin_pool.ping_plugins();
-            }
+        #[cfg(feature = "full_file_database")]
+        {
+            info!(
+                "Database url {} name {} unused",
+                database_name.clone(),
+                db_url.clone()
+            );
+            srv.rw.connect(&data_path, "").await;
+        }
+        srv.gc_path = args.gc_path.to_string();
+        srv.py_path = args.py_path.to_string();
+        srv.data_path = args.data_path.to_string();
+        srv.public_url = args.pub_url.to_string();
+        srv.port = args.port;
 
-            // Perform initialization checks, etc.
-            info!("Init checks");
-            (*srv.deref_mut()).init_checks().await;
+        // Load plugins
+        info!("Loading plugins");
+        info!("URL: {}", srv.public_url);
+        {
+            let s = &mut srv;
+            s.plugin_pool.load_plugins(&args.plugin_dir);
+            info!("Ping plugins");
+            s.plugin_pool.ping_plugins();
+        }
 
-            // Initialize Google Calendar
-            info!("Initialize Google Calendar");
-            let res = init_google(&mut (*srv.deref_mut())).await;
-            info!("Result: {}", res);
+        // Perform initialization checks, etc.
+        info!("Init checks");
+        srv.init_checks().await;
 
-            // Get all extra routes and put them to map
-            {
-                let routes = (*srv.deref_mut())
-                    .rw
-                    .get_internals()
-                    .await
-                    .safe_strstr("extra_route", &HashMap::new());
-                for route in routes {
-                    let parts: Vec<&str> = route.1.split(":").collect();
-                    new_routes.insert(parts[0].to_string(), parts[1].to_string());
-                    info!("Route: {} : {}", parts[0], parts[1]);
-                }
-            }
-            {
-                let routes = (*srv.deref_mut())
-                    .rw
-                    .get_internals()
-                    .await
-                    .safe_strstr("extra_unprotected_route", &HashMap::new());
-                for route in routes {
-                    let parts: Vec<&str> = route.1.split(":").collect();
-                    new_unprotected_routes.insert(parts[0].to_string(), parts[1].to_string());
-                    info!("Unprotected route: {} : {}", parts[0], parts[1]);
-                }
-            }
+        // Initialize Google Calendar
+        info!("Initialize Google Calendar");
+        let res = init_google(&mut srv).await;
+        info!("Result: {}", res);
 
-            // If it is a first run, merge database.
-            #[cfg(not(feature = "full_file_database"))]
-            if args.first_run {
-                let m = &mut (*srv.deref_mut());
-                info!("First run");
-                merge_database(&mut m.file_rw, &mut m.rw).await;
+        // Get all extra routes and put them to map
+        {
+            let routes = srv
+                .rw
+                .get_internals()
+                .await
+                .safe_strstr("extra_route", &HashMap::new());
+            for route in routes {
+                let parts: Vec<&str> = route.1.split(":").collect();
+                new_routes.insert(parts[0].to_string(), parts[1].to_string());
+                info!("Route: {} : {}", parts[0], parts[1]);
             }
+        }
+        {
+            let routes = srv
+                .rw
+                .get_internals()
+                .await
+                .safe_strstr("extra_unprotected_route", &HashMap::new());
+            for route in routes {
+                let parts: Vec<&str> = route.1.split(":").collect();
+                new_unprotected_routes.insert(parts[0].to_string(), parts[1].to_string());
+                info!("Unprotected route: {} : {}", parts[0], parts[1]);
+            }
+        }
+
+        // If it is a first run, merge database.
+        #[cfg(not(feature = "full_file_database"))]
+        if args.first_run {
+            let m = &mut srv;
+            info!("First run");
+            merge_database(&mut m.file_rw, &mut m.rw).await;
         }
     }
 
