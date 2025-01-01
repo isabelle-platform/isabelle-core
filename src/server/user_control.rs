@@ -23,7 +23,7 @@
  */
 use crate::state::store::Store;
 use isabelle_dm::data_model::item::Item;
-use log::info;
+use log::trace;
 
 /// Check if login has bad symbols
 pub fn login_has_bad_symbols(login: &str) -> bool {
@@ -41,7 +41,7 @@ pub async fn get_user(srv: &mut crate::state::data::Data, login: String) -> Opti
             + "{ \"strs.email\": \"" + &login + "\" } ]}";
     let users = srv.rw.get_all_items("user", "name", &filter).await;
     let tmp_login = login.to_lowercase();
-    info!("Users: {}", users.map.len());
+    trace!("Users: {}", users.map.len());
     for item in &users.map {
         if item.1.strs.contains_key("login") && item.1.strs["login"].to_lowercase() == tmp_login {
             return Some(item.1.clone());

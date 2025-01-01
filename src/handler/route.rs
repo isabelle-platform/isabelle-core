@@ -27,7 +27,7 @@ use crate::State;
 use actix_identity::Identity;
 use actix_multipart::Multipart;
 use actix_web::{HttpRequest, HttpResponse};
-use log::info;
+use log::trace;
 use std::collections::HashMap;
 
 /// Call HTTP URL hooks. This function checks actual location from request
@@ -45,12 +45,12 @@ pub async fn url_route(
         .await
         .safe_strstr("extra_route", &HashMap::new());
 
-    info!("Custom URL: {}", req.path());
+    trace!("Custom URL: {}", req.path());
 
     for route in routes {
         let parts: Vec<&str> = route.1.split(":").collect();
         if parts[0] == req.path() {
-            info!("Call custom route {}", parts[2]);
+            trace!("Call custom route {}", parts[2]);
             return call_url_route(&mut srv, user, parts[2], req.query_string()).await;
         }
     }
@@ -75,12 +75,12 @@ pub async fn url_post_route(
         .await
         .safe_strstr("extra_route", &HashMap::new());
 
-    info!("Custom post URL: {}", req.path());
+    trace!("Custom post URL: {}", req.path());
 
     for route in routes {
         let parts: Vec<&str> = route.1.split(":").collect();
         if parts[0] == req.path() {
-            info!("Call custom route {}", parts[2]);
+            trace!("Call custom route {}", parts[2]);
             return call_url_post_route(&mut srv, user, parts[2], req.query_string(), payload)
                 .await;
         }
@@ -104,12 +104,12 @@ pub async fn url_unprotected_route(
         .await
         .safe_strstr("extra_unprotected_route", &HashMap::new());
 
-    info!("Custom unprotected URL: {}", req.path());
+    trace!("Custom unprotected URL: {}", req.path());
 
     for route in routes {
         let parts: Vec<&str> = route.1.split(":").collect();
         if parts[0] == req.path() {
-            info!("Call custom route {}", parts[2]);
+            trace!("Call custom route {}", parts[2]);
             return call_url_unprotected_route(&mut srv, user, parts[2], req.query_string()).await;
         }
     }
@@ -134,12 +134,12 @@ pub async fn url_unprotected_post_route(
         .await
         .safe_strstr("extra_unprotected_route", &HashMap::new());
 
-    info!("Custom unprotected post URL: {}", req.path());
+    trace!("Custom unprotected post URL: {}", req.path());
 
     for route in routes {
         let parts: Vec<&str> = route.1.split(":").collect();
         if parts[0] == req.path() {
-            info!("Call custom route {}", parts[2]);
+            trace!("Call custom route {}", parts[2]);
             return call_url_unprotected_post_route(
                 &mut srv,
                 user,
