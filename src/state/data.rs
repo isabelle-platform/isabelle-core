@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use std::sync::Arc;
 use crate::check_role;
 use crate::get_new_salt;
 use crate::get_password_hash;
@@ -41,12 +42,12 @@ use isabelle_plugin_api::plugin_pool::PluginPool;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::mpsc;
-use std::thread;
 use tokio::runtime::Runtime;
 use threadpool::ThreadPool;
 
 struct IsabellePluginApi {
     thread_pool: ThreadPool,
+    runtime: Arc<Runtime>
 }
 
 unsafe impl Send for IsabellePluginApi {}
@@ -54,7 +55,8 @@ unsafe impl Send for IsabellePluginApi {}
 impl IsabellePluginApi {
     fn new() -> Self {
         return IsabellePluginApi {
-            thread_pool: threadpool::Builder::new().build()
+            thread_pool: threadpool::Builder::new().build(),
+            runtime: Arc::new(Runtime::new().unwrap()),
         };
     }
 }
@@ -67,16 +69,18 @@ impl PluginApi for IsabellePluginApi {
         let collection1 = collection.to_string().clone();
         let sort_key1 = sort_key.to_string().clone();
         let filter1 = filter.to_string().clone();
+        let rt = Arc::clone(&self.runtime);
+
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
-                .send(rt.block_on(async {
-                    srv_mut
-                        .rw
-                        .get_all_items(&collection1, &sort_key1, &filter1)
-                        .await
-                }))
-                .unwrap()
+                .send(
+                    rt.block_on(async {
+                        srv_mut
+                            .rw
+                            .get_all_items(&collection1, &sort_key1, &filter1)
+                            .await
+                    }))
+                .unwrap();
         });
         receiver.recv().unwrap()
     }
@@ -97,8 +101,9 @@ impl PluginApi for IsabellePluginApi {
         let collection1 = collection.to_string().clone();
         let sort_key1 = sort_key.to_string().clone();
         let filter1 = filter.to_string().clone();
+        let rt = Arc::clone(&self.runtime);
+
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async {
                     srv_mut
@@ -123,11 +128,13 @@ impl PluginApi for IsabellePluginApi {
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
+        let rt = Arc::clone(&self.runtime);
 
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
-                .send(rt.block_on(async { srv_mut.rw.get_item(&collection1, id).await }))
+                .send(rt.block_on(async {
+                    srv_mut.rw.get_item(&collection1, id).await
+                }))
                 .unwrap()
         });
         receiver.recv().unwrap()
@@ -139,11 +146,13 @@ impl PluginApi for IsabellePluginApi {
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
         let itm1 = itm.clone();
+        let rt = Arc::clone(&self.runtime);
 
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
-                .send(rt.block_on(async { srv_mut.rw.set_item(&collection1, &itm1, merge).await }))
+                .send(rt.block_on(async {
+                    srv_mut.rw.set_item(&collection1, &itm1, merge).await
+                }))
                 .unwrap()
         });
         receiver.recv().unwrap()
@@ -154,11 +163,13 @@ impl PluginApi for IsabellePluginApi {
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
+        let rt = Arc::clone(&self.runtime);
 
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
-                .send(rt.block_on(async { srv_mut.rw.del_item(&collection1, id).await }))
+                .send(rt.block_on(async {
+                    srv_mut.rw.del_item(&collection1, id).await
+                }))
                 .unwrap()
         });
         receiver.recv().unwrap()
@@ -173,10 +184,12 @@ impl PluginApi for IsabellePluginApi {
         let srv_lock = G_STATE.server.lock();
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
+        let rt = Arc::clone(&self.runtime);
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
-                .send(rt.block_on(async { srv_mut.rw.get_settings().await }))
+                .send(rt.block_on(async {
+                    srv_mut.rw.get_settings().await
+                }))
                 .unwrap()
         });
         receiver.recv().unwrap()
@@ -188,10 +201,12 @@ impl PluginApi for IsabellePluginApi {
         let srv_lock = G_STATE.server.lock();
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
+        let rt = Arc::clone(&self.runtime);
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
-                .send(rt.block_on(async { check_role(srv_mut, &user, &role).await }))
+                .send(rt.block_on(async {
+                    check_role(srv_mut, &user, &role).await
+                }))
                 .unwrap()
         });
         receiver.recv().unwrap()
@@ -213,10 +228,12 @@ impl PluginApi for IsabellePluginApi {
         let to = to.to_string();
         let subject = subject.to_string();
         let body = body.to_string();
+        let rt = Arc::clone(&self.runtime);
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
-                .send(rt.block_on(async { send_email(srv_mut, &to, &subject, &body).await }))
+                .send(rt.block_on(async {
+                    send_email(srv_mut, &to, &subject, &body).await
+                }))
                 .unwrap()
         });
         receiver.recv().unwrap()
@@ -226,10 +243,12 @@ impl PluginApi for IsabellePluginApi {
         let srv_lock = G_STATE.server.lock();
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
+        let rt = Arc::clone(&self.runtime);
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
-                .send(rt.block_on(async { init_google(srv_mut).await }))
+                .send(rt.block_on(async {
+                    init_google(srv_mut).await
+                }))
                 .unwrap()
         });
         receiver.recv().unwrap()
@@ -238,10 +257,12 @@ impl PluginApi for IsabellePluginApi {
         let srv_lock = G_STATE.server.lock();
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
+        let rt = Arc::clone(&self.runtime);
         self.thread_pool.execute(move || {
-            let rt = Runtime::new().unwrap();
             sender
-                .send(rt.block_on(async { sync_with_google(srv_mut, add, name, date_time).await }))
+                .send(rt.block_on(async {
+                    sync_with_google(srv_mut, add, name, date_time).await
+                }))
                 .unwrap()
         });
         receiver.recv().unwrap()
