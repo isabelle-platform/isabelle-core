@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use crate::args::Args;
 use chrono::Timelike;
 #[macro_use]
 extern crate lazy_static;
@@ -35,6 +36,7 @@ use crate::notif::email::send_email;
 use crate::state::merger::merge_database;
 use crate::state::store::Store;
 
+mod args;
 mod handler;
 mod notif;
 mod server;
@@ -63,7 +65,7 @@ use actix_session::SessionMiddleware;
 use actix_web::web::Data;
 use actix_web::{cookie::Key, cookie::SameSite, rt, web, App, HttpServer};
 use log::info;
-use std::env;
+use clap::Parser;
 use std::ops::DerefMut;
 use std::thread;
 
@@ -87,79 +89,7 @@ lazy_static! {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Prepare and read arguments
-    let args: Vec<String> = env::args().collect();
-    let mut gc_path: String = "".to_string();
-    let mut py_path: String = "".to_string();
-    let mut data_path: String = "sample-data".to_string();
-    let mut db_url: String = "mongodb://127.0.0.1:27017".to_string();
-    let mut pub_path: String = "http://localhost:8081".to_string();
-    let mut pub_fqdn: String = "localhost".to_string();
-    let mut database_name: String = "isabelle".to_string();
-    let mut plugin_dir: String = ".".to_string();
-    let mut port: u16 = 8090;
-    let mut gc_next = false;
-    let mut py_next = false;
-    let mut data_next = false;
-    let mut pub_next = false;
-    let mut pub_fqdn_next = false;
-    let mut port_next = false;
-    let mut db_url_next = false;
-    let mut database_name_next = false;
-    let mut plugin_dir_next = false;
-    let mut first_run = false;
-
-    for arg in args {
-        if gc_next {
-            gc_path = arg.clone();
-            gc_next = false;
-        } else if py_next {
-            py_path = arg.clone();
-            py_next = false;
-        } else if data_next {
-            data_path = arg.clone();
-            data_next = false;
-        } else if pub_next {
-            pub_path = arg.clone();
-            pub_next = false;
-        } else if pub_fqdn_next {
-            pub_fqdn = arg.clone();
-            pub_fqdn_next = false;
-        } else if port_next {
-            port = arg.parse().unwrap();
-            port_next = false;
-        } else if db_url_next {
-            db_url = arg.parse().unwrap();
-            db_url_next = false;
-        } else if database_name_next {
-            database_name = arg.parse().unwrap();
-            database_name_next = false;
-        } else if plugin_dir_next {
-            plugin_dir = arg.parse().unwrap();
-            plugin_dir_next = false;
-        }
-
-        if arg == "--gc-path" {
-            gc_next = true;
-        } else if arg == "--py-path" {
-            py_next = true;
-        } else if arg == "--data-path" {
-            data_next = true;
-        } else if arg == "--pub-url" {
-            pub_next = true;
-        } else if arg == "--pub-fqdn" {
-            pub_fqdn_next = true;
-        } else if arg == "--db-url" {
-            db_url_next = true;
-        } else if arg == "--database" {
-            database_name_next = true;
-        } else if arg == "--plugin-dir" {
-            plugin_dir_next = true;
-        } else if arg == "--first-run" {
-            first_run = true;
-        }
-    }
-
+    let args = Args::parse();
     // Log everything
     std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
@@ -175,9 +105,9 @@ async fn main() -> std::io::Result<()> {
             // Put options to internal structures and connect to database
             #[cfg(not(feature = "full_file_database"))]
             {
-                (*srv.deref_mut()).file_rw.connect(&data_path, "").await;
-                (*srv.deref_mut()).rw.database_name = database_name.clone();
-                (*srv.deref_mut()).rw.connect(&db_url, &data_path).await;
+                (*srv.deref_mut()).file_rw.connect(&args.data_path, "").await;
+                (*srv.deref_mut()).rw.database_name = args.db_name.clone();
+                (*srv.deref_mut()).rw.connect(&args.db_url, &args.data_path).await;
             }
             #[cfg(feature = "full_file_database")]
             {
@@ -188,18 +118,18 @@ async fn main() -> std::io::Result<()> {
                 );
                 (*srv.deref_mut()).rw.connect(&data_path, "").await;
             }
-            (*srv.deref_mut()).gc_path = gc_path.to_string();
-            (*srv.deref_mut()).py_path = py_path.to_string();
-            (*srv.deref_mut()).data_path = data_path.to_string();
-            (*srv.deref_mut()).public_url = pub_path.to_string();
-            (*srv.deref_mut()).port = port;
+            (*srv.deref_mut()).gc_path = args.gc_path.to_string();
+            (*srv.deref_mut()).py_path = args.py_path.to_string();
+            (*srv.deref_mut()).data_path = args.data_path.to_string();
+            (*srv.deref_mut()).public_url = args.pub_url.to_string();
+            (*srv.deref_mut()).port = args.port;
 
             // Load plugins
             info!("Loading plugins");
             info!("URL: {}", (*srv.deref_mut()).public_url);
             {
                 let s = &mut (*srv.deref_mut());
-                s.plugin_pool.load_plugins(&plugin_dir);
+                s.plugin_pool.load_plugins(&args.plugin_dir);
                 info!("Ping plugins");
                 s.plugin_pool.ping_plugins();
             }
@@ -241,7 +171,7 @@ async fn main() -> std::io::Result<()> {
 
             // If it is a first run, merge database.
             #[cfg(not(feature = "full_file_database"))]
-            if first_run {
+            if args.first_run {
                 let m = &mut (*srv.deref_mut());
                 info!("First run");
                 merge_database(&mut m.file_rw, &mut m.rw).await;
@@ -250,7 +180,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     // If it is first run, don't do anything else
-    if first_run {
+    if args.first_run {
         return Ok(());
     }
 
@@ -288,7 +218,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(data.clone())
             .wrap(Cors::permissive())
             .wrap(IdentityMiddleware::default())
-            .wrap(session_middleware(pub_fqdn.clone()))
+            .wrap(session_middleware(args.pub_fqdn.clone()))
             .route("/itm/edit", web::post().to(itm_edit))
             .route("/itm/del", web::post().to(itm_del))
             .route("/itm/list", web::get().to(itm_list))
@@ -321,7 +251,7 @@ async fn main() -> std::io::Result<()> {
         }
         app
     })
-    .bind(("0.0.0.0", port))?
+    .bind(("0.0.0.0", args.port))?
     .run();
     let th = rt::spawn(srv);
     let _ = th.await;
