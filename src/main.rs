@@ -108,7 +108,7 @@ async fn main() -> std::io::Result<()> {
         srv.public_url = args.pub_url.to_string();
         srv.port = args.bind_port;
 
-        info!("Connecting databases");
+        info!("Data storage: connecting");
         // Put options to internal structures and connect to database
         #[cfg(not(feature = "full_file_database"))]
         {
@@ -116,6 +116,8 @@ async fn main() -> std::io::Result<()> {
             srv.rw.database_name = args.db_name.clone();
             srv.rw.connect(&args.db_url, &args.data_path).await;
         }
+
+        info!("Data storage: connected");
 
         #[cfg(feature = "full_file_database")]
         {
@@ -128,21 +130,24 @@ async fn main() -> std::io::Result<()> {
         }
 
         // Load plugins
-        info!("Loading plugins");
+        info!("Plugins: loading");
         {
             let s = &mut srv;
             s.plugin_pool.load_plugins(&args.plugin_dir);
-            info!("Ping plugins");
+            info!("Plugins: ensuring operation");
             s.plugin_pool.ping_plugins();
         }
+        info!("Plugins: loaded");
 
         // Perform initialization checks, etc.
-        info!("Init checks");
+        info!("Flow: performing initialization checks");
         srv.init_checks().await;
+        info!("Flow: performed initialization checks");
 
         // Initialize Google Calendar
-        info!("Initialize Google Calendar");
+        info!("Flow: initializing Google Calendar");
         init_google(&mut srv).await;
+        info!("Flow: initialized Google Calendar");
 
         // Get all extra routes and put them to map
         {
@@ -174,7 +179,7 @@ async fn main() -> std::io::Result<()> {
         #[cfg(not(feature = "full_file_database"))]
         if args.first_run {
             let m = &mut srv;
-            info!("It is a first run - merge database and exit");
+            info!("Flow: first run - merge database and exit");
             merge_database(&mut m.file_rw, &mut m.rw).await;
         }
     }
@@ -186,7 +191,7 @@ async fn main() -> std::io::Result<()> {
 
     let data = Data::new(G_STATE.clone());
     let data_clone = data.clone();
-    info!("Starting server");
+    info!("Flow: Starting server");
 
     // periodic tasks
     thread::spawn(move || {

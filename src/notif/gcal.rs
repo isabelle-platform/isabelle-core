@@ -45,7 +45,7 @@ pub async fn sync_with_google(
         || settings.safe_str("sync_google_email", "") == ""
         || settings.safe_str("sync_google_cal_name", "") == ""
     {
-        info!("Don't sync with google");
+        info!("gcal: sync is disabled");
         return;
     }
 
@@ -58,7 +58,7 @@ pub async fn sync_with_google(
 
     write!(file, "{}", settings.strs["sync_google_creds"].clone()).ok();
 
-    info!("Syncing entry with Google...");
+    info!("gcal: synchronizing entry...");
     /* Run google calendar sync */
     Command::new(srv.py_path.clone())
         .current_dir(srv.gc_path.clone())
@@ -79,7 +79,7 @@ pub async fn sync_with_google(
         .arg(date_time)
         .spawn()
         .expect("Failed to sync with Google");
-    info!("Synchronization is done");
+    info!("gcal: synchronization is done");
 }
 
 /// Initialize Google Calendar
@@ -90,7 +90,7 @@ pub async fn init_google(srv: &mut crate::state::data::Data) -> String {
         || settings.safe_str("sync_google_email", "") == ""
         || settings.safe_str("sync_google_cal_name", "") == ""
     {
-        info!("Don't sync with google");
+        info!("gcal: sync is disabled");
         return "no_sync".to_string();
     }
 
