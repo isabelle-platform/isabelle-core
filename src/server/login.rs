@@ -248,25 +248,28 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
         return web::Json(user);
     }
 
-    // FIXME: optimize check
     let role_is = srv
         .rw
         .get_internals()
         .await
         .safe_str("user_role_prefix", "role_is_");
-    let all_users = srv.rw.get_all_items("user", "name", "").await;
-    for item in &all_users.map {
-        if item.1.strs.contains_key("email")
-            && item.1.strs["email"] == _user.as_ref().unwrap().id().unwrap()
-        {
-            user.username = _user.as_ref().unwrap().id().unwrap();
-            user.id = *item.0;
-            for bp in &item.1.bools {
-                if bp.0.starts_with(&role_is) {
-                    user.role.push(bp.0[8..].to_string());
+    let email = _user.as_ref().unwrap().id().unwrap();
+    if !login_has_bad_symbols(&email) {
+        let filter = "{ \"strs.email\": \"".to_owned() + &email + "\" }";
+        let all_users = srv.rw.get_all_items("user", "name", &filter).await;
+        for item in &all_users.map {
+            if item.1.strs.contains_key("email")
+                && item.1.strs["email"] == email
+            {
+                user.username = _user.as_ref().unwrap().id().unwrap();
+                user.id = *item.0;
+                for bp in &item.1.bools {
+                    if bp.0.starts_with(&role_is) {
+                        user.role.push(bp.0[8..].to_string());
+                    }
                 }
+                break;
             }
-            break;
         }
     }
 
