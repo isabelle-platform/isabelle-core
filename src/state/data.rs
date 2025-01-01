@@ -43,10 +43,21 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::thread;
 use tokio::runtime::Runtime;
+use threadpool::ThreadPool;
 
-struct IsabellePluginApi {}
+struct IsabellePluginApi {
+    thread_pool: ThreadPool,
+}
 
 unsafe impl Send for IsabellePluginApi {}
+
+impl IsabellePluginApi {
+    fn new() -> Self {
+        return IsabellePluginApi {
+            thread_pool: threadpool::Builder::new().build()
+        };
+    }
+}
 
 impl PluginApi for IsabellePluginApi {
     fn db_get_all_items(&self, collection: &str, sort_key: &str, filter: &str) -> ListResult {
@@ -56,7 +67,7 @@ impl PluginApi for IsabellePluginApi {
         let collection1 = collection.to_string().clone();
         let sort_key1 = sort_key.to_string().clone();
         let filter1 = filter.to_string().clone();
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async {
@@ -86,7 +97,7 @@ impl PluginApi for IsabellePluginApi {
         let collection1 = collection.to_string().clone();
         let sort_key1 = sort_key.to_string().clone();
         let filter1 = filter.to_string().clone();
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async {
@@ -113,7 +124,7 @@ impl PluginApi for IsabellePluginApi {
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
 
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async { srv_mut.rw.get_item(&collection1, id).await }))
@@ -129,7 +140,7 @@ impl PluginApi for IsabellePluginApi {
         let collection1 = collection.to_string().clone();
         let itm1 = itm.clone();
 
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async { srv_mut.rw.set_item(&collection1, &itm1, merge).await }))
@@ -144,7 +155,7 @@ impl PluginApi for IsabellePluginApi {
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
 
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async { srv_mut.rw.del_item(&collection1, id).await }))
@@ -162,7 +173,7 @@ impl PluginApi for IsabellePluginApi {
         let srv_lock = G_STATE.server.lock();
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async { srv_mut.rw.get_settings().await }))
@@ -177,7 +188,7 @@ impl PluginApi for IsabellePluginApi {
         let srv_lock = G_STATE.server.lock();
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async { check_role(srv_mut, &user, &role).await }))
@@ -202,7 +213,7 @@ impl PluginApi for IsabellePluginApi {
         let to = to.to_string();
         let subject = subject.to_string();
         let body = body.to_string();
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async { send_email(srv_mut, &to, &subject, &body).await }))
@@ -215,7 +226,7 @@ impl PluginApi for IsabellePluginApi {
         let srv_lock = G_STATE.server.lock();
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async { init_google(srv_mut).await }))
@@ -227,7 +238,7 @@ impl PluginApi for IsabellePluginApi {
         let srv_lock = G_STATE.server.lock();
         let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
+        self.thread_pool.execute(move || {
             let rt = Runtime::new().unwrap();
             sender
                 .send(rt.block_on(async { sync_with_google(srv_mut, add, name, date_time).await }))
@@ -319,7 +330,7 @@ impl Data {
             plugin_pool: PluginPool {
                 plugins: Vec::new(),
             },
-            plugin_api: Box::new(IsabellePluginApi {}),
+            plugin_api: Box::new(IsabellePluginApi::new()),
             opaque_data: HashMap::new(),
             none_object: None,
         }
