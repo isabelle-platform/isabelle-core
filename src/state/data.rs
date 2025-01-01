@@ -62,6 +62,11 @@ impl IsabellePluginApi {
     }
 }
 
+/*
+ * It is important to note that in all cases Plugin API is called through
+ * locations already protected by mutex. Therefore, we may safely omit
+ * the lock requirement.
+ */
 impl PluginApi for IsabellePluginApi {
     fn db_get_all_items(&self, collection: &str, sort_key: &str, filter: &str) -> ListResult {
         trace!("db_get_all_items++");
