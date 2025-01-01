@@ -27,7 +27,7 @@ use log::info;
 
 /// Check if login has bad symbols
 pub fn login_has_bad_symbols(login: &str) -> bool {
-    let bad_symbols = ['"', '\\', '{', '}', '[', ']'];
+    let bad_symbols = ['"', '\\', '{', '}', '[', ']', '$'];
     login.chars().any(|c| bad_symbols.contains(&c))
 }
 
