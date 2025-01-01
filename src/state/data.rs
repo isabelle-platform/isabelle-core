@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use log::trace;
 use std::sync::Arc;
 use crate::check_role;
 use crate::get_new_salt;
@@ -63,8 +64,7 @@ impl IsabellePluginApi {
 
 impl PluginApi for IsabellePluginApi {
     fn db_get_all_items(&self, collection: &str, sort_key: &str, filter: &str) -> ListResult {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("db_get_all_items++");
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
         let sort_key1 = sort_key.to_string().clone();
@@ -75,6 +75,7 @@ impl PluginApi for IsabellePluginApi {
             sender
                 .send(
                     rt.block_on(async {
+                        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
                         srv_mut
                             .rw
                             .get_all_items(&collection1, &sort_key1, &filter1)
@@ -82,7 +83,9 @@ impl PluginApi for IsabellePluginApi {
                     }))
                 .unwrap();
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("db_get_all_items--");
+        res
     }
 
     fn db_get_items(
@@ -95,8 +98,7 @@ impl PluginApi for IsabellePluginApi {
         skip: u64,
         limit: u64,
     ) -> ListResult {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("db_get_items++");
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
         let sort_key1 = sort_key.to_string().clone();
@@ -106,6 +108,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
                     srv_mut
                         .rw
                         .get_items(
@@ -121,11 +124,13 @@ impl PluginApi for IsabellePluginApi {
                 }))
                 .unwrap()
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("db_get_items--");
+        res
     }
+
     fn db_get_item(&self, collection: &str, id: u64) -> Option<Item> {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("db_get_item++");
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
         let rt = Arc::clone(&self.runtime);
@@ -133,16 +138,18 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
                     srv_mut.rw.get_item(&collection1, id).await
                 }))
                 .unwrap()
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("db_get_item--");
+        res
     }
 
     fn db_set_item(&self, collection: &str, itm: &Item, merge: bool) {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("db_set_item++");
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
         let itm1 = itm.clone();
@@ -151,16 +158,18 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
                     srv_mut.rw.set_item(&collection1, &itm1, merge).await
                 }))
                 .unwrap()
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("db_set_item--");
+        res
     }
 
     fn db_del_item(&self, collection: &str, id: u64) -> bool {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("db_del_item++");
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
         let rt = Arc::clone(&self.runtime);
@@ -168,48 +177,62 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
                     srv_mut.rw.del_item(&collection1, id).await
                 }))
                 .unwrap()
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("db_del_item--");
+        res
     }
 
     fn globals_get_public_url(&self) -> String {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
-        srv_mut.public_url.clone()
+        trace!("globals_get_public_url++");
+        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+        let url = srv_mut.public_url.clone();
+        trace!("globals_get_public_url--");
+        url
     }
+
     fn globals_get_settings(&self) -> Item {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("globals_get_settings++");
         let (sender, receiver) = mpsc::channel();
         let rt = Arc::clone(&self.runtime);
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
                     srv_mut.rw.get_settings().await
                 }))
                 .unwrap()
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("globals_get_settings--");
+        res
     }
 
     fn auth_check_role(&self, itm: &Option<Item>, role: &str) -> bool {
+        trace!("auth_check_role++");
         let user = itm.clone();
         let role = role.to_string();
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let (sender, receiver) = mpsc::channel();
         let rt = Arc::clone(&self.runtime);
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    check_role(srv_mut, &user, &role).await
+                    trace!("blocking check role 1");
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    trace!("blocking check role 2");
+                    let r = check_role(srv_mut, &user, &role).await;
+                    trace!("blocking check role 3");
+                    r
                 }))
                 .unwrap()
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("auth_check_role--");
+        res
     }
     fn auth_get_new_salt(&self) -> String {
         get_new_salt()
@@ -222,8 +245,7 @@ impl PluginApi for IsabellePluginApi {
     }
 
     fn fn_send_email(&self, to: &str, subject: &str, body: &str) {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("fn_send_email++");
         let (sender, receiver) = mpsc::channel();
         let to = to.to_string();
         let subject = subject.to_string();
@@ -232,61 +254,72 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
                     send_email(srv_mut, &to, &subject, &body).await
                 }))
                 .unwrap()
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("fn_send_email--");
+        res
     }
 
     fn fn_init_google(&self) -> String {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("fn_init_google++");
         let (sender, receiver) = mpsc::channel();
         let rt = Arc::clone(&self.runtime);
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
                     init_google(srv_mut).await
                 }))
                 .unwrap()
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("fn_init_google--");
+        res
     }
+
     fn fn_sync_with_google(&self, add: bool, name: String, date_time: String) {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("fn_sync_with_google++");
         let (sender, receiver) = mpsc::channel();
         let rt = Arc::clone(&self.runtime);
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
                     sync_with_google(srv_mut, add, name, date_time).await
                 }))
                 .unwrap()
         });
-        receiver.recv().unwrap()
+        let res = receiver.recv().unwrap();
+        trace!("fn_sync_with_google--");
+        res
     }
 
     fn fn_get_state(&self, handle: &str) -> &mut Option<Box<(dyn Any + Send)>> {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("fn_get_state++");
+        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
         if srv_mut.opaque_data.contains_key(handle) {
             let obj = srv_mut.opaque_data.get_mut(handle).unwrap();
+            trace!("fn_get_state--");
             return obj;
         } else {
+            trace!("fn_get_state--");
             return &mut srv_mut.none_object;
         }
     }
 
     fn fn_set_state(&self, handle: &str, value: Option<Box<(dyn Any + Send)>>) {
-        let srv_lock = G_STATE.server.lock();
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
+        trace!("fn_set_state++");
+        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
 
         if srv_mut.opaque_data.contains_key(handle) {
             srv_mut.opaque_data.remove(handle);
         }
         srv_mut.opaque_data.insert(handle.to_string(), value);
+        trace!("fn_set_state--");
     }
 }
 
