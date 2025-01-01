@@ -90,8 +90,7 @@ lazy_static! {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
-    // Log everything
-    std::env::set_var("RUST_LOG", "debug");
+
     env_logger::init();
 
     // Routes: they must be collected here in order to be set up in Actix
