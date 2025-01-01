@@ -37,8 +37,12 @@ pub async fn get_user(srv: &mut crate::state::data::Data, login: String) -> Opti
         return None;
     }
 
-    let filter = "{ \"$or\": [ { \"strs.login\": \"".to_owned() + &login + "\" }, "
-            + "{ \"strs.email\": \"" + &login + "\" } ]}";
+    let filter = "{ \"$or\": [ { \"strs.login\": \"".to_owned()
+        + &login
+        + "\" }, "
+        + "{ \"strs.email\": \""
+        + &login
+        + "\" } ]}";
     let users = srv.rw.get_all_items("user", "name", &filter).await;
     let tmp_login = login.to_lowercase();
     trace!("Users: {}", users.map.len());
@@ -80,8 +84,12 @@ pub async fn clear_otp(srv: &mut crate::state::data::Data, login: String) {
         return;
     }
 
-    let filter = "{ \"$or\": [ { \"strs.login\": \"".to_owned() + &login + "\" }, "
-            + "{ \"strs.email\": \"" + &login + "\" } ]}";
+    let filter = "{ \"$or\": [ { \"strs.login\": \"".to_owned()
+        + &login
+        + "\" }, "
+        + "{ \"strs.email\": \""
+        + &login
+        + "\" } ]}";
     let users = srv.rw.get_all_items("user", "name", &filter).await;
     let tmp_login = login.to_lowercase();
     for item in &users.map {

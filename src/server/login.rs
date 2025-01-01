@@ -258,9 +258,7 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
         let filter = "{ \"strs.email\": \"".to_owned() + &email + "\" }";
         let all_users = srv.rw.get_all_items("user", "name", &filter).await;
         for item in &all_users.map {
-            if item.1.strs.contains_key("email")
-                && item.1.strs["email"] == email
-            {
+            if item.1.strs.contains_key("email") && item.1.strs["email"] == email {
                 user.username = _user.as_ref().unwrap().id().unwrap();
                 user.id = *item.0;
                 for bp in &item.1.bools {

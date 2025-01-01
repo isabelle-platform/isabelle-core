@@ -64,8 +64,8 @@ use actix_session::storage::CookieSessionStore;
 use actix_session::SessionMiddleware;
 use actix_web::web::Data;
 use actix_web::{cookie::Key, cookie::SameSite, rt, web, App, HttpServer};
-use log::info;
 use clap::Parser;
+use log::info;
 use std::ops::DerefMut;
 use std::thread;
 
