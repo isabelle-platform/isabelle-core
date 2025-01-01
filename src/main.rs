@@ -103,6 +103,12 @@ async fn main() -> std::io::Result<()> {
         let mut srv_mut = srv_lock.borrow_mut();
         let mut srv = srv_mut.deref_mut();
 
+        srv.gc_path = args.gc_path.to_string();
+        srv.py_path = args.py_path.to_string();
+        srv.data_path = args.data_path.to_string();
+        srv.public_url = args.pub_url.to_string();
+        srv.port = args.bind_port;
+
         info!("Connecting databases");
         // Put options to internal structures and connect to database
         #[cfg(not(feature = "full_file_database"))]
@@ -121,15 +127,9 @@ async fn main() -> std::io::Result<()> {
             );
             srv.rw.connect(&data_path, "").await;
         }
-        srv.gc_path = args.gc_path.to_string();
-        srv.py_path = args.py_path.to_string();
-        srv.data_path = args.data_path.to_string();
-        srv.public_url = args.pub_url.to_string();
-        srv.port = args.port;
 
         // Load plugins
         info!("Loading plugins");
-        info!("URL: {}", srv.public_url);
         {
             let s = &mut srv;
             s.plugin_pool.load_plugins(&args.plugin_dir);
@@ -143,8 +143,7 @@ async fn main() -> std::io::Result<()> {
 
         // Initialize Google Calendar
         info!("Initialize Google Calendar");
-        let res = init_google(&mut srv).await;
-        info!("Result: {}", res);
+        init_google(&mut srv).await;
 
         // Get all extra routes and put them to map
         {
@@ -253,7 +252,7 @@ async fn main() -> std::io::Result<()> {
         }
         app
     })
-    .bind(("0.0.0.0", args.port))?
+    .bind((args.bind_addr, args.bind_port))?
     .run();
     let th = rt::spawn(srv);
     let _ = th.await;

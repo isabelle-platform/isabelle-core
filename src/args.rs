@@ -37,8 +37,12 @@ pub struct Args {
     pub py_path: String,
 
     /// Port number
-    #[arg(long)]
-    pub port: u16,
+    #[arg(long, default_value("0.0.0.0"))]
+    pub bind_addr: String,
+
+    /// Port number
+    #[arg(long, visible_alias("port"))]
+    pub bind_port: u16,
 
     /// First run
     #[arg(long)]
