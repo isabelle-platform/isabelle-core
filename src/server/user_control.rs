@@ -25,10 +25,21 @@ use crate::state::store::Store;
 use isabelle_dm::data_model::item::Item;
 use log::info;
 
+/// Check if login has bad symbols
+fn has_bad_symbols(login: &str) -> bool {
+    let bad_symbols = ['"', '\\', '{', '}', '[', ']'];
+    login.chars().any(|c| bad_symbols.contains(&c))
+}
+
 /// Get user by given login
 pub async fn get_user(srv: &mut crate::state::data::Data, login: String) -> Option<Item> {
-    // FIXME: optimize
-    let users = srv.rw.get_all_items("user", "name", "").await;
+    if has_bad_symbols(&login) {
+        return None;
+    }
+
+    let filter = "{ \"$or\": [ { \"strs.login\": \"".to_owned() + &login + "\" }, "
+            + "{ \"strs.email\": \"" + &login + "\" } ]}";
+    let users = srv.rw.get_all_items("user", "name", &filter).await;
     let tmp_login = login.to_lowercase();
     info!("Users: {}", users.map.len());
     for item in &users.map {
@@ -65,7 +76,13 @@ pub async fn check_role(
 
 /// Clear OTP for all users with given login/email
 pub async fn clear_otp(srv: &mut crate::state::data::Data, login: String) {
-    let users = srv.rw.get_all_items("user", "name", "").await;
+    if has_bad_symbols(&login) {
+        return;
+    }
+
+    let filter = "{ \"$or\": [ { \"strs.login\": \"".to_owned() + &login + "\" }, "
+            + "{ \"strs.email\": \"" + &login + "\" } ]}";
+    let users = srv.rw.get_all_items("user", "name", &filter).await;
     let tmp_login = login.to_lowercase();
     for item in &users.map {
         if item.1.strs.contains_key("login")
