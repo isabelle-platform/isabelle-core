@@ -23,6 +23,7 @@ pipeline {
         }
       }
     }
+
     stage('Perform checks') {
       steps {
         /* Update Cargo */
@@ -34,11 +35,20 @@ pipeline {
         /* Fail if 'cargo fmt' changes anything */
         sh 'cargo fmt && git diff --exit-code'
 
-        /* Fail if tag is not updated with current version */
-        sh 'git tag | grep ${SHORT_VERSION}'
-
         /* Fail if Cargo.toml is not updated with current version */
         sh 'cat Cargo.toml | grep ${SHORT_VERSION}'
+      }
+    }
+
+    stage('Perform release checks') {
+      when {
+        expression {
+          BRANCH_NAME == 'main'
+        }
+      }
+      steps {
+        /* Fail if tag is not updated with current version */
+        sh 'git tag | grep ${SHORT_VERSION}'
       }
     }
 
