@@ -22,24 +22,13 @@
  * DEALINGS IN THE SOFTWARE.
  */
 use crate::handler::route_call::*;
-use crate::server::user_control::*;
 use crate::state::store::Store;
 use crate::State;
 use actix_identity::Identity;
 use actix_multipart::Multipart;
 use actix_web::{HttpRequest, HttpResponse};
-use futures_util::TryStreamExt;
-use isabelle_dm::data_model::data_object_action::DataObjectAction;
-use isabelle_dm::data_model::item::Item;
-use isabelle_dm::data_model::process_result::ProcessResult;
-use isabelle_plugin_api::api::WebResponse;
-use log::{error, info};
+use log::info;
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
-use std::path::Path;
-use uuid::Uuid;
-use crate::handler::web_response::*;
 
 /// Call HTTP URL hooks. This function checks actual location from request
 /// first.

@@ -22,11 +22,9 @@
  * DEALINGS IN THE SOFTWARE.
  */
 use crate::server::user_control::*;
-use crate::state::store::Store;
-use crate::State;
 use actix_identity::Identity;
 use actix_multipart::Multipart;
-use actix_web::{HttpRequest, HttpResponse};
+use actix_web::HttpResponse;
 use futures_util::TryStreamExt;
 use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use isabelle_dm::data_model::item::Item;
