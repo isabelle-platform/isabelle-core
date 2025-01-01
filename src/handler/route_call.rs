@@ -183,18 +183,7 @@ pub async fn call_url_route(
     return HttpResponse::NotFound().into();
 }
 
-/// Call URL POST route that requires authenticated user.
-pub async fn call_url_post_route(
-    mut srv: &mut crate::state::data::Data,
-    user: Identity,
-    hndl: &str,
-    query: &str,
-    mut payload: Multipart,
-) -> HttpResponse {
-    let usr: Option<Item>;
-
-    usr = get_user(&mut srv, user.id().unwrap()).await;
-
+pub async fn handle_item_files(mut payload: Multipart) -> (Item, HashMap<String, String>) {
     let mut post_itm = Item::new();
     let mut files: HashMap<String, String> = HashMap::new();
     let mut files_count = 0;
@@ -240,6 +229,30 @@ pub async fn call_url_post_route(
         post_itm.set_strstr("multipart-files", &files);
     }
 
+    return (post_itm, files);
+}
+
+pub async fn handle_file_cleanup(files: &HashMap<String, String>) {
+    for file in files {
+        info!("Removed file {}", file.1);
+        let _ = std::fs::remove_file(file.1);
+    }
+}
+
+/// Call URL POST route that requires authenticated user.
+pub async fn call_url_post_route(
+    mut srv: &mut crate::state::data::Data,
+    user: Identity,
+    hndl: &str,
+    query: &str,
+    payload: Multipart,
+) -> HttpResponse {
+    let usr: Option<Item>;
+
+    usr = get_user(&mut srv, user.id().unwrap()).await;
+
+    let (post_itm, files) = handle_item_files(payload).await;
+
     let mut response: WebResponse = WebResponse::Ok;
     for plugin in &mut srv.plugin_pool.plugins {
         let wr = plugin.route_url_post_hook(&srv.plugin_api, hndl, &usr, query, &post_itm);
@@ -253,10 +266,7 @@ pub async fn call_url_post_route(
         }
     }
 
-    for file in files {
-        info!("Removed file {}", file.1);
-        let _ = std::fs::remove_file(file.1);
-    }
+    handle_file_cleanup(&files).await;
 
     return conv_response(response);
 }
@@ -299,7 +309,7 @@ pub async fn call_url_unprotected_post_route(
     user: Option<Identity>,
     hndl: &str,
     query: &str,
-    mut payload: Multipart,
+    payload: Multipart,
 ) -> HttpResponse {
     let mut usr: Option<Item> = None;
 
@@ -307,50 +317,7 @@ pub async fn call_url_unprotected_post_route(
         usr = get_user(&mut srv, user.unwrap().id().unwrap()).await;
     }
 
-    let mut post_itm = Item::new();
-    let mut files: HashMap<String, String> = HashMap::new();
-    let mut files_count = 0;
-    let path = Path::new("./tmp");
-
-    if let Err(e) = fs::create_dir_all(&path) {
-        error!("Failed to create directory: {}", e);
-    }
-
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        if field.name() == "item" {
-            while let Ok(Some(chunk)) = field.try_next().await {
-                let data = chunk;
-                let v = &data.to_vec();
-                let strv = std::str::from_utf8(v).unwrap_or("{}");
-                let new_itm: Item = serde_json::from_str(strv).unwrap_or(Item::new());
-                post_itm.merge(&new_itm);
-            }
-        } else {
-            let cd = field.content_disposition();
-            let filename = cd
-                .get_filename()
-                .map_or_else(|| Uuid::new_v4().to_string(), sanitize_filename::sanitize);
-            let filepath = format!("./tmp/{filename}");
-            let f = std::fs::File::create(filepath.clone());
-
-            info!("Created file {}", filepath);
-            files.insert(files_count.to_string(), filepath);
-            files_count = files_count + 1;
-
-            if let Ok(mut file) = f {
-                while let Ok(Some(chunk)) = field.try_next().await {
-                    let _ = file.write_all(&chunk);
-                }
-            } else {
-                error!("Failed to open file");
-            }
-        }
-    }
-
-    if files_count > 0 {
-        post_itm.set_strstr("multipart-files", &files);
-    }
-
+    let (post_itm, files) = handle_item_files(payload).await;
     let mut response: WebResponse = WebResponse::Ok;
 
     for plugin in &mut srv.plugin_pool.plugins {
@@ -366,10 +333,7 @@ pub async fn call_url_unprotected_post_route(
         }
     }
 
-    for file in files {
-        info!("Removed file {}", file.1);
-        let _ = std::fs::remove_file(file.1);
-    }
+    handle_file_cleanup(&files).await;
 
     return conv_response(response);
 }
