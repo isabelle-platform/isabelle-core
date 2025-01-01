@@ -155,7 +155,7 @@ async fn main() -> std::io::Result<()> {
             for route in routes {
                 let parts: Vec<&str> = route.1.split(":").collect();
                 new_routes.insert(parts[0].to_string(), parts[1].to_string());
-                info!("Route: {} : {}", parts[0], parts[1]);
+                info!("Adding route: {} : {}", parts[0], parts[1]);
             }
         }
         {
@@ -167,7 +167,7 @@ async fn main() -> std::io::Result<()> {
             for route in routes {
                 let parts: Vec<&str> = route.1.split(":").collect();
                 new_unprotected_routes.insert(parts[0].to_string(), parts[1].to_string());
-                info!("Unprotected route: {} : {}", parts[0], parts[1]);
+                info!("Adding unprotected route: {} : {}", parts[0], parts[1]);
             }
         }
 
@@ -175,7 +175,7 @@ async fn main() -> std::io::Result<()> {
         #[cfg(not(feature = "full_file_database"))]
         if args.first_run {
             let m = &mut srv;
-            info!("First run");
+            info!("It is a first run - merge database and exit");
             merge_database(&mut m.file_rw, &mut m.rw).await;
         }
     }
