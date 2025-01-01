@@ -74,7 +74,6 @@ fn session_middleware(_pub_fqdn: String) -> SessionMiddleware<CookieSessionStore
         .cookie_same_site(SameSite::None)
         .cookie_path("/".into())
         .cookie_name(String::from("isabelle-cookie"))
-        //.cookie_domain(Some(pub_fqdn.into()))
         .cookie_content_security(CookieContentSecurity::Private)
         .cookie_http_only(true)
         .cookie_secure(true)
