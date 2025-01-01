@@ -38,31 +38,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use uuid::Uuid;
-
-/// Convert internal Web response to proper HttpResponse
-fn conv_response(resp: WebResponse) -> HttpResponse {
-    match resp {
-        WebResponse::Ok => {
-            return HttpResponse::Ok().into();
-        }
-        WebResponse::OkData(text) => {
-            return HttpResponse::Ok().body(text);
-        }
-        WebResponse::NotFound => {
-            return HttpResponse::NotFound().into();
-        }
-        WebResponse::Unauthorized => {
-            return HttpResponse::Unauthorized().into();
-        }
-        WebResponse::BadRequest => {
-            return HttpResponse::BadRequest().into();
-        }
-        WebResponse::Forbidden => {
-            return HttpResponse::Forbidden().into();
-        }
-        WebResponse::NotImplemented => todo!(),
-    }
-}
+use crate::handler::web_response::*;
 
 /// Call hook associated with pre-editing of item data.
 pub async fn call_item_pre_edit_hook(
