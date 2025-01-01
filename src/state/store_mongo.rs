@@ -29,7 +29,7 @@ extern crate serde_json;
 use crate::state::store::Store;
 use async_trait::async_trait;
 use isabelle_dm::data_model::item::*;
-use log::info;
+use log::{debug, info, trace};
 use serde_json::Value;
 
 use mongodb::{bson::doc, Client, Collection, IndexModel};
@@ -134,10 +134,10 @@ impl Store for StoreMongo {
             info!("Connected {} / {}!", url, self.database_name);
             let internals = self.get_internals().await;
             let collections = internals.safe_strstr("collections", &HashMap::new());
-            info!("Collections: {}", collections.len());
+            debug!("Collections: {}", collections.len());
             let db = self.client.as_ref().unwrap().database(&self.database_name);
             for coll_name in collections {
-                info!("Create collection {}", &coll_name.1);
+                debug!("Create collection {}", &coll_name.1);
                 db.create_collection(&coll_name.1).await.unwrap();
                 let coll: Collection<Item> = db.collection(&coll_name.1);
                 let index: IndexModel = IndexModel::builder().keys(doc! { "id": 1 }).build();
@@ -281,7 +281,7 @@ impl Store for StoreMongo {
             eff_limit = limit as i64;
         }
 
-        info!(
+        debug!(
             "Getting {} in range {} - {} ({}-{}) skip {} limit {} sort key {} (care {}) filter {}",
             &collection,
             eff_id_min,
@@ -303,17 +303,17 @@ impl Store for StoreMongo {
                 .collection(collection);
 
             let json_bson: Document = if filter != "" {
-                info!("Using real filter: {}", filter);
+                debug!("Using real filter: {}", filter);
                 let bson_document = self.json_to_bson(filter).await;
                 match bson_document {
                     Ok(d) => d,
                     Err(_err) => {
-                        info!("Using empty filter due to error");
+                        trace!("Using empty filter due to error");
                         Document::new()
                     }
                 }
             } else {
-                info!("Using empty filter");
+                trace!("Using empty filter");
                 Document::new()
             };
 
@@ -338,7 +338,7 @@ impl Store for StoreMongo {
                             .insert(c.as_ref().unwrap().id, c.as_ref().unwrap().clone());
                     }
                     Err(_e) => {
-                        info!("Error: {}", _e);
+                        debug!("Error: {}", _e);
                         break;
                     }
                 };
@@ -362,7 +362,7 @@ impl Store for StoreMongo {
             lr.total_count = itms.len() as u64;
         }
 
-        info!(
+        debug!(
             " - result: {} items, total {}",
             lr.map.len(),
             lr.total_count
