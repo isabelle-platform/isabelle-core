@@ -121,7 +121,7 @@ pub async fn call_item_auth_hook(
 }
 
 /// Call list filter hook, allowing for hiding specific list items
-pub async fn call_itm_list_filter_hook(
+pub async fn call_item_list_filter_hook(
     srv: &mut crate::state::data::Data,
     hndl: &str,
     user: &Option<Item>,
@@ -134,7 +134,7 @@ pub async fn call_itm_list_filter_hook(
     }
 }
 
-pub async fn call_itm_list_db_filter_hook(
+pub async fn call_item_list_db_filter_hook(
     srv: &mut crate::state::data::Data,
     hndl: &str,
     user: &Option<Item>,
