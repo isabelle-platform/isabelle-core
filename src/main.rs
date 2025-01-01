@@ -41,7 +41,7 @@ mod server;
 mod state;
 mod util;
 
-use crate::handler::route::call_periodic_job_hook;
+use crate::handler::route_call::call_periodic_job_hook;
 use crate::handler::route::url_post_route;
 use crate::handler::route::url_route;
 use crate::handler::route::url_unprotected_post_route;

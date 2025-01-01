@@ -22,4 +22,5 @@
  * DEALINGS IN THE SOFTWARE.
  */
 pub mod route;
+pub mod route_call;
 pub mod web_response;

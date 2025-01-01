@@ -26,7 +26,7 @@ use std::sync::Arc;
 use crate::check_role;
 use crate::get_new_salt;
 use crate::get_password_hash;
-use crate::handler::route::call_collection_read_hook;
+use crate::handler::route_call::call_collection_read_hook;
 use crate::init_google;
 use crate::send_email;
 use crate::state::store::Store;

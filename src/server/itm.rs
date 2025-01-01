@@ -21,7 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use crate::handler::route::*;
+use crate::handler::route_call::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
 use crate::state::store::Store;
@@ -76,7 +76,7 @@ pub async fn itm_edit(
             .await
             .safe_strstr("itm_auth_hook", &HashMap::new());
         for route in routes {
-            if !call_itm_auth_hook(
+            if !call_item_auth_hook(
                 &mut srv,
                 &route.1,
                 &usr,
@@ -222,7 +222,7 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
             .await
             .safe_strstr("itm_auth_hook", &HashMap::new());
         for route in routes {
-            if !call_itm_auth_hook(&mut srv, &route.1, &usr, &mc.collection, itm.id, None, true)
+            if !call_item_auth_hook(&mut srv, &route.1, &usr, &mc.collection, itm.id, None, true)
                 .await
             {
                 return HttpResponse::Forbidden().into();

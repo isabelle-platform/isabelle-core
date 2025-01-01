@@ -21,7 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use crate::handler::route::call_otp_hook;
+use crate::handler::route_call::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
 use crate::state::store::Store;
