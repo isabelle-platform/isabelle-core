@@ -59,7 +59,7 @@ pipeline {
         stage('Build (Linux)') {
           steps {
             sh 'which cargo'
-            sh 'env RUSTFLAGS="${RUST_STATIC_FLAGS}" CROSS_CONTAINER_IN_CONTAINER=true cross build --target=x86_64-unknown-linux-gnu --release'
+            sh 'env RUSTFLAGS="${RUST_STATIC_FLAGS}" CROSS_CONTAINER_UID=0 CROSS_CONTAINER_GID=0 CROSS_CONTAINER_IN_CONTAINER=true cross build --target=x86_64-unknown-linux-gnu --release'
           }
         }
       }
