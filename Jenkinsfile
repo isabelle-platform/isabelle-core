@@ -4,7 +4,7 @@ pipeline {
     dockerfile {
       filename 'Dockerfile_ubuntu_2404'
       dir 'tools/build-env'
-      args '--mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock'
+      args '--mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock -u 0:0'
     }
   }
 
