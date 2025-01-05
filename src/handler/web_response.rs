@@ -33,6 +33,9 @@ pub fn conv_response(resp: WebResponse) -> HttpResponse {
         WebResponse::OkData(text) => {
             return HttpResponse::Ok().body(text);
         }
+        WebResponse::OkFile(name, _data) => {
+            return HttpResponse::Ok().body(name);
+        }
         WebResponse::NotFound => {
             return HttpResponse::NotFound().into();
         }
