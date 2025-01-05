@@ -209,5 +209,8 @@ pipeline {
     failure {
       sh './ttg/ttg_send_notification --env --ignore-bad -- "${JOB_NAME}/${BUILD_NUMBER}: FAILED. See details in ${BUILD_URL}"'
     }
+    always {
+      sh 'chmod -R 777 target'
+    }
   }
 }
