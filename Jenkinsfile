@@ -28,6 +28,9 @@ pipeline {
 
     stage('Perform checks') {
       steps {
+        /* Mark directory as safe - we might have dubious permissions here due to uid manipulations */
+        sh 'git config --global --add safe.directory "*"'
+
         /* Update Cargo */
         sh 'cargo update -p isabelle-dm'
 
