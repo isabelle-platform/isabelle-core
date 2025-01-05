@@ -31,9 +31,6 @@ pipeline {
         /* Update Cargo */
         sh 'cargo update -p isabelle-dm'
 
-        /* Install cross */
-        sh 'cargo install cross --git https://github.com/cross-rs/cross'
-
         /* Fail if 'cargo fix' changes anything */
         sh 'cargo fix && git diff --exit-code'
 
