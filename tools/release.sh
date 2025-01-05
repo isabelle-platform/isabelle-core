@@ -34,7 +34,12 @@ fi
 
 # Get build & target folder, normalize output path
 build_folder="$(cd ${build_folder} && pwd)"
-target_folder="$TOP_DIR/target/release"
+if [ -d "${TOP_DIR}/target/x86_64-unknown-linux-gnu/release" ] ; then
+    target_folder="$TOP_DIR/target/x86_64-unknown-linux-gnu/release"
+else
+    target_folder="$TOP_DIR/target/release"
+fi
+
 output="$(lib_core_normalize_filepath ${output})"
 
 # Get to target folder
