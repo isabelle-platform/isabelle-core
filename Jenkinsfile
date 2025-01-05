@@ -4,7 +4,7 @@ pipeline {
     dockerfile {
       filename 'Dockerfile_ubuntu_2404'
       dir 'tools/build-env'
-      args '-v /var/run/docker.sock:/var/run/docker.sock'
+      args '-v /var/run/docker.sock:/var/run/docker.sock:Z'
     }
   }
 
