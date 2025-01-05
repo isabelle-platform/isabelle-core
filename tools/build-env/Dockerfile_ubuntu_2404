@@ -21,3 +21,5 @@ RUN chmod -R 777 /root
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN cargo install cross --git https://github.com/cross-rs/cross
+
+RUN chmod -R 777 /root/.cargo
