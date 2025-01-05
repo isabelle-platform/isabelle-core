@@ -58,7 +58,7 @@ pipeline {
       parallel {
         stage('Build (Linux)') {
           steps {
-            sh 'env RUSTFLAGS=${RUST_STATIC_FLAGS} cross build --target=x86_64-unknown-linux-gnu --release'
+            sh 'env RUSTFLAGS=${RUST_STATIC_FLAGS} CROSS_CONTAINER_IN_CONTAINER=true cross build --target=x86_64-unknown-linux-gnu --release'
           }
         }
       }
