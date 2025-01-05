@@ -21,7 +21,7 @@ cron = "0.12.1"
 env_logger = "0.8.4"
 futures-util = "0.3.29"
 isabelle-dm = { "git" = "https://github.com/isabelle-platform/isabelle-dm", tag = "1.4.1" }
-isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.7.1" }
+isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.8.0" }
 lazy_static = "1.4.0"
 lettre = { version = "0.11.11", features = ["rustls-tls", "smtp-transport", "pool", "hostname", "builder"], default-features = false }
 log = "0.4.0"
