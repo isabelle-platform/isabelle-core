@@ -4,6 +4,7 @@ pipeline {
     dockerfile {
       filename 'Dockerfile_ubuntu_2404'
       dir 'tools/build-env'
+      args '-v /var/run/docker.sock:/var/run/docker.sock'
     }
   }
 
@@ -12,6 +13,7 @@ pipeline {
     FULL_VERSION = sh(script: "./tools/get_version.sh full", returnStdout: true).trim()
     SHORT_VERSION = sh(script: "./tools/get_version.sh", returnStdout: true).trim()
     BRANCH_FOLDER = sh(script: "./tools/get_branch_folder.sh ${BRANCH_NAME}", returnStdout: true).trim()
+    RUST_STATIC_FLAGS = '-C target-feature=-crt-static'
   }
 
   stages {
@@ -28,6 +30,9 @@ pipeline {
       steps {
         /* Update Cargo */
         sh 'cargo update -p isabelle-dm'
+
+        /* Install cross */
+        sh 'cargo install cross --git https://github.com/cross-rs/cross'
 
         /* Fail if 'cargo fix' changes anything */
         sh 'cargo fix && git diff --exit-code'
@@ -56,7 +61,7 @@ pipeline {
       parallel {
         stage('Build (Linux)') {
           steps {
-            sh 'cargo build --release'
+            sh 'env RUSTFLAGS=${RUST_STATIC_FLAGS} cross build --target=x86_64-unknown-linux-gnu --release'
           }
         }
       }
