@@ -79,6 +79,8 @@ pipeline {
             sh './tools/release.sh --out build/isabelle-core-${BRANCH_FOLDER}-${BUILD_NUMBER}-linux-x86_64.tar.xz'
             /* Copy branch-build-linux to branch-latest-linux */
             sh 'cp build/isabelle-core-${BRANCH_FOLDER}-${BUILD_NUMBER}-linux-x86_64.tar.xz build/isabelle-core-${BRANCH_FOLDER}-latest-linux-x86_64.tar.xz'
+            /* chmod build folder */
+            sh 'chmod -R 777 build'
           }
         }
         stage('Prepare artifacts (versioned)') {
@@ -211,6 +213,7 @@ pipeline {
     }
     always {
       sh 'chmod -R 777 target'
+      sh 'chmod -R 777 build'
     }
   }
 }
