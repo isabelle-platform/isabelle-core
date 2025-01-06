@@ -41,6 +41,7 @@ database="isabelle"
 gh_login=""
 gh_password=""
 plugin_dir=""
+cookie_http_insecure=""
 
 while test -n "$1" ; do
     case "$1" in
@@ -87,6 +88,9 @@ while test -n "$1" ; do
             plugin_dir="$2"
             shift 1
             ;;
+        --cookie-http-insecure)
+            cookie_http_insecure="true"
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 1
@@ -127,5 +131,6 @@ RUST_LOG=info RUST_BACKTRACE=1 "${binary}" \
     --gc-path "${gc_path}" \
     --database "${database}" \
     --py-path "${py_path}" \
+    ${cookie_http_insecure:+--cookie-http-insecure} \
     ${plugin_dir+--plugin-dir} ${plugin_dir:+"${plugin_dir}"} \
     ${first_run}
