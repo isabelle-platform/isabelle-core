@@ -70,7 +70,10 @@ use std::ops::DerefMut;
 use std::thread;
 
 /// Session middleware based on cookies
-fn session_middleware(_pub_fqdn: String, cookie_http_insecure: bool) -> SessionMiddleware<CookieSessionStore> {
+fn session_middleware(
+    _pub_fqdn: String,
+    cookie_http_insecure: bool,
+) -> SessionMiddleware<CookieSessionStore> {
     SessionMiddleware::builder(CookieSessionStore::default(), Key::from(&[0; 64]))
         .session_lifecycle(BrowserSession::default())
         .cookie_same_site(SameSite::None)
@@ -223,7 +226,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(data.clone())
             .wrap(Cors::permissive())
             .wrap(IdentityMiddleware::default())
-            .wrap(session_middleware(args.pub_fqdn.clone(), args.cookie_http_insecure))
+            .wrap(session_middleware(
+                args.pub_fqdn.clone(),
+                args.cookie_http_insecure,
+            ))
             .route("/itm/edit", web::post().to(itm_edit))
             .route("/itm/del", web::post().to(itm_del))
             .route("/itm/list", web::get().to(itm_list))
