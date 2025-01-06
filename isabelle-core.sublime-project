@@ -30,7 +30,7 @@
 		{
 			"cmd":
 			[
-				"make && ./run.sh --data-path ./data-sample --database sample --plugin-dir . "
+				"make && ./run.sh --data-path ./data-sample --database sample --plugin-dir . --cookie-http-insecure"
 			],
 			"name": "Sample Core - build & run",
 			"shell": true,
@@ -40,7 +40,7 @@
 		{
 			"cmd":
 			[
-				"make && ./run.sh --data-path ./data-evolucao --database evolucao"
+				"make && ./run.sh --data-path ./data-evolucao --database evolucao --plugin-dir . --cookie-http-insecure"
 			],
 			"name": "Evolucao Core - build & run",
 			"shell": true,
@@ -50,7 +50,7 @@
 		{
 			"cmd":
 			[
-				"make && ./run.sh --data-path ./data-intranet --database intranet"
+				"make && ./run.sh --data-path ./data-intranet --database intranet --plugin-dir . --cookie-http-insecure"
 			],
 			"name": "IntraNet Core - build & run",
 			"shell": true,
@@ -60,7 +60,7 @@
 		{
 			"cmd":
 			[
-				"make && ./run.sh --data-path ./data-cloudcpe --database cloudcpe --plugin-dir ."
+				"make && ./run.sh --data-path ./data-cloudcpe --database cloudcpe --plugin-dir . --cookie-http-insecure"
 			],
 			"name": "CloudCPE Core - build & run",
 			"shell": true,
