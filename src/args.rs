@@ -68,6 +68,10 @@ pub struct Args {
     pub bind_port: u16,
 
     /// First run
-    #[arg(long)]
+    #[arg(long, default_value_t = false)]
     pub first_run: bool,
+
+    /// Set http-secure on cookies to false
+    #[arg(long, default_value_t = false)]
+    pub cookie_http_insecure: bool,
 }
