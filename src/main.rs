@@ -74,9 +74,14 @@ fn session_middleware(
     _pub_fqdn: String,
     cookie_http_insecure: bool,
 ) -> SessionMiddleware<CookieSessionStore> {
+    let same_site = if cookie_http_insecure {
+        SameSite::Lax
+    } else {
+        SameSite::None
+    };
     SessionMiddleware::builder(CookieSessionStore::default(), Key::from(&[0; 64]))
         .session_lifecycle(BrowserSession::default())
-        .cookie_same_site(SameSite::None)
+        .cookie_same_site(same_site)
         .cookie_path("/".into())
         .cookie_name(String::from("isabelle-cookie"))
         .cookie_content_security(CookieContentSecurity::Private)
