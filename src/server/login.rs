@@ -151,6 +151,7 @@ pub async fn register(
         let mut itm = Item::new();
 
         itm.set_str("name", &login);
+        itm.set_str("login", &login);
         itm.set_str("email", &email);
 
         srv.rw.set_item("user", &itm, false).await;
