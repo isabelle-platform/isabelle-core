@@ -66,7 +66,7 @@ pub async fn gen_otp(
     let usr = get_user(&mut srv, lu.username.clone()).await;
 
     if usr == None {
-        info!("No user {} found, couldn't log in", lu.username.clone());
+        info!("No user {} found, couldn't otp", lu.username.clone());
         return web::Json(ProcessResult {
             succeeded: false,
             error: "Invalid login".to_string(),
@@ -127,25 +127,30 @@ pub async fn register(
     let mut srv = srv_lock.borrow_mut();
     info!("User name: {}", login);
     let mut usr = get_user(&mut srv, login.clone()).await;
+
     if usr.is_some() {
-        return web::Json(ProcessResult {
-            succeeded: false,
-            error: "Login is already used".to_string(),
-        });
+        if usr.unwrap().safe_bool("logged_once", false) {
+            return web::Json(ProcessResult {
+                succeeded: false,
+                error: "Login is already used".to_string(),
+            });
+        }
     }
 
     usr = get_user(&mut srv, email.clone()).await;
     if usr.is_some() {
-        return web::Json(ProcessResult {
-            succeeded: false,
-            error: "Email is already used".to_string(),
-        });
+        if usr.unwrap().safe_bool("logged_once", false) {
+            return web::Json(ProcessResult {
+                succeeded: false,
+                error: "Email is already used".to_string(),
+            });
+        }
     }
 
     if dry != "true" {
         let mut itm = Item::new();
 
-        itm.set_str("username", &login);
+        itm.set_str("name", &login);
         itm.set_str("email", &email);
 
         srv.rw.set_item("user", &itm, false).await;
@@ -218,6 +223,10 @@ pub async fn login(
         if (pw != "" && verify_password(&lu.password, &pw)) || (otp != "" && lu.password == otp) {
             // Password matches - log in.
             Identity::login(&req.extensions(), itm_real.safe_str("email", "")).unwrap();
+
+            let mut logged = Item::new();
+            logged.set_bool("logged_once", true);
+            srv.rw.set_item("user", &logged, true).await;
             info!("Logged in as {}", lu.username);
         } else {
             // Password doesn't match - error out.
