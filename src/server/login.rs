@@ -21,7 +21,6 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use isabelle_dm::data_model::item::Item;
 use crate::handler::route_call::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
@@ -32,6 +31,7 @@ use actix_identity::Identity;
 use actix_multipart::Multipart;
 use actix_web::{web, HttpMessage, HttpRequest, HttpResponse, Responder};
 use futures_util::TryStreamExt;
+use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::process_result::ProcessResult;
 use isabelle_dm::transfer_model::detailed_login_user::DetailedLoginUser;
 use isabelle_dm::transfer_model::login_user::LoginUser;
@@ -104,9 +104,9 @@ pub async fn register(
     mut payload: Multipart,
     _req: HttpRequest,
 ) -> impl Responder {
-    let mut login : String = "".to_string();
-    let mut email : String = "".to_string();
-    let mut dry : String = "".to_string();
+    let mut login: String = "".to_string();
+    let mut email: String = "".to_string();
+    let mut dry: String = "".to_string();
 
     // Take the username/password from POST data
     while let Ok(Some(mut field)) = payload.try_next().await {
