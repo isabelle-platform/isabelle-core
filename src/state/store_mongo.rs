@@ -372,6 +372,10 @@ impl Store for StoreMongo {
 
     async fn set_item(&mut self, collection: &str, exp_itm: &Item, merge: bool) {
         let mut itm = exp_itm.clone();
+        if itm.bools.contains_key("__security_preserve") {
+            itm.bools.remove("__security_preserve");
+        }
+
         if itm.id == u64::MAX {
             let coll_id = self.collections[collection];
             if self.items.contains_key(&coll_id) {
