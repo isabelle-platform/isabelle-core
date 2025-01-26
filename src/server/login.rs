@@ -153,6 +153,7 @@ pub async fn register(
         itm.set_str("name", &login);
         itm.set_str("login", &login);
         itm.set_str("email", &email);
+        itm.set_bool("role_is_active", true);
 
         srv.rw.set_item("user", &itm, false).await;
     }
