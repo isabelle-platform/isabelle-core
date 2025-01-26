@@ -226,6 +226,7 @@ pub async fn login(
             Identity::login(&req.extensions(), itm_real.safe_str("email", "")).unwrap();
 
             let mut logged = Item::new();
+            logged.id = itm_real.id;
             logged.set_bool("logged_once", true);
             srv.rw.set_item("user", &logged, true).await;
             info!("Logged in as {}", lu.username);
