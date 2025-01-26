@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use isabelle_dm::data_model::item::Item;
 use crate::handler::route_call::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
@@ -87,6 +88,67 @@ pub async fn gen_otp(
         for route in routes {
             call_otp_hook(&mut srv, &route.1, new_usr_itm.clone()).await;
         }
+    }
+
+    return web::Json(ProcessResult {
+        succeeded: true,
+        error: "".to_string(),
+    });
+}
+
+/// Log in into the system using username/password pair provided inside the
+/// POST data.
+pub async fn register(
+    _user: Option<Identity>,
+    data: web::Data<State>,
+    mut payload: Multipart,
+    _req: HttpRequest,
+) -> impl Responder {
+    let mut login : String = "".to_string();
+    let mut email : String = "".to_string();
+    let mut dry : String = "".to_string();
+
+    // Take the username/password from POST data
+    while let Ok(Some(mut field)) = payload.try_next().await {
+        while let Ok(Some(chunk)) = field.try_next().await {
+            let data = chunk;
+
+            if field.name() == "login" {
+                login = std::str::from_utf8(&data.to_vec()).unwrap().to_string();
+            } else if field.name() == "email" {
+                email = std::str::from_utf8(&data.to_vec()).unwrap().to_string();
+            } else if field.name() == "dry" {
+                dry = std::str::from_utf8(&data.to_vec()).unwrap().to_string();
+            }
+        }
+    }
+
+    let srv_lock = data.server.lock();
+    let mut srv = srv_lock.borrow_mut();
+    info!("User name: {}", login);
+    let mut usr = get_user(&mut srv, login.clone()).await;
+    if usr.is_some() {
+        return web::Json(ProcessResult {
+            succeeded: false,
+            error: "Login is already used".to_string(),
+        });
+    }
+
+    usr = get_user(&mut srv, email.clone()).await;
+    if usr.is_some() {
+        return web::Json(ProcessResult {
+            succeeded: false,
+            error: "Email is already used".to_string(),
+        });
+    }
+
+    if dry != "true" {
+        let mut itm = Item::new();
+
+        itm.set_str("username", &login);
+        itm.set_str("email", &email);
+
+        srv.rw.set_item("user", &itm, false).await;
     }
 
     return web::Json(ProcessResult {
