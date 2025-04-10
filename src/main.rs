@@ -132,12 +132,7 @@ async fn main() -> std::io::Result<()> {
 
         #[cfg(feature = "full_file_database")]
         {
-            info!(
-                "Database url {} name {} unused",
-                database_name.clone(),
-                db_url.clone()
-            );
-            srv.rw.connect(&data_path, "").await;
+            srv.rw.connect(&args.data_path, "").await;
         }
 
         // Load plugins
