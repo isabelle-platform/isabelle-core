@@ -322,7 +322,7 @@ impl Store for StoreMongo {
                 .await;
             lr.total_count = count.unwrap_or(0);
 
-            let mut cursor = coll.find(json_bson).skip(eff_skip).limit(eff_limit).await;
+            let mut cursor = coll.find(json_bson).sort(doc! { sort_key: 1 }).skip(eff_skip).limit(eff_limit).await;
             loop {
                 let result = cursor.as_mut().unwrap().try_next().await;
                 match result {
