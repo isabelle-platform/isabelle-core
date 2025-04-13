@@ -319,8 +319,6 @@ impl Store for StoreMongo {
 
             let count = coll
                 .count_documents(json_bson.clone())
-                .skip(eff_skip)
-                .limit(eff_limit.try_into().unwrap())
                 .await;
             lr.total_count = count.unwrap_or(0);
 
