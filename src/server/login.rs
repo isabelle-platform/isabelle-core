@@ -272,6 +272,7 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
         site_name: "".to_string(),
         site_logo: "".to_string(),
         licensed_to: "".to_string(),
+        params: HashMap::new(),
     };
 
     user.site_name = srv
@@ -316,6 +317,16 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
             .await
             .safe_str("default_licensed_to", "end user");
     }
+
+    let mut language = srv.rw.get_settings().await.clone().safe_str("language", "");
+    if language == "" {
+        language = srv
+            .rw
+            .get_internals()
+            .await
+            .safe_str("default_language", "en");
+    }
+    user.params.insert("language".to_string(), language.clone());
 
     if _user.is_none() || !srv.has_collection("user") {
         info!("No user or user database");
