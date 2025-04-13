@@ -317,9 +317,7 @@ impl Store for StoreMongo {
                 Document::new()
             };
 
-            let count = coll
-                .count_documents(json_bson.clone())
-                .await;
+            let count = coll.count_documents(json_bson.clone()).await;
             lr.total_count = count.unwrap_or(0);
 
             let mut cursor = coll
