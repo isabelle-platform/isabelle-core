@@ -21,7 +21,6 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use std::collections::HashMap;
 use crate::notif::gcal::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
@@ -36,6 +35,7 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use serde_qs;
 use serde_qs::Config;
+use std::collections::HashMap;
 
 pub async fn setting_edit(
     user: Identity,
