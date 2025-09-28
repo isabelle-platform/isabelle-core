@@ -220,7 +220,7 @@ impl Store for StoreLocal {
         return lr;
     }
 
-    async fn set_item(&mut self, collection: &str, exp_itm: &Item, merge: bool) {
+    async fn set_item(&mut self, collection: &str, exp_itm: &Item, merge: bool) -> u64 {
         let mut itm = exp_itm.clone();
 
         if itm.bools.contains_key("__security_preserve") {
@@ -274,6 +274,8 @@ impl Store for StoreLocal {
                 );
             }
         }
+
+        return new_itm.id;
     }
 
     async fn del_item(&mut self, collection: &str, id: u64) -> bool {

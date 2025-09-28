@@ -133,7 +133,7 @@ pub async fn itm_edit(
             }
         }
 
-        (*srv_mut)
+        let r = (*srv_mut)
             .rw
             .set_item(&mc.collection, &itm_clone, mc.merge)
             .await;
@@ -166,10 +166,13 @@ pub async fn itm_edit(
             }
         }
 
+        let mut map = HashMap::new();
+        map.insert("id".to_string(), r.to_string());
         return HttpResponse::Ok().body(
             serde_json::to_string(&ProcessResult {
                 succeeded: true,
                 error: "".to_string(),
+                data: map,
             })
             .unwrap(),
         );

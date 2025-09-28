@@ -153,7 +153,7 @@ impl PluginApi for IsabellePluginApi {
         res
     }
 
-    fn db_set_item(&self, collection: &str, itm: &Item, merge: bool) {
+    fn db_set_item(&self, collection: &str, itm: &Item, merge: bool) -> u64 {
         trace!("db_set_item++");
         let (sender, receiver) = mpsc::channel();
         let collection1 = collection.to_string().clone();
@@ -253,6 +253,7 @@ impl PluginApi for IsabellePluginApi {
         return ProcessResult {
             succeeded: false,
             error: "test".to_string(),
+            data: HashMap::new(),
         };
     }
 
@@ -260,6 +261,7 @@ impl PluginApi for IsabellePluginApi {
         return ProcessResult {
             succeeded: false,
             error: "test".to_string(),
+            data: HashMap::new(),
         };
     }
 
@@ -267,6 +269,7 @@ impl PluginApi for IsabellePluginApi {
         return ProcessResult {
             succeeded: false,
             error: "test".to_string(),
+            data: HashMap::new(),
         };
     }
 
@@ -274,6 +277,7 @@ impl PluginApi for IsabellePluginApi {
         return ProcessResult {
             succeeded: false,
             error: "test".to_string(),
+            data: HashMap::new(),
         };
     }
 

@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use std::collections::HashMap;
 use crate::notif::gcal::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
@@ -75,6 +76,7 @@ pub async fn setting_edit(
         serde_json::to_string(&ProcessResult {
             succeeded: true,
             error: "".to_string(),
+            data: HashMap::new(),
         })
         .unwrap(),
     );

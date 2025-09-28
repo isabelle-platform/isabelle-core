@@ -70,6 +70,7 @@ pub async fn gen_otp(
         return web::Json(ProcessResult {
             succeeded: false,
             error: "Invalid login".to_string(),
+            data: HashMap::new(),
         });
     } else {
         let mut new_usr_itm = srv
@@ -93,6 +94,7 @@ pub async fn gen_otp(
     return web::Json(ProcessResult {
         succeeded: true,
         error: "".to_string(),
+        data: HashMap::new(),
     });
 }
 
@@ -133,6 +135,7 @@ pub async fn register(
             return web::Json(ProcessResult {
                 succeeded: false,
                 error: "Login is already used".to_string(),
+                data: HashMap::new(),
             });
         }
     }
@@ -143,6 +146,7 @@ pub async fn register(
             return web::Json(ProcessResult {
                 succeeded: false,
                 error: "Email is already used".to_string(),
+                data: HashMap::new(),
             });
         }
     }
@@ -161,6 +165,7 @@ pub async fn register(
     return web::Json(ProcessResult {
         succeeded: true,
         error: "".to_string(),
+        data: HashMap::new(),
     });
 }
 
@@ -203,6 +208,7 @@ pub async fn login(
         return web::Json(ProcessResult {
             succeeded: false,
             error: "Invalid login/password".to_string(),
+            data: HashMap::new(),
         });
     } else {
         let itm_real = usr.unwrap();
@@ -216,6 +222,7 @@ pub async fn login(
             return web::Json(ProcessResult {
                 succeeded: false,
                 error: "User is inactive".to_string(),
+                data: HashMap::new(),
             });
         }
 
@@ -237,6 +244,7 @@ pub async fn login(
             return web::Json(ProcessResult {
                 succeeded: false,
                 error: "Invalid login/password".to_string(),
+                data: HashMap::new(),
             });
         }
     }
@@ -244,6 +252,7 @@ pub async fn login(
     return web::Json(ProcessResult {
         succeeded: true,
         error: "".to_string(),
+        data: HashMap::new(),
     });
 }
 

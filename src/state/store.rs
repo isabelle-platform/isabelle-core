@@ -62,7 +62,8 @@ pub trait Store {
     ) -> ListResult;
 
     /// Write the item to the database
-    async fn set_item(&mut self, collection: &str, itm: &Item, merge: bool);
+    async fn set_item(&mut self, collection: &str, itm: &Item, merge: bool) ->
+        u64;
 
     /// Read the item from the database
     async fn del_item(&mut self, collection: &str, id: u64) -> bool;

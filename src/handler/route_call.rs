@@ -68,6 +68,7 @@ pub async fn call_item_pre_edit_hook(
     return ProcessResult {
         succeeded: true,
         error: "".to_string(),
+        data: HashMap::new(),
     };
 }
 
