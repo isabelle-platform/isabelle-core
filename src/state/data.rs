@@ -335,7 +335,7 @@ impl PluginApi for IsabellePluginApi {
         res
     }
 
-    fn fn_get_state(&self, handle: &str) -> &mut Option<Box<(dyn Any + Send)>> {
+    fn fn_get_state(&self, handle: &str) -> &mut Option<Box<dyn Any + Send>> {
         trace!("fn_get_state++");
         let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
         if srv_mut.opaque_data.contains_key(handle) {
@@ -348,7 +348,7 @@ impl PluginApi for IsabellePluginApi {
         }
     }
 
-    fn fn_set_state(&self, handle: &str, value: Option<Box<(dyn Any + Send)>>) {
+    fn fn_set_state(&self, handle: &str, value: Option<Box<dyn Any + Send>>) {
         trace!("fn_set_state++");
         let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
 
@@ -395,10 +395,10 @@ pub struct Data {
     pub plugin_api: Box<dyn PluginApi>,
 
     /// Opaque data (mainly for plugins)
-    pub opaque_data: HashMap<String, Option<Box<(dyn Any + Send)>>>,
+    pub opaque_data: HashMap<String, Option<Box<dyn Any + Send>>>,
 
     /// Purely internal none-object for proper boxing
-    none_object: Option<Box<(dyn Any + Send)>>,
+    none_object: Option<Box<dyn Any + Send>>,
 }
 
 impl Data {
