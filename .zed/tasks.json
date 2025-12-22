@@ -1,0 +1,44 @@
+[
+  {
+    "label": "Isabelle Core - build",
+    "command": "make",
+    "use_new_terminal": true,
+    "reveal": "always",
+  },
+  {
+    "label": "Isabelle Core - build & run",
+    "command": "make && (killall isabelle-core || true) && ./run.sh",
+    "use_new_terminal": false,
+    "reveal": "always",
+  },
+  {
+    "label": "Sample Core - build & run",
+    "command": "make && (killall isabelle-core || true) && ./run.sh --data-path ./data-sample --database sample --plugin-dir . --cookie-http-insecure",
+    "use_new_terminal": false,
+    "reveal": "always",
+  },
+  {
+    "label": "Evolucao Core - build & run",
+    "command": "make && (killall isabelle-core || true) && ./run.sh --data-path ./data-evolucao --database evolucao --plugin-dir . --cookie-http-insecure",
+    "use_new_terminal": false,
+    "reveal": "always",
+  },
+  {
+    "label": "IntraNet Core - build & run",
+    "command": "make && (killall isabelle-core || true) && ./run.sh --data-path ./data-intranet --database intranet --plugin-dir . --cookie-http-insecure",
+    "use_new_terminal": false,
+    "reveal": "always",
+  },
+  {
+    "label": "CloudCPE Core - build & run",
+    "command": "make && (killall isabelle-core || true) && ./run.sh --data-path ./data-cloudcpe --database cloudcpe --plugin-dir . --cookie-http-insecure",
+    "use_new_terminal": false,
+    "reveal": "always",
+  },
+  {
+    "label": "Didactist Core - build & run",
+    "command": "make && (killall isabelle-core || true) && ./run.sh --data-path ./data-didactist --database didactist --plugin-dir . --cookie-http-insecure",
+    "use_new_terminal": false,
+    "reveal": "always",
+  },
+]
