@@ -460,5 +460,8 @@ impl Data {
                 }
             }
         }
+
+        self.plugin_api
+            .fn_set_state("opt_data_path", Some(Box::new(self.data_path.clone())));
     }
 }
