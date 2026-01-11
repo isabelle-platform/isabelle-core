@@ -43,7 +43,7 @@ pub async fn url_route(
     req: HttpRequest,
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let routes = srv
         .rw
         .get_internals()
@@ -72,7 +72,7 @@ pub async fn url_post_route(
     payload: Multipart,
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
 
     let routes = srv
         .rw
@@ -102,7 +102,7 @@ pub async fn url_unprotected_route(
     req: HttpRequest,
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let routes = srv
         .rw
         .get_internals()
@@ -131,7 +131,7 @@ pub async fn url_unprotected_post_route(
     payload: Multipart,
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
 
     let routes = srv
         .rw
@@ -185,7 +185,7 @@ pub async fn url_generic_rest_route(
     let body = body.unwrap();
 
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let routes = srv
         .rw
         .get_internals()

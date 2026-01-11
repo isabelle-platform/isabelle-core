@@ -61,7 +61,7 @@ pub async fn gen_otp(
     }
 
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     info!("User name: {}", lu.username.clone());
     let usr = get_user(&mut srv, lu.username.clone()).await;
 
@@ -126,7 +126,7 @@ pub async fn register(
     }
 
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     info!("User name: {}", login);
     let mut usr = get_user(&mut srv, login.clone()).await;
 
@@ -196,7 +196,7 @@ pub async fn login(
     }
 
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     info!("User name: {}", lu.username.clone());
 
     // Find the user in the database
@@ -272,7 +272,7 @@ pub async fn logout(
 /// with a few more basic site settings and user roles.
 pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> impl Responder {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
 
     let mut user: DetailedLoginUser = DetailedLoginUser {
         username: "".to_string(),

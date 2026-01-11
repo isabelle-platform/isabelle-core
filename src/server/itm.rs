@@ -49,7 +49,7 @@ pub async fn itm_edit(
     mut payload: Multipart,
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let usr = get_user(&mut srv, user.id().unwrap()).await;
 
     let mc = serde_qs::from_str::<MergeColl>(&req.query_string()).unwrap();
@@ -187,7 +187,7 @@ pub async fn itm_edit(
 /// all necessary hooks and actually performs removal.
 pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let usr = get_user(&mut srv, user.id().unwrap()).await;
 
     let mc = serde_qs::from_str::<MergeColl>(&req.query_string()).unwrap();
@@ -284,7 +284,7 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
 /// in form of json array.
 pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let usr = get_user(&mut srv, user.id().unwrap()).await;
 
     let lq = serde_qs::from_str::<ListQuery>(&req.query_string()).unwrap();

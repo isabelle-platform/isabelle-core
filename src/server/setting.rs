@@ -44,7 +44,7 @@ pub async fn setting_edit(
     mut payload: Multipart,
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let usr = get_user(&mut srv, user.id().unwrap()).await;
 
     // Settings can't be edited by non-admins.
@@ -88,7 +88,7 @@ pub async fn setting_list(
     _req: HttpRequest,
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let usr = get_user(&mut srv, user.id().unwrap()).await;
 
     // Non-admins can't list settings
@@ -110,7 +110,7 @@ pub async fn setting_gcal_auth(
     _req: HttpRequest,
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let usr = get_user(&mut srv, user.id().unwrap()).await;
 
     // Non-admins can't authenticate with Google Calendar
@@ -128,7 +128,7 @@ pub async fn setting_gcal_auth_end(
     _req: HttpRequest,
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
-    let mut srv = srv_lock.borrow_mut();
+    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let usr = get_user(&mut srv, user.id().unwrap()).await;
 
     // Non-admins can't finish Google Authentication
