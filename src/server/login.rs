@@ -272,7 +272,7 @@ pub async fn logout(
 /// with a few more basic site settings and user roles.
 pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> impl Responder {
     let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
+    let srv = unsafe { &mut (*srv_lock.as_ptr()) };
 
     let mut user: DetailedLoginUser = DetailedLoginUser {
         username: "".to_string(),
