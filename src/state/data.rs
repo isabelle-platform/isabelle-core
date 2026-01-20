@@ -39,6 +39,7 @@ use isabelle_dm::data_model::list_result::ListResult;
 use isabelle_dm::data_model::process_result::ProcessResult;
 use isabelle_plugin_api::api::*;
 use isabelle_plugin_api::plugin_pool::PluginPool;
+use log::info;
 use log::trace;
 use std::any::Any;
 use std::collections::HashMap;
@@ -336,8 +337,48 @@ impl PluginApi for IsabellePluginApi {
     }
 
     fn fn_get_state(&self, handle: &str) -> &mut Option<Box<dyn Any + Send>> {
+        // NOTE: returning a mutable reference to a global slot is inherently risky;
+        // we add verbose logging for the specific key that is currently problematic.
         trace!("fn_get_state++");
         let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+
+        if handle == "opt_data_path" {
+            let present = srv_mut.opaque_data.contains_key(handle);
+            let kind = if present {
+                match srv_mut.opaque_data.get(handle) {
+                    Some(Some(v)) => {
+                        if v.downcast_ref::<Vec<u8>>().is_some() {
+                            "Some(Vec<u8>)"
+                        } else if v.downcast_ref::<String>().is_some() {
+                            "Some(String)"
+                        } else {
+                            "Some(NonString)"
+                        }
+                    }
+                    Some(None) => "None",
+                    None => "Missing",
+                }
+            } else {
+                "Missing"
+            };
+            log::info!(
+                "[plugin_state][get] key='{}' present={} kind={} opaque_len={}",
+                handle,
+                present,
+                kind,
+                srv_mut.opaque_data.len()
+            );
+
+            if let Some(Some(v)) = srv_mut.opaque_data.get(handle) {
+                if let Some(b) = v.downcast_ref::<Vec<u8>>() {
+                    let s = String::from_utf8_lossy(b).to_string();
+                    log::info!("[plugin_state][get] key='{}' value(bytes)='{}'", handle, s);
+                } else if let Some(s) = v.downcast_ref::<String>() {
+                    log::info!("[plugin_state][get] key='{}' value='{}'", handle, s);
+                }
+            }
+        }
+
         if srv_mut.opaque_data.contains_key(handle) {
             let obj = srv_mut.opaque_data.get_mut(handle).unwrap();
             trace!("fn_get_state--");
@@ -349,8 +390,64 @@ impl PluginApi for IsabellePluginApi {
     }
 
     fn fn_set_state(&self, handle: &str, value: Option<Box<dyn Any + Send>>) {
+        // Verbose logging for the problematic key to catch who overwrites/clears it.
         trace!("fn_set_state++");
         let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+
+        if handle == "opt_data_path" {
+            let new_kind = match &value {
+                Some(v) => {
+                    if v.downcast_ref::<Vec<u8>>().is_some() {
+                        "Some(Vec<u8>)"
+                    } else if v.downcast_ref::<String>().is_some() {
+                        "Some(String)"
+                    } else {
+                        "Some(NonString)"
+                    }
+                }
+                None => "None",
+            };
+            let old_present = srv_mut.opaque_data.contains_key(handle);
+            let old_kind = if old_present {
+                match srv_mut.opaque_data.get(handle) {
+                    Some(Some(v)) => {
+                        if v.downcast_ref::<Vec<u8>>().is_some() {
+                            "Some(Vec<u8>)"
+                        } else if v.downcast_ref::<String>().is_some() {
+                            "Some(String)"
+                        } else {
+                            "Some(NonString)"
+                        }
+                    }
+                    Some(None) => "None",
+                    None => "Missing",
+                }
+            } else {
+                "Missing"
+            };
+
+            log::info!(
+                "[plugin_state][set] key='{}' old_present={} old_kind={} -> new_kind={} opaque_len_before={}",
+                handle,
+                old_present,
+                old_kind,
+                new_kind,
+                srv_mut.opaque_data.len()
+            );
+
+            if let Some(v) = &value {
+                if let Some(b) = v.downcast_ref::<Vec<u8>>() {
+                    let s = String::from_utf8_lossy(b).to_string();
+                    log::info!(
+                        "[plugin_state][set] key='{}' new_value(bytes)='{}'",
+                        handle,
+                        s
+                    );
+                } else if let Some(s) = v.downcast_ref::<String>() {
+                    log::info!("[plugin_state][set] key='{}' new_value='{}'", handle, s);
+                }
+            }
+        }
 
         if srv_mut.opaque_data.contains_key(handle) {
             srv_mut.opaque_data.remove(handle);
@@ -460,8 +557,16 @@ impl Data {
                 }
             }
         }
+    }
 
-        self.plugin_api
-            .fn_set_state("opt_data_path", Some(Box::new(self.data_path.clone())));
+    /// Initialize the data path for plugins
+    pub async fn init_data_path(&mut self) {
+        info!("Data path for plugins: {}", self.data_path);
+        // Set environment variable for ABI-stable access by plugins
+        std::env::set_var("ISABELLE_DATA_PATH", &self.data_path);
+        self.plugin_api.fn_set_state(
+            "opt_data_path",
+            Some(Box::new(self.data_path.clone().into_bytes())),
+        );
     }
 }

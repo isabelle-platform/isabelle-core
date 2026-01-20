@@ -209,6 +209,14 @@ async fn main() -> std::io::Result<()> {
 
     let data = Data::new(G_STATE.clone());
     let data_clone = data.clone();
+
+    {
+        let srv_lock = G_STATE.server.lock();
+        let mut srv_mut = srv_lock.borrow_mut();
+        let srv = srv_mut.deref_mut();
+        srv.init_data_path().await;
+    }
+
     info!("Flow: Starting server");
 
     // periodic tasks
