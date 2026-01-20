@@ -7,7 +7,7 @@
   },
   {
     "label": "Isabelle Core - build & run",
-    "command": "make && (killall isabelle-core || true) && ./run.sh",
+    "command": "bash -c 'make && (killall isabelle-core || true) && ./run.sh'",
     "use_new_terminal": false,
     "reveal": "always",
   },
@@ -19,8 +19,8 @@
   },
   {
     "label": "Evolucao Core - build & run",
-    "command": "make && (killall isabelle-core || true) && ./run.sh --data-path ./data-evolucao --database evolucao --plugin-dir . --cookie-http-insecure",
-    "use_new_terminal": false,
+    "command": "bash -c 'make && (killall isabelle-core || true) && ./run.sh --data-path ./data-evolucao --database evolucao --plugin-dir . --cookie-http-insecure'",
+    "use_new_terminal": true,
     "reveal": "always",
   },
   {
