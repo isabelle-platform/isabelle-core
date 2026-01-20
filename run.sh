@@ -122,6 +122,7 @@ if [ "$(uname)" == "Darwin" ] ; then
     done
 fi
 
+echo Starting Isabelle Core...
 # Run the binary
 RUST_LOG=info RUST_BACKTRACE=1 "${binary}" \
     --port "${port}" \
