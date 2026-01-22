@@ -108,7 +108,7 @@ pub async fn itm_edit(
                 .safe_strstr("item_pre_edit_hook", &HashMap::new());
             for route in &routes {
                 let parts: Vec<&str> = route.1.split(":").collect();
-                if parts[0] == mc.collection {
+                if parts[0] == mc.collection || parts[0] == "*" {
                     let res = call_item_pre_edit_hook(
                         &mut (*srv_mut),
                         parts[1],
@@ -148,7 +148,7 @@ pub async fn itm_edit(
                 .safe_strstr("item_post_edit_hook", &HashMap::new());
             for route in routes {
                 let parts: Vec<&str> = route.1.split(":").collect();
-                if parts[0] == mc.collection {
+                if parts[0] == mc.collection || parts[0] == "*" {
                     call_item_post_edit_hook(
                         &mut (*srv_mut),
                         &parts[1],
@@ -223,7 +223,7 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
                 .safe_strstr("item_pre_edit_hook", &HashMap::new());
             for route in &routes {
                 let parts: Vec<&str> = route.1.split(":").collect();
-                if parts[0] == mc.collection {
+                if parts[0] == mc.collection || parts[0] == "*" {
                     let res = call_item_pre_edit_hook(
                         &mut (*srv_mut),
                         parts[1],
@@ -257,7 +257,7 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
                 .safe_strstr("item_post_edit_hook", &HashMap::new());
             for route in routes {
                 let parts: Vec<&str> = route.1.split(":").collect();
-                if parts[0] == mc.collection {
+                if parts[0] == mc.collection || parts[0] == "*" {
                     call_item_post_edit_hook(
                         srv_mut,
                         &parts[1],
