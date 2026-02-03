@@ -34,6 +34,7 @@ use serde_json::Value;
 
 use mongodb::{bson::doc, Client, Collection, IndexModel};
 use std::collections::HashMap;
+use tokio::time::{sleep, Duration};
 
 /// Mongo storage implementation
 #[derive(Debug, Clone)]
@@ -78,16 +79,23 @@ impl StoreMongo {
 
     pub async fn do_conn(&mut self) -> bool {
         if self.client.is_none() {
-            let client = Client::with_uri_str(&self.path).await;
-            match client {
-                Ok(cl) => {
-                    self.client = Some(cl);
-                }
-                Err(_err) => {
-                    self.client = None;
-                    return false;
-                }
-            };
+            loop {
+                let client = Client::with_uri_str(&self.path).await;
+                match client {
+                    Ok(cl) => {
+                        self.client = Some(cl);
+                        return true;
+                    }
+                    Err(_err) => {
+                        self.client = None;
+                        info!(
+                            "MongoDB connection failed ({} / {}), retrying in 30 seconds",
+                            self.path, self.database_name
+                        );
+                        sleep(Duration::from_secs(30)).await;
+                    }
+                };
+            }
         }
 
         return true;
@@ -138,27 +146,78 @@ impl Store for StoreMongo {
             let db = self.client.as_ref().unwrap().database(&self.database_name);
             for coll_name in collections {
                 debug!("Create collection {}", &coll_name.1);
-                db.create_collection(&coll_name.1).await.unwrap();
-                let coll: Collection<Item> = db.collection(&coll_name.1);
-                let index: IndexModel = IndexModel::builder().keys(doc! { "id": 1 }).build();
-                let _result = coll.create_index(index).await;
 
-                let coll_idx = self.collections.len().try_into().unwrap();
-                self.collections.insert(coll_name.1.to_string(), coll_idx);
+                // Mongo can report successful URI parsing / client creation, but still fail
+                // actual operations until server selection succeeds. During initial startup
+                // we want to retry these transient errors instead of panicking.
+                loop {
+                    let create_res = db.create_collection(&coll_name.1).await;
+                    if create_res.is_err() {
+                        info!(
+                            "MongoDB operation failed during initial connect (create_collection: {}), retrying in 30 seconds",
+                            &coll_name.1
+                        );
+                        sleep(Duration::from_secs(30)).await;
+                        // Drop client and reconnect to force fresh server selection
+                        self.client = None;
+                        self.do_conn().await;
+                        continue;
+                    }
 
-                let mut map: HashMap<u64, bool> = HashMap::new();
-                let filter = doc! {}; // An empty filter matches all documents
+                    let coll: Collection<Item> = db.collection(&coll_name.1);
+                    let index: IndexModel =
+                        IndexModel::builder().keys(doc! { "id": 1 }).build();
+                    let _result = coll.create_index(index).await;
 
-                // Find documents in the collection and fill hash map/counter
-                let mut cursor = coll.find(filter).await.unwrap();
-                let mut count = 0;
-                while let Some(doc) = cursor.try_next().await.unwrap() {
-                    map.insert(doc.id, true);
-                    count = std::cmp::max(count, doc.id);
+                    let coll_idx = self.collections.len().try_into().unwrap();
+                    self.collections.insert(coll_name.1.to_string(), coll_idx);
+
+                    let mut map: HashMap<u64, bool> = HashMap::new();
+                    let filter = doc! {}; // An empty filter matches all documents
+
+                    // Find documents in the collection and fill hash map/counter
+                    let cursor_res = coll.find(filter).await;
+                    if cursor_res.is_err() {
+                        info!(
+                            "MongoDB operation failed during initial connect (find: {}), retrying in 30 seconds",
+                            &coll_name.1
+                        );
+                        sleep(Duration::from_secs(30)).await;
+                        self.client = None;
+                        self.do_conn().await;
+                        continue;
+                    }
+
+                    let mut cursor = cursor_res.unwrap();
+                    let mut count = 0;
+                    loop {
+                        let next_res = cursor.try_next().await;
+                        match next_res {
+                            Ok(opt) => {
+                                if let Some(doc) = opt {
+                                    map.insert(doc.id, true);
+                                    count = std::cmp::max(count, doc.id);
+                                } else {
+                                    break;
+                                }
+                            }
+                            Err(_e) => {
+                                info!(
+                                    "MongoDB operation failed during initial connect (cursor: {}), retrying in 30 seconds",
+                                    &coll_name.1
+                                );
+                                sleep(Duration::from_secs(30)).await;
+                                self.client = None;
+                                self.do_conn().await;
+                                continue;
+                            }
+                        }
+                    }
+
+                    self.items.insert(coll_idx, map);
+                    self.items_count.insert(coll_idx, count);
+                    break;
                 }
-
-                self.items.insert(coll_idx, map);
-                self.items_count.insert(coll_idx, count);
             }
         } else {
             info!("Not connected");
