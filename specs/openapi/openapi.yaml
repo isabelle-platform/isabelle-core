@@ -1,0 +1,229 @@
+openapi: 3.0.3
+info:
+  title: isabelle-core
+  version: 1.0.0
+  description: Unified item storage with collection hooks, security checks, email, Google Calendar, auth, OTP support.
+
+servers:
+  - url: https://api.example.com
+    description: Production
+
+paths:
+  /is_logged_in:
+    get:
+      summary: Check login status
+      operationId: checkLoginStatus
+      responses:
+        '200':
+          description: Login status
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - username
+                  - id
+                  - role
+                  - site_name
+                  - site_logo
+                  - licensed_to
+                properties:
+                  username:
+                    type: string
+                  id:
+                    type: integer
+                  role:
+                    type: array
+                    items:
+                      type: string
+                    example: ["role_is_admin"]
+                  site_name:
+                    type: string
+                  site_logo:
+                    type: string
+                  licensed_to:
+                    type: string
+
+  /login:
+    post:
+      summary: Username/password login
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Login result
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - succeeded
+                properties:
+                  succeeded:
+                    type: boolean
+                  error:
+                    type: string
+
+  /logout:
+    post:
+      summary: Terminate current session
+      operationId: logout
+      responses:
+        '200':
+          description: Logout successful
+
+  /itm/list:
+    get:
+      summary: Read items from collection
+      operationId: listItems
+      parameters:
+        - name: collection
+          description: "Which collection."
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: id
+          description: "Which ID."
+          in: query
+          schema:
+            type: integer
+        - name: id_min
+          description: "ID range: minimum."
+          in: query
+          schema:
+            type: integer
+        - name: id_max
+          description: "ID Range: maximum."
+          in: query
+          schema:
+            type: integer
+        - name: skip
+          description: "ID to not return in response."
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          description: "?"
+          in: query
+          schema:
+            type: integer
+        - name: sort_key
+          description: "Which parameter to sort the array of objects by."
+          in: query
+          schema:
+            type: string
+        - name: filter
+          description: "Which parameter to filter the array of objects by."
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Item list
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - map
+                  - total_count
+                properties:
+                  map:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  total_count:
+                    type: integer
+
+  /itm/edit:
+    post:
+      summary: Edit items from collection
+      operationId: editItems
+      parameters:
+        - name: item
+          required: true
+          in: query
+          schema:
+            type: boolean
+        - name: collection
+          in: query
+          schema:
+            type: string
+            default: false
+        - name: merge
+          in: query
+          schema:
+            type: boolean
+            default: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                succeeded:
+                  type: boolean
+                error:
+                  type: string
+      responses:
+        '200':
+          description: Edit result
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - succeeded
+                properties:
+                  succeeded:
+                    type: boolean
+                  error:
+                    type: string
+
+  /itm/del:
+    post:
+      summary: Delete items from collection
+      operationId: deleteItems
+      parameters:
+        - name: collection
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Delete result
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - succeeded
+                properties:
+                  succeeded:
+                    type: boolean
+                  error:
+                    type: string
+
