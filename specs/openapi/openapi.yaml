@@ -13,37 +13,19 @@ paths:
     get:
       summary: Check login status
       operationId: checkLoginStatus
+      parameters: []
       responses:
         '200':
           description: Login status
           content:
-            application/json:
+            multipart/form-data:
               schema:
-                type: object
-                required:
-                  - username
-                  - id
-                  - role
-                  - site_name
-                  - site_logo
-                  - licensed_to
                 properties:
-                  username:
+                  filename:
+                    description: ""
+                    format: binary
                     type: string
-                  id:
-                    type: integer
-                  role:
-                    type: array
-                    items:
-                      type: string
-                    example: ["role_is_admin"]
-                  site_name:
-                    type: string
-                  site_logo:
-                    type: string
-                  licensed_to:
-                    type: string
-
+                type: object
   /login:
     post:
       summary: Username/password login
@@ -77,7 +59,6 @@ paths:
                     type: boolean
                   error:
                     type: string
-
   /logout:
     post:
       summary: Terminate current session
@@ -85,145 +66,234 @@ paths:
       responses:
         '200':
           description: Logout successful
-
   /itm/list:
     get:
       summary: Read items from collection
       operationId: listItems
       parameters:
         - name: collection
-          description: "Which collection."
           in: query
+          description: "Which collection."
           required: true
           schema:
+            example: diary_record
+            type: string
+        - name: context
+          in: query
+          description: context
+          schema:
+            example: full
             type: string
         - name: id
+          in: query
           description: "Which ID."
-          in: query
           schema:
-            type: integer
+            example: "10000000000000000000"
+            type: string
         - name: id_min
+          in: query
           description: "ID range: minimum."
-          in: query
           schema:
-            type: integer
+            example: "10000000000000000000"
+            type: string
         - name: id_max
+          in: query
           description: "ID Range: maximum."
-          in: query
           schema:
-            type: integer
+            example: "10000000000000000000"
+            type: string
         - name: skip
+          in: query
           description: "ID to not return in response."
-          in: query
           schema:
-            type: integer
+            example: "10000000000000000000"
+            type: string
         - name: limit
-          description: "?"
           in: query
+          description: limit
           schema:
-            type: integer
+            example: "10000000000000000000"
+            type: string
         - name: sort_key
-          description: "Which parameter to sort the array of objects by."
           in: query
+          description: "Which parameter to sort the array of objects by."
           schema:
+            example: time
             type: string
         - name: filter
-          description: "Which parameter to filter the array of objects by."
           in: query
+          description: "Which parameter to filter the array of objects by."
           schema:
+            example: '{ "$and": [ { "u64s.time": { "$gte": 1768780800 } }, { "u64s.time": {
+              "$lt": 1769385599 } }] }'
             type: string
       responses:
         '200':
           description: Item list
           content:
-            application/json:
+            multipart/form-data:
               schema:
-                type: object
-                required:
-                  - map
-                  - total_count
                 properties:
-                  map:
-                    type: array
-                    items:
-                      type: object
-                      additionalProperties: true
-                  total_count:
-                    type: integer
-
+                  filename:
+                    description: ""
+                    format: binary
+                    type: string
+                type: object
   /itm/edit:
+    parameters: []
     post:
       summary: Edit items from collection
       operationId: editItems
       parameters:
-        - name: item
-          required: true
+        - name: id
           in: query
+          description: id
           schema:
-            type: boolean
+            example: "10000000000000000000"
+            type: string
         - name: collection
           in: query
+          description: collection
           schema:
+            example: diary_record
             type: string
-            default: false
         - name: merge
           in: query
+          description: merge
           schema:
             type: boolean
             default: false
       requestBody:
         required: true
         content:
-          application/json:
+          multipart/form-data:
             schema:
-              type: object
               properties:
-                succeeded:
-                  type: boolean
-                error:
+                item:
                   type: string
+              required:
+                - item
+              type: object
       responses:
         '200':
           description: Edit result
           content:
-            application/json:
+            multipart/form-data:
               schema:
-                type: object
-                required:
-                  - succeeded
                 properties:
-                  succeeded:
-                    type: boolean
-                  error:
+                  filename:
+                    description: ""
+                    format: binary
                     type: string
-
+                type: object
   /itm/del:
+    parameters: []
     post:
       summary: Delete items from collection
       operationId: deleteItems
       parameters:
+        - name: next
+          in: query
+          description: next
+          schema:
+            example: project_diary_list
+            type: string
+        - name: del
+          in: query
+          description: del
+          schema:
+            example: "true"
+            type: string
         - name: collection
           in: query
           required: true
+          description: collection
           schema:
+            example: diary_record
             type: string
         - name: id
           in: query
           required: true
+          description: id
           schema:
-            type: integer
+            example: "250"
+            type: string
       responses:
         '200':
           description: Delete result
           content:
-            application/json:
+            multipart/form-data:
               schema:
-                type: object
-                required:
-                  - succeeded
                 properties:
-                  succeeded:
-                    type: boolean
-                  error:
+                  filename:
+                    description: ""
+                    format: binary
                     type: string
-
+                type: object
+  /project_diary:
+    get:
+      description: ""
+      operationId: getProjectDiary
+      parameters: []
+      responses:
+        "200":
+          content:
+            multipart/form-data:
+              schema:
+                properties:
+                  filename:
+                    description: ""
+                    format: binary
+                    type: string
+                type: object
+          description: ""
+          headers:
+            X-DNS-Prefetch-Control:
+              description: Custom header X-DNS-Prefetch-Control
+              schema:
+                type: string
+            permissions-policy:
+              description: Custom header permissions-policy
+              schema:
+                type: string
+        "304":
+          content:
+            multipart/form-data:
+              schema:
+                properties:
+                  filename:
+                    description: ""
+                    format: binary
+                    type: string
+                type: object
+          description: ""
+      summary: Get Project Diary
+    parameters: []
+  /project_diary/edit:
+    get:
+      description: ""
+      operationId: getProjectDiaryEdit
+      parameters: []
+      responses:
+        "200":
+          content:
+            multipart/form-data:
+              schema:
+                properties:
+                  filename:
+                    description: ""
+                    format: binary
+                    type: string
+                type: object
+          description: ""
+          headers:
+            X-DNS-Prefetch-Control:
+              description: Custom header X-DNS-Prefetch-Control
+              schema:
+                type: string
+            permissions-policy:
+              description: Custom header permissions-policy
+              schema:
+                type: string
+      summary: Get Project Diary Edit
+    parameters: []
