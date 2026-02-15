@@ -2,34 +2,102 @@ openapi: 3.0.3
 info:
   title: isabelle-core
   version: 1.0.0
-  description: Unified item storage with collection hooks, security checks, email, Google Calendar, auth, OTP support.
+  description: |
+    Unified item storage with collection hooks, security checks, email, Google Calendar, auth, OTP support.
+    
+    **Authentication**: Session-based via HTTP-only cookie.
+    - Login with `/login` → server generates 127-char session ID → stored in cookie
+    - All requests auto-include cookie → server validates session
+    - Check status via `/is_logged_in` → returns login state
+    - Logout via `/logout` → invalidates session server-side
 
 servers:
   - url: https://api.example.com
-    description: Production
+    description: Example server
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: isabelle-cookie
+      description: |
+        127-character alphanumeric session identifier.
+        - Generated on successful `/login`
+        - HTTPOnly, Secure, SameSite=Strict flags
+        - Server maintains session → user mapping
+        - Validated on each request
+        - Cleared on `/logout`
+
+security:
+  - cookieAuth: []
 
 paths:
   /is_logged_in:
     get:
       summary: Check login status
       operationId: checkLoginStatus
+      security:
+        - cookieAuth: []
+      description: Validates session cookie and returns user context
       parameters: []
       responses:
         '200':
-          description: Login status
+          description: Authenticated user details
           content:
-            multipart/form-data:
+            application/json:
               schema:
-                properties:
-                  filename:
-                    description: ""
-                    format: binary
-                    type: string
                 type: object
+                required:
+                  - username
+                  - id
+                  - role
+                  - site_name
+                  - site_logo
+                  - licensed_to
+                properties:
+                  username:
+                    type: string
+                    format: email
+                    example: user@example.net
+                  id:
+                    type: integer
+                    example: 5
+                  role:
+                    type: array
+                    items:
+                      type: string
+                      enum: [active, contractor, admin, viewer]
+                    example: ["active", "contractor"]
+                  site_name:
+                    type: string
+                    example: Example
+                  site_logo:
+                    type: string
+                    format: uri-reference
+                    example: /logo.png
+                  licensed_to:
+                    type: string
+                    example: end user
+        '401':
+          description: Unauthorized - invalid/expired session
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Session invalid
+
   /login:
     post:
       summary: Username/password login
       operationId: login
+      security: []
+      description: |
+        Authenticates user and establishes session.
+        Sets `isabelle-cookie` cookie on success.
       requestBody:
         required: true
         content:
@@ -48,6 +116,12 @@ paths:
       responses:
         '200':
           description: Login result
+          headers:
+            Set-Cookie:
+              description: Session ID cookie (127 chars, HTTPOnly, Secure, SameSite=Strict)
+              schema:
+                type: string
+                example: isabelle-cookie=a3f8e9b2c1d4...; Path=/; HttpOnly; Secure; SameSite=Strict
           content:
             application/json:
               schema:
@@ -59,17 +133,30 @@ paths:
                     type: boolean
                   error:
                     type: string
+
   /logout:
     post:
       summary: Terminate current session
       operationId: logout
+      security:
+        - cookieAuth: []
+      description: Invalidates session server-side and clears cookie
       responses:
         '200':
           description: Logout successful
+          headers:
+            Set-Cookie:
+              description: Clears isabelle-cookie cookie
+              schema:
+                type: string
+                example: isabelle-cookie=; Path=/; Max-Age=0
+
   /itm/list:
     get:
       summary: Read items from collection
       operationId: listItems
+      security:
+        - cookieAuth: []
       parameters:
         - name: collection
           in: query
@@ -124,8 +211,7 @@ paths:
           in: query
           description: "Which parameter to filter the array of objects by."
           schema:
-            example: '{ "$and": [ { "u64s.time": { "$gte": 1768780800 } }, { "u64s.time": {
-              "$lt": 1769385599 } }] }'
+            example: '{ "$and": [ { "u64s.time": { "$gte": 1768780800 } }, { "u64s.time": { "$lt": 1769385599 } }] }'
             type: string
       responses:
         '200':
@@ -139,11 +225,16 @@ paths:
                     format: binary
                     type: string
                 type: object
+        '401':
+          description: Unauthorized - invalid/missing session
+
   /itm/edit:
     parameters: []
     post:
       summary: Edit items from collection
       operationId: editItems
+      security:
+        - cookieAuth: []
       parameters:
         - name: id
           in: query
@@ -186,11 +277,16 @@ paths:
                     format: binary
                     type: string
                 type: object
+        '401':
+          description: Unauthorized
+
   /itm/del:
     parameters: []
     post:
       summary: Delete items from collection
       operationId: deleteItems
+      security:
+        - cookieAuth: []
       parameters:
         - name: next
           in: query
@@ -230,10 +326,15 @@ paths:
                     format: binary
                     type: string
                 type: object
+        '401':
+          description: Unauthorized
+
   /project_diary:
     get:
       description: ""
       operationId: getProjectDiary
+      security:
+        - cookieAuth: []
       parameters: []
       responses:
         "200":
@@ -267,12 +368,17 @@ paths:
                     type: string
                 type: object
           description: ""
+        "401":
+          description: Unauthorized
       summary: Get Project Diary
     parameters: []
+
   /project_diary/edit:
     get:
       description: ""
       operationId: getProjectDiaryEdit
+      security:
+        - cookieAuth: []
       parameters: []
       responses:
         "200":
@@ -295,5 +401,7 @@ paths:
               description: Custom header permissions-policy
               schema:
                 type: string
+        "401":
+          description: Unauthorized
       summary: Get Project Diary Edit
     parameters: []
