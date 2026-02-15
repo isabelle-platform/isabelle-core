@@ -42,6 +42,7 @@ gh_login=""
 gh_password=""
 plugin_dir=""
 cookie_http_insecure=""
+db_url="mongodb://localhost:27017"
 
 while test -n "$1" ; do
     case "$1" in
@@ -91,6 +92,10 @@ while test -n "$1" ; do
         --cookie-http-insecure)
             cookie_http_insecure="true"
             ;;
+        --db-url)
+            db_url="$2"
+            shift 1
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 1
@@ -131,6 +136,7 @@ RUST_LOG=info RUST_BACKTRACE=1 "${binary}" \
     --data-path "${data_path}" \
     --gc-path "${gc_path}" \
     --database "${database}" \
+    --db-url "${db_url}" \
     --py-path "${py_path}" \
     ${cookie_http_insecure:+--cookie-http-insecure} \
     ${plugin_dir+--plugin-dir} ${plugin_dir:+"${plugin_dir}"} \
