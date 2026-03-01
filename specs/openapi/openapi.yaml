@@ -1,0 +1,653 @@
+openapi: 3.0.3
+info:
+  title: isabelle-core
+  version: 1.0.0
+  description: |
+    Unified item storage with collection hooks, security checks, email, Google Calendar, auth, OTP support.
+    
+    **Authentication**: Session-based via HTTP-only cookie.
+    - Login with `/api/login` → server generates 127-char session ID → stored in cookie
+    - All requests auto-include cookie → server validates session
+    - Check status via `/api/is_logged_in` → returns user context
+    - Logout via `/api/logout` → invalidates session server-side
+    - OTP generation via `/api/gen_otp` for passwordless auth
+    
+    **Item ID System**: Uses 64-bit unsigned integers (0 to 18446744073709551615).
+    - Valid IDs: 0 to 18446744073709551614 (existing items)
+    - Special value: 18446744073709551615 (u64::MAX) = create new item
+    - Server auto-assigns next available ID on creation
+    - IDs are immutable after creation
+
+servers:
+  - url: https://api.example.net
+    description: Production
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session_id
+      description: |
+        127-character alphanumeric session identifier.
+        - Generated on successful `/api/login`
+        - HTTPOnly, Secure, SameSite=Strict flags
+        - Server maintains session → user mapping
+        - Validated on each request
+        - Cleared on `/api/logout`
+
+  schemas:
+    ItemId:
+      type: string
+      pattern: '^\d+$'
+      description: |
+        64-bit unsigned integer as string (0-18446744073709551615).
+        - 0-18446744073709551614: existing item IDs
+        - 18446744073709551615 (u64::MAX): sentinel value for "create new"
+      example: "42"
+    
+    ItemIdOrCreate:
+      type: string
+      pattern: '^\d+$'
+      description: |
+        Item ID or creation sentinel.
+        - Existing item: pass specific ID (e.g., "42")
+        - Create new: pass "18446744073709551615"
+        Server auto-assigns next ID on creation.
+      example: "18446744073709551615"
+
+    UserItem:
+      type: object
+      description: User data structure
+      properties:
+        id:
+          type: integer
+          example: 5
+        strs:
+          type: object
+          properties:
+            name:
+              type: string
+              example: "John Doe"
+            email:
+              type: string
+              format: email
+              example: "user@example.net"
+            phone:
+              type: string
+              example: "+1234567890"
+            login:
+              type: string
+              example: "@johndoe"
+            otp:
+              type: string
+              description: One-time password for passwordless login (9 digits)
+              example: "123456789"
+            __password:
+              type: string
+              description: Current password (for password change only)
+            __new_password1:
+              type: string
+              description: New password
+            __new_password2:
+              type: string
+              description: New password confirmation (must match __new_password1)
+        bools:
+          type: object
+          properties:
+            role_is_active:
+              type: boolean
+              description: User has active role
+            role_is_contractor:
+              type: boolean
+              description: User has contractor role
+            role_is_admin:
+              type: boolean
+              description: User has admin role
+        u64s:
+          type: object
+          properties:
+            birth_date:
+              type: integer
+              description: Unix timestamp
+              example: 946684800
+
+security:
+  - cookieAuth: []
+
+paths:
+  /api/gen_otp:
+    post:
+      summary: Generate OTP for passwordless login
+      operationId: postApiGenOtp
+      security: []
+      description: Generates one-time password sent to user's email/phone
+      parameters: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - username
+              properties:
+                username:
+                  type: string
+                  format: email
+                  example: user@example.net
+      responses:
+        '200':
+          description: OTP generation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  succeeded:
+                    type: boolean
+                  message:
+                    type: string
+                    example: OTP sent to registered contact
+
+  /api/is_logged_in:
+    get:
+      summary: Check login status
+      operationId: getApiIsLoggedIn
+      security:
+        - cookieAuth: []
+      description: Validates session cookie and returns user context
+      parameters: []
+      responses:
+        '200':
+          description: Authenticated user details
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - username
+                  - id
+                  - role
+                  - site_name
+                  - site_logo
+                  - licensed_to
+                properties:
+                  username:
+                    type: string
+                    format: email
+                    example: user@example.net
+                  id:
+                    type: integer
+                    example: 5
+                  role:
+                    type: array
+                    items:
+                      type: string
+                      enum: [active, contractor, admin, viewer]
+                    example: ["active", "contractor"]
+                  site_name:
+                    type: string
+                    example: Example
+                  site_logo:
+                    type: string
+                    format: uri-reference
+                    example: /logo.png
+                  licensed_to:
+                    type: string
+                    example: end user
+        '401':
+          description: Unauthorized - invalid/expired session
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Session invalid
+
+  /api/login:
+    post:
+      summary: Username/password login
+      operationId: postApiLogin
+      security: []
+      description: |
+        Authenticates user and establishes session.
+        Sets session cookie on success.
+        Accepts either regular password or OTP.
+      parameters: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                  format: email
+                  example: user@example.net
+                password:
+                  type: string
+                  description: User password or OTP
+                  example: "123456"
+      responses:
+        '200':
+          description: Login result
+          headers:
+            Set-Cookie:
+              description: Session ID cookie (127 chars, HTTPOnly, Secure, SameSite=Strict)
+              schema:
+                type: string
+                example: session_id=a3f8e9b2c1d4...; Path=/; HttpOnly; Secure; SameSite=Strict
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - succeeded
+                properties:
+                  succeeded:
+                    type: boolean
+                  error:
+                    type: string
+                    example: Invalid credentials
+
+  /api/logout:
+    post:
+      summary: Terminate current session
+      operationId: postApiLogout
+      security:
+        - cookieAuth: []
+      description: Invalidates session server-side and clears cookie
+      parameters: []
+      responses:
+        '200':
+          description: Logout successful
+          headers:
+            Set-Cookie:
+              description: Clears session cookie
+              schema:
+                type: string
+                example: session_id=; Path=/; Max-Age=0
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  succeeded:
+                    type: boolean
+                    example: true
+
+  /api/itm/list:
+    get:
+      summary: Read items from collection
+      operationId: getApiItmList
+      security:
+        - cookieAuth: []
+      description: |
+        Query items with optional filtering and pagination.
+        ID parameters accept item IDs (0-18446744073709551614) or u64::MAX for special cases.
+      parameters:
+        - name: collection
+          in: query
+          description: Collection name
+          required: true
+          schema:
+            type: string
+            enum: [diary_record, project, user, contact, plan, event]
+            example: diary_record
+        - name: context
+          in: query
+          description: Detail level (list=summary, full=complete)
+          schema:
+            type: string
+            enum: [list, full]
+            example: full
+            default: full
+        - name: id
+          in: query
+          description: Specific item ID (or u64::MAX to skip single-item lookup)
+          schema:
+            $ref: '#/components/schemas/ItemId'
+        - name: id_min
+          in: query
+          description: ID range minimum (inclusive)
+          schema:
+            type: string
+            example: "0"
+            default: "0"
+        - name: id_max
+          in: query
+          description: ID range maximum (inclusive, u64::MAX = no upper limit)
+          schema:
+            type: string
+            example: "18446744073709551615"
+            default: "18446744073709551615"
+        - name: skip
+          in: query
+          description: ID to exclude from results (u64::MAX = skip none)
+          schema:
+            type: string
+            example: "18446744073709551615"
+        - name: limit
+          in: query
+          description: Max results to return (u64::MAX = no limit)
+          schema:
+            type: string
+            example: "100"
+        - name: sort_key
+          in: query
+          description: Sort field (empty = natural order)
+          schema:
+            type: string
+            example: time
+        - name: filter
+          in: query
+          description: MongoDB-style filter query
+          schema:
+            type: string
+            example: '{ "$and": [ { "u64s.time": { "$gte": 1768780800 } }, { "u64s.time": { "$lt": 1769385599 } }] }'
+      responses:
+        '200':
+          description: Item list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+        '401':
+          description: Unauthorized
+
+  /api/itm/edit:
+    post:
+      summary: Edit existing item or create new
+      operationId: postApiItmEdit
+      security:
+        - cookieAuth: []
+      description: |
+        **Create new item**: Set `id=18446744073709551615` (u64::MAX)
+        - Server auto-assigns next available ID
+        - Returns assigned ID in response
+        
+        **Edit existing item**: Set `id` to specific item ID
+        - `merge=true`: merge provided fields with existing
+        - `merge=false`: replace entire item
+      parameters:
+        - name: collection
+          in: query
+          description: Collection name
+          required: true
+          schema:
+            type: string
+            example: diary_record
+            default: diary_record
+        - name: id
+          in: query
+          description: |
+            Target item ID:
+            - "18446744073709551615" (u64::MAX): create new item
+            - "0"-"18446744073709551614": edit existing item
+          schema:
+            $ref: '#/components/schemas/ItemIdOrCreate'
+        - name: merge
+          in: query
+          description: |
+            Merge strategy (edit only, ignored on create):
+            - "true": merge fields with existing item
+            - "false": replace entire item
+          schema:
+            type: string
+            enum: ["true", "false"]
+            example: "true"
+            default: "true"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - item
+              properties:
+                item:
+                  type: string
+                  description: JSON-encoded item data
+                  example: '{"id":18446744073709551615,"strs":{"comment":"Meeting notes","ticket":"PROJ-123"},"u64s":{"time":1739635200,"hours":5},"ids":{"user":5,"project":19}}'
+      responses:
+        '200':
+          description: Edit/create result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    $ref: '#/components/schemas/ItemId'
+                    description: Item ID (server-assigned if created)
+                  succeeded:
+                    type: boolean
+        '401':
+          description: Unauthorized
+
+  /api/itm/del:
+    post:
+      summary: Delete item from collection
+      operationId: postApiItmDel
+      security:
+        - cookieAuth: []
+      description: Delete specific item by ID
+      parameters:
+        - name: collection
+          in: query
+          required: true
+          description: Collection name
+          schema:
+            type: string
+            example: diary_record
+        - name: id
+          in: query
+          required: true
+          description: Item ID to delete (must be valid item ID, not u64::MAX)
+          schema:
+            $ref: '#/components/schemas/ItemId'
+        - name: del
+          in: query
+          description: Confirm deletion
+          schema:
+            type: string
+            enum: ["true", "false"]
+            example: "true"
+        - name: next
+          in: query
+          description: Redirect target after deletion
+          schema:
+            type: string
+            example: project_diary_list
+      responses:
+        '200':
+          description: Delete result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  succeeded:
+                    type: boolean
+                  redirect:
+                    type: string
+        '401':
+          description: Unauthorized
+
+  /api/user/edit:
+    post:
+      summary: Edit user (self or admin)
+      operationId: postApiUserEdit
+      security:
+        - cookieAuth: []
+      description: |
+        Edit user data. Users can edit themselves, admins can edit any user.
+        Password change requires current password in `__password` field.
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: User ID to edit
+          schema:
+            type: string
+            example: "5"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - item
+              properties:
+                item:
+                  type: string
+                  description: |
+                    JSON-encoded user data. Special password change fields:
+                    - `__password`: current password (required for password change)
+                    - `__new_password1`: new password
+                    - `__new_password2`: confirmation (must match __new_password1)
+                  example: '{"id":5,"strs":{"__password":"current123","__new_password1":"newpass456","__new_password2":"newpass456","name":"John Doe","email":"user@example.net","phone":"+1234567890","login":"@johndoe","otp":"123456789"},"bools":{"role_is_active":true,"role_is_contractor":false},"u64s":{"birth_date":946684800}}'
+      responses:
+        '200':
+          description: User edit successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  succeeded:
+                    type: boolean
+                  id:
+                    type: string
+        '403':
+          description: Forbidden - password mismatch or insufficient permissions
+
+  /api/user/pwd:
+    post:
+      summary: Change user password
+      operationId: postApiUserPwd
+      security:
+        - cookieAuth: []
+      description: |
+        Change password for current user or admin changing another user's password.
+        Requires current password for verification.
+      parameters:
+        - name: id
+          in: query
+          required: true
+          description: User ID (must be current user or admin)
+          schema:
+            type: string
+            example: "5"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - item
+              properties:
+                item:
+                  type: string
+                  description: |
+                    JSON with password fields:
+                    - `__password`: current password (required)
+                    - `__new_password1`: new password
+                    - `__new_password2`: confirmation
+                  example: '{"id":5,"strs":{"__password":"current123","__new_password1":"Amazing Rural Doubling Cognitive Wolverine","__new_password2":"Amazing Rural Doubling Cognitive Wolverine"}}'
+      responses:
+        '200':
+          description: Password changed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  succeeded:
+                    type: boolean
+        '403':
+          description: Forbidden - password mismatch or unauthorized
+
+  /api/setting/list:
+    get:
+      summary: List system settings (admin only)
+      operationId: getApiSettingList
+      security:
+        - cookieAuth: []
+      description: Retrieve system settings. Requires admin role.
+      responses:
+        '200':
+          description: Settings list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        '403':
+          description: Forbidden - insufficient permissions
+
+  /project_diary:
+    get:
+      summary: Get project diary view
+      operationId: getProjectDiary
+      security:
+        - cookieAuth: []
+      parameters: []
+      responses:
+        '200':
+          description: Project diary HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+          headers:
+            X-DNS-Prefetch-Control:
+              schema:
+                type: string
+            permissions-policy:
+              schema:
+                type: string
+        '304':
+          description: Not modified
+        '401':
+          description: Unauthorized
+
+  /project_diary/edit:
+    get:
+      summary: Get project diary edit view
+      operationId: getProjectDiaryEdit
+      security:
+        - cookieAuth: []
+      parameters: []
+      responses:
+        '200':
+          description: Project diary edit HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+          headers:
+            X-DNS-Prefetch-Control:
+              schema:
+                type: string
+            permissions-policy:
+              schema:
+                type: string
+        '401':
+          description: Unauthorized

@@ -6,86 +6,113 @@ Isabelle is a Rust-based framework for building safe and performant servers for 
 
 ## Features
 
- - Unified item storage with addition, editing and deletion support.
- - Collection hooks allowing plugins to do additional checks or synchronization.
- - Security checks.
- - E-Mail sending support.
- - Google Calendar integration.
- - Login/logout functionality.
- - One-time password support.
+- Unified item storage with addition, editing and deletion support.
+- Collection hooks allowing plugins to do additional checks or synchronization.
+- Security checks.
+- E-Mail sending support.
+- Google Calendar integration.
+- Login/logout functionality.
+- One-time password support.
 
 ## Endpoints
 
-1. GET /is_logged_in: check the login status.
+These are available in all services based on Isabelle.
+
+More at [OpenAPI Spec](./specs/openapi/openapi.yaml)
+
+### `GET /is_logged_in`
+
+> [!NOTE]
+> check the login status.
 
 Result:
 
-	```
-	{
-	    "username": "<username>",
-	    "id": <user id>,
-	    "role": [ "role_is_admin" ],
-	    "site_name": "Test",
-	    "site_logo": "Test Logo"
-	    "licensed_to": "Test Company"
-	}
-	```
+```json
+{
+	"username": "<username>",
+	"id": <user id>,
+	"role": [ "role_is_admin" ],
+	"site_name": "Test",
+	"site_logo": "Test Logo"
+	"licensed_to": "Test Company"
+}
+```
 
-2. POST /login (username, password inside the post request):
+### `POST /login`
 
-	```
-	{
-		"succeeded": true/false,
-		"error": "detailed error",
-	}
-	```
+Params: `(username, password inside the post request)`
 
-3. POST /logout:
+```json
+{
+	"succeeded": true/false,
+	"error": "detailed error",
+}
+```
 
-4. GET /itm/list (collection, [id], [id_min], [id_max], [skip], [limit], [sort_key], [filter]): read the item from the collection
+### `POST /logout`
 
-	```
-	{
-		"map": [ <id>: {} ],
-		"total_count": <value>
-	}
-	```
+### `GET /itm/list`
 
-5. POST /itm/edit ("item" inside the post request and inside the query string, "collection" and "merge" = false/true in query): edit the item in collection.
+Params: `(collection, [id], [id_min], [id_max], [skip], [limit], [sort_key], [filter])`
 
-	```
-	{
-		"succeeded": true/false,
-		"error": "detailed error",
-	}
-	```
+> [!NOTE]
+> read the item from the collection
 
-6. POST /itm/del (collection, id): delete the item from the collection
+```json
+{
+	"map": [ <id>: {} ],
+	"total_count": <value>
+}
+```
 
-	```
-	{
-		"succeeded": true/false,
-		"error": "detailed error",
-	}
-	```
+### `POST /itm/edit`
+
+Params: `("item" inside the post request and inside the query string, "collection" and "merge" = false/true in query)`
+
+> [!NOTE]
+> edit the item in collection
+
+```json
+{
+	"succeeded": true/false,
+	"error": "detailed error",
+}
+```
+
+### `POST /itm/del`
+
+Params: `(collection, id)`
+
+> [!NOTE]
+> delete the item from the collection
+
+```json
+{
+	"succeeded": true/false,
+	"error": "detailed error",
+}
+```
 
 ## Dependencies
 
- - Python 3 is needed for Google Calendar integration
+- Python 3 is needed for Google Calendar integration
 
 ## Building
 
 Building Isabelle is as easy as Cargo invocation:
-```
+
+```sh
 cargo build
 ```
 
 ## Running
 
 Use `run.sh` script:
-```
+
+```sh
 ./run.sh
 ```
 
 ## License
-MIT
+
+[MIT](./LICENSE)
