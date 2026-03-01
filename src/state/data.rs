@@ -218,6 +218,24 @@ impl PluginApi for IsabellePluginApi {
         res
     }
 
+    fn globals_set_settings(&self, item: &Item) {
+        trace!("globals_set_settings++");
+        let (sender, receiver) = mpsc::channel();
+        let rt = Arc::clone(&self.runtime);
+        let item_clone = item.clone();
+        self.thread_pool.execute(move || {
+            sender
+                .send(rt.block_on(async {
+                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    srv_mut.rw.set_settings(item_clone).await
+                }))
+                .unwrap()
+        });
+        let res = receiver.recv().unwrap();
+        trace!("globals_set_settings--");
+        res
+    }
+
     fn auth_check_role(&self, itm: &Option<Item>, role: &str) -> bool {
         trace!("auth_check_role++");
         let user = itm.clone();
