@@ -165,8 +165,7 @@ impl Store for StoreMongo {
                     }
 
                     let coll: Collection<Item> = db.collection(&coll_name.1);
-                    let index: IndexModel =
-                        IndexModel::builder().keys(doc! { "id": 1 }).build();
+                    let index: IndexModel = IndexModel::builder().keys(doc! { "id": 1 }).build();
                     let _result = coll.create_index(index).await;
 
                     let coll_idx = self.collections.len().try_into().unwrap();
