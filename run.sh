@@ -128,8 +128,17 @@ if [ "$(uname)" == "Darwin" ] ; then
 fi
 
 echo Starting Isabelle Core...
+# Build plugin args only when provided, so --first-run is not consumed as value
+plugin_dir_arg=()
+if [ -n "${plugin_dir}" ] ; then
+    plugin_dir_arg=(--plugin-dir "${plugin_dir}")
+fi
+
 # Run the binary
-RUST_LOG=info RUST_BACKTRACE=1 "${binary}" \
+LD_LIBRARY_PATH="${plugin_dir}" \
+RUST_LOG=info \
+RUST_BACKTRACE=1 \
+"${binary}" \
     --port "${port}" \
     --pub-url "${pub_url}" \
     --pub-fqdn "${pub_fqdn}" \
@@ -139,5 +148,5 @@ RUST_LOG=info RUST_BACKTRACE=1 "${binary}" \
     --db-url "${db_url}" \
     --py-path "${py_path}" \
     ${cookie_http_insecure:+--cookie-http-insecure} \
-    ${plugin_dir+--plugin-dir} ${plugin_dir:+"${plugin_dir}"} \
+    "${plugin_dir_arg[@]}" \
     ${first_run}
