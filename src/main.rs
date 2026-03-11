@@ -193,12 +193,14 @@ async fn main() -> std::io::Result<()> {
             }
         }
 
-        // If it is a first run, merge database.
+        // If it is a first run, merge database and normalize via init checks.
         #[cfg(not(feature = "full_file_database"))]
         if args.first_run {
             let m = &mut srv;
-            info!("Flow: first run - merge database and exit");
+            info!("Flow: first run - merge database and normalize");
             merge_database(&mut m.file_rw, &mut m.rw).await;
+            m.init_checks().await;
+            info!("Flow: first run - merge/normalize complete; exiting");
         }
     }
 
