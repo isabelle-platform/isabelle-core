@@ -23,7 +23,7 @@
  */
 use clap::Parser;
 
-pub const DEFAULT_MAX_PAYLOAD_BYTES: usize = 20 * 1024 * 1024; // ~20 MiB
+pub const DEFAULT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024 * 1024; // ~1 GiB
 
 /// Isabelle - high-performant server for web applications
 #[derive(Parser, Debug)]
