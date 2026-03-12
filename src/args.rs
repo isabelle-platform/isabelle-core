@@ -23,6 +23,8 @@
  */
 use clap::Parser;
 
+pub const DEFAULT_MAX_PAYLOAD_BYTES: usize = 20 * 1024 * 1024; // ~20 MiB
+
 /// Isabelle - high-performant server for web applications
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -66,6 +68,10 @@ pub struct Args {
     /// Port number
     #[arg(long, visible_alias("port"))]
     pub bind_port: u16,
+
+    /// Max request payload size in bytes
+    #[arg(long, default_value_t = DEFAULT_MAX_PAYLOAD_BYTES, visible_alias("max-payload"))]
+    pub max_payload_bytes: usize,
 
     /// First run
     #[arg(long, default_value_t = false)]

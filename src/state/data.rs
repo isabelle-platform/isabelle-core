@@ -26,6 +26,7 @@ use crate::get_new_salt;
 use crate::get_password_hash;
 use crate::handler::route_call::call_collection_read_hook;
 use crate::init_google;
+use crate::args::DEFAULT_MAX_PAYLOAD_BYTES;
 use crate::send_email;
 use crate::state::store::Store;
 use crate::state::store_local::*;
@@ -503,6 +504,9 @@ pub struct Data {
     /// Port at which Core resides.
     pub port: u16,
 
+    /// Max request payload size in bytes
+    pub max_payload_bytes: usize,
+
     /// Plugin control
     pub plugin_pool: PluginPool,
 
@@ -533,6 +537,7 @@ impl Data {
             data_path: "".to_string(),
             public_url: "".to_string(),
             port: 8090,
+            max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
             plugin_pool: PluginPool {
                 plugins: Vec::new(),
             },

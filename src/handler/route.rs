@@ -171,7 +171,7 @@ pub async fn url_generic_rest_route(
     while let Some(chunk) = payload.next().await {
         let chunk = chunk.unwrap();
         // limit max size of in-memory payload
-        if (body.len() + chunk.len()) > 20 * 1024 * 1024 {
+        if (body.len() + chunk.len()) > data.max_payload_bytes {
             return HttpResponse::BadRequest().into();
         }
         body.extend_from_slice(&chunk);
