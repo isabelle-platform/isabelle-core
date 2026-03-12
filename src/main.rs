@@ -118,6 +118,7 @@ async fn main() -> std::io::Result<()> {
         srv.data_path = args.data_path.to_string();
         srv.public_url = args.pub_url.to_string();
         srv.port = args.bind_port;
+        srv.max_payload_bytes = args.max_payload_bytes;
 
         info!("Data storage: connecting");
         // Put options to internal structures and connect to database
@@ -249,6 +250,7 @@ async fn main() -> std::io::Result<()> {
         // Set up all generic routes
         let mut app = App::new()
             .app_data(data.clone())
+            .app_data(web::PayloadConfig::new(args.max_payload_bytes))
             .wrap(Cors::permissive())
             .wrap(IdentityMiddleware::default())
             .wrap(session_middleware(
