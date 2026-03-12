@@ -167,11 +167,16 @@ pub async fn url_generic_rest_route(
     payload: &mut web::Payload,
     method: &str,
 ) -> HttpResponse {
+    let max_payload_bytes = {
+        let srv_lock = data.server.lock();
+        let srv = unsafe { &*srv_lock.as_ptr() };
+        srv.max_payload_bytes
+    };
     let mut body = web::BytesMut::new();
     while let Some(chunk) = payload.next().await {
         let chunk = chunk.unwrap();
         // limit max size of in-memory payload
-        if (body.len() + chunk.len()) > data.max_payload_bytes {
+        if (body.len() + chunk.len()) > max_payload_bytes {
             return HttpResponse::BadRequest().into();
         }
         body.extend_from_slice(&chunk);
