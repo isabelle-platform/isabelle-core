@@ -35,6 +35,12 @@ pub async fn conv_response(resp: WebResponse) -> HttpResponse {
             return HttpResponse::Ok().into();
         }
         WebResponse::OkData(text) => {
+            let trimmed = text.trim_start();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                return HttpResponse::Ok()
+                    .content_type("application/json")
+                    .body(text);
+            }
             return HttpResponse::Ok().body(text);
         }
         WebResponse::OkFile(_name, _data) => {
