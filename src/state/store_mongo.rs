@@ -27,7 +27,7 @@ use isabelle_dm::data_model::list_result::ListResult;
 extern crate serde_json;
 
 use crate::state::store::Store;
-use crate::util::bson_wrapper::{BsonItem, u64_to_decimal128};
+use crate::util::bson_wrapper::{u64_to_decimal128, BsonItem};
 use async_trait::async_trait;
 use isabelle_dm::data_model::item::*;
 use log::{debug, info, trace};
