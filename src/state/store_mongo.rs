@@ -27,6 +27,7 @@ use isabelle_dm::data_model::list_result::ListResult;
 extern crate serde_json;
 
 use crate::state::store::Store;
+use crate::util::bson_wrapper::{BsonItem, u64_to_decimal128};
 use async_trait::async_trait;
 use isabelle_dm::data_model::item::*;
 use log::{debug, info, trace};
@@ -164,7 +165,7 @@ impl Store for StoreMongo {
                         continue;
                     }
 
-                    let coll: Collection<Item> = db.collection(&coll_name.1);
+                    let coll: Collection<BsonItem> = db.collection(&coll_name.1);
                     let index: IndexModel = IndexModel::builder().keys(doc! { "id": 1 }).build();
                     let _result = coll.create_index(index).await;
 
@@ -193,9 +194,10 @@ impl Store for StoreMongo {
                         let next_res = cursor.try_next().await;
                         match next_res {
                             Ok(opt) => {
-                                if let Some(doc) = opt {
-                                    map.insert(doc.id, true);
-                                    count = std::cmp::max(count, doc.id);
+                                if let Some(bson_doc) = opt {
+                                    let item: Item = bson_doc.into();
+                                    map.insert(item.id, true);
+                                    count = std::cmp::max(count, item.id);
                                 } else {
                                     break;
                                 }
@@ -272,14 +274,14 @@ impl Store for StoreMongo {
     }
 
     async fn get_item(&mut self, collection: &str, id: u64) -> Option<Item> {
-        let coll = self
+        let coll: Collection<BsonItem> = self
             .client
             .as_ref()
             .unwrap()
             .database(&self.database_name)
             .collection(collection);
         let filter = doc! {
-            "id": id as i64,
+            "id": u64_to_decimal128(id),
         };
 
         let result = coll.find_one(filter).await;
@@ -289,7 +291,9 @@ impl Store for StoreMongo {
                 if r.is_none() {
                     return None;
                 }
-                return Some(r.unwrap());
+                let bson_item = r.unwrap();
+                let item: Item = bson_item.into();
+                return Some(item);
             }
             Err(_e) => {}
         };
@@ -353,7 +357,7 @@ impl Store for StoreMongo {
             filter
         );
         if care_about_sort {
-            let coll: Collection<Item> = self
+            let coll: Collection<BsonItem> = self
                 .client
                 .as_ref()
                 .unwrap()
@@ -393,8 +397,9 @@ impl Store for StoreMongo {
                             break;
                         }
 
-                        lr.map
-                            .insert(c.as_ref().unwrap().id, c.as_ref().unwrap().clone());
+                        let bson_item = c.as_ref().unwrap();
+                        let item: Item = bson_item.clone().into();
+                        lr.map.insert(item.id, item);
                     }
                     Err(_e) => {
                         debug!("Error: {}", _e);
@@ -453,20 +458,28 @@ impl Store for StoreMongo {
             new_itm.merge(&itm);
         }
 
-        let coll: Collection<Item> = self
+        let coll: Collection<BsonItem> = self
             .client
             .as_ref()
             .unwrap()
             .database(&self.database_name)
             .collection(collection);
         let filter = doc! {
-            "id": itm.id as i64,
+            "id": u64_to_decimal128(itm.id),
         };
 
+        let bson_new_itm = BsonItem::from_item(&new_itm);
+
         if old_itm.as_ref().is_none() {
-            let _res = coll.insert_one(new_itm.clone()).await;
+            let res = coll.insert_one(bson_new_itm.clone()).await;
+            if let Err(e) = res {
+                log::error!("Error inserting item id={}: {:?}", new_itm.id, e);
+            }
         } else {
-            let _res = coll.replace_one(filter, new_itm.clone()).await;
+            let res = coll.replace_one(filter, bson_new_itm.clone()).await;
+            if let Err(e) = res {
+                log::error!("Error replacing item id={}: {:?}", new_itm.id, e);
+            }
         }
 
         let coll_id = self.collections[collection];
@@ -491,14 +504,14 @@ impl Store for StoreMongo {
     }
 
     async fn del_item(&mut self, collection: &str, id: u64) -> bool {
-        let coll: Collection<Item> = self
+        let coll: Collection<BsonItem> = self
             .client
             .as_ref()
             .unwrap()
             .database(&self.database_name)
             .collection(collection);
         let filter = doc! {
-            "id": id as i64,
+            "id": u64_to_decimal128(id),
         };
 
         let _res = coll.delete_one(filter).await;
