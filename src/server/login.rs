@@ -128,10 +128,10 @@ pub async fn register(
     let srv_lock = data.server.lock();
     let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     info!("User name: {}", login);
-    let mut usr = get_user(&mut srv, login.clone()).await;
+    let usr_by_login = get_user(&mut srv, login.clone()).await;
 
-    if usr.is_some() {
-        if usr.unwrap().safe_bool("logged_once", false) {
+    if let Some(ref existing) = usr_by_login {
+        if existing.safe_bool("logged_once", false) {
             return web::Json(ProcessResult {
                 succeeded: false,
                 error: "Login is already used".to_string(),
@@ -140,9 +140,9 @@ pub async fn register(
         }
     }
 
-    usr = get_user(&mut srv, email.clone()).await;
-    if usr.is_some() {
-        if usr.unwrap().safe_bool("logged_once", false) {
+    let usr_by_email = get_user(&mut srv, email.clone()).await;
+    if let Some(ref existing) = usr_by_email {
+        if existing.safe_bool("logged_once", false) {
             return web::Json(ProcessResult {
                 succeeded: false,
                 error: "Email is already used".to_string(),
@@ -152,7 +152,11 @@ pub async fn register(
     }
 
     if dry != "true" {
-        let mut itm = Item::new();
+        // Reuse an existing pending record (logged_once == false) to avoid
+        // creating a duplicate user if registration was already started once.
+        let mut itm = usr_by_login
+            .or(usr_by_email)
+            .unwrap_or_else(Item::new);
 
         itm.set_str("name", &login);
         itm.set_str("login", &login);
