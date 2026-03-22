@@ -154,9 +154,7 @@ pub async fn register(
     if dry != "true" {
         // Reuse an existing pending record (logged_once == false) to avoid
         // creating a duplicate user if registration was already started once.
-        let mut itm = usr_by_login
-            .or(usr_by_email)
-            .unwrap_or_else(Item::new);
+        let mut itm = usr_by_login.or(usr_by_email).unwrap_or_else(Item::new);
 
         itm.set_str("name", &login);
         itm.set_str("login", &login);
