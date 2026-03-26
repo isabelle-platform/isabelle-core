@@ -357,9 +357,20 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
             if item.1.strs.contains_key("email") && item.1.strs["email"] == email {
                 user.username = _user.as_ref().unwrap().id().unwrap();
                 user.id = *item.0;
+                // Derive roles from bool flags with prefix `role_is_...`.
+                //
+                // Important: avoid granting "admin" unless role_is_admin is explicitly true.
+                // Previously we pushed every role key regardless of its boolean value, which
+                // caused non-admin users (role_is_admin=false) to still receive "admin" in
+                // /is_logged_in payload, leading to incorrect UI gating.
                 for bp in &item.1.bools {
                     if bp.0.starts_with(&role_is) {
-                        user.role.push(bp.0[8..].to_string());
+                        if bp.0 == "role_is_admin" && *bp.1 == false {
+                            continue;
+                        }
+                        if *bp.1 == true {
+                            user.role.push(bp.0[8..].to_string());
+                        }
                     }
                 }
                 break;
