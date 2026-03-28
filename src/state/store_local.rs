@@ -64,6 +64,7 @@ impl StoreLocal {
 impl Store for StoreLocal {
     async fn connect(&mut self, url: &str, _alturl: &str) {
         self.path = url.to_string();
+        // FIXME: panicking on a missing vile path should explain which path it expects and which path it got
         let collections = fs::read_dir(self.path.to_string() + "/collection").unwrap();
         for coll in collections {
             let idx = coll.as_ref().unwrap().file_name().into_string().unwrap();
