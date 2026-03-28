@@ -42,7 +42,7 @@ Result:
 
 3. POST /logout:
 
-1. GET /itm/list (collection, [id], [id_min], [id_max], [skip], [limit], [sort_key], [filter]): read the item from the collection
+4. GET /itm/list (collection, [id], [id_min], [id_max], [skip], [limit], [sort_key], [filter]): read the item from the collection
 
 ```json
 {
@@ -51,7 +51,7 @@ Result:
 }
 ```
 
-2. POST /itm/edit ("item" inside the post request and inside the query string, "collection" and "merge" = false/true in query): edit the item in collection.
+5. POST /itm/edit ("item" inside the post request and inside the query string, "collection" and "merge" = false/true in query): edit the item in collection.
 
 ```json
 {
@@ -60,7 +60,7 @@ Result:
 }
 ```
 
-3. POST /itm/del (collection, id): delete the item from the collection
+6. POST /itm/del (collection, id): delete the item from the collection
 
 ```json
 {
