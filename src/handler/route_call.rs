@@ -196,14 +196,17 @@ pub async fn handle_item_files(mut payload: Multipart) -> (Item, HashMap<String,
 
     while let Ok(Some(mut field)) = payload.try_next().await {
         if field.name() == "item" {
+            let mut field_data: Vec<u8> = Vec::new();
             while let Ok(Some(chunk)) = field.try_next().await {
-                let data = chunk;
-                let v = &data.to_vec();
-                let strv = std::str::from_utf8(v).unwrap_or("{}");
-                let new_itm: Item = serde_json::from_str(strv).unwrap_or(Item::new());
-                post_itm.id = new_itm.id;
-                post_itm.merge(&new_itm);
+                field_data.extend_from_slice(&chunk);
             }
+            let strv = std::str::from_utf8(&field_data).unwrap_or("{}");
+            let new_itm: Item = serde_json::from_str(strv).unwrap_or_else(|e| {
+                log::error!("Failed to parse item JSON: {:?}", e);
+                Item::new()
+            });
+            post_itm.id = new_itm.id;
+            post_itm.merge(&new_itm);
         } else {
             let cd = field.content_disposition();
             let filename = cd

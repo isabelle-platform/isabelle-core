@@ -51,12 +51,14 @@ pub async fn gen_otp(
     };
 
     while let Ok(Some(mut field)) = payload.try_next().await {
+        let field_name = field.name().to_string();
+        let mut field_data: Vec<u8> = Vec::new();
         while let Ok(Some(chunk)) = field.try_next().await {
-            let data = chunk;
+            field_data.extend_from_slice(&chunk);
+        }
 
-            if field.name() == "username" {
-                lu.username = std::str::from_utf8(&data.to_vec()).unwrap().to_string();
-            }
+        if field_name == "username" {
+            lu.username = std::str::from_utf8(&field_data).unwrap_or("").to_string();
         }
     }
 
@@ -112,16 +114,18 @@ pub async fn register(
 
     // Take the username/password from POST data
     while let Ok(Some(mut field)) = payload.try_next().await {
+        let field_name = field.name().to_string();
+        let mut field_data: Vec<u8> = Vec::new();
         while let Ok(Some(chunk)) = field.try_next().await {
-            let data = chunk;
+            field_data.extend_from_slice(&chunk);
+        }
 
-            if field.name() == "login" {
-                login = std::str::from_utf8(&data.to_vec()).unwrap().to_string();
-            } else if field.name() == "email" {
-                email = std::str::from_utf8(&data.to_vec()).unwrap().to_string();
-            } else if field.name() == "dry" {
-                dry = std::str::from_utf8(&data.to_vec()).unwrap().to_string();
-            }
+        if field_name == "login" {
+            login = std::str::from_utf8(&field_data).unwrap_or("").to_string();
+        } else if field_name == "email" {
+            email = std::str::from_utf8(&field_data).unwrap_or("").to_string();
+        } else if field_name == "dry" {
+            dry = std::str::from_utf8(&field_data).unwrap_or("").to_string();
         }
     }
 
@@ -186,14 +190,16 @@ pub async fn login(
 
     // Take the username/password from POST data
     while let Ok(Some(mut field)) = payload.try_next().await {
+        let field_name = field.name().to_string();
+        let mut field_data: Vec<u8> = Vec::new();
         while let Ok(Some(chunk)) = field.try_next().await {
-            let data = chunk;
+            field_data.extend_from_slice(&chunk);
+        }
 
-            if field.name() == "username" {
-                lu.username = std::str::from_utf8(&data.to_vec()).unwrap().to_string();
-            } else if field.name() == "password" {
-                lu.password = std::str::from_utf8(&data.to_vec()).unwrap().to_string();
-            }
+        if field_name == "username" {
+            lu.username = std::str::from_utf8(&field_data).unwrap_or("").to_string();
+        } else if field_name == "password" {
+            lu.password = std::str::from_utf8(&field_data).unwrap_or("").to_string();
         }
     }
 
