@@ -56,15 +56,19 @@ pub async fn itm_edit(
     let mut itm = serde_qs::from_str::<Item>(&req.query_string()).unwrap();
 
     while let Ok(Some(mut field)) = payload.try_next().await {
+        let field_name = field.name().to_string();
+        let mut field_data: Vec<u8> = Vec::new();
         while let Ok(Some(chunk)) = field.try_next().await {
-            let data = chunk;
+            field_data.extend_from_slice(&chunk);
+        }
 
-            if field.name() == "item" {
-                let v = &data.to_vec();
-                let strv = std::str::from_utf8(v).unwrap_or("{}");
-                let new_itm: Item = serde_json::from_str(strv).unwrap_or(Item::new());
-                itm.merge(&new_itm);
-            }
+        if field_name == "item" {
+            let strv = std::str::from_utf8(&field_data).unwrap_or("{}");
+            let new_itm: Item = serde_json::from_str(strv).unwrap_or_else(|e| {
+                log::error!("Failed to parse item JSON: {:?}", e);
+                Item::new()
+            });
+            itm.merge(&new_itm);
         }
     }
 
