@@ -507,6 +507,9 @@ pub struct Data {
     /// Max request payload size in bytes
     pub max_payload_bytes: usize,
 
+    /// Path to script invoked by POST /system/update
+    pub update_script: String,
+
     /// Plugin control
     pub plugin_pool: PluginPool,
 
@@ -538,6 +541,7 @@ impl Data {
             public_url: "".to_string(),
             port: 8090,
             max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
+            update_script: "".to_string(),
             plugin_pool: PluginPool {
                 plugins: Vec::new(),
             },

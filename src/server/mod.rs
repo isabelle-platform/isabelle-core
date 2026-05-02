@@ -24,4 +24,5 @@
 pub mod itm;
 pub mod login;
 pub mod setting;
+pub mod system;
 pub mod user_control;

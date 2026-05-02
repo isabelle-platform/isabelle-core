@@ -80,4 +80,8 @@ pub struct Args {
     /// Set http-secure on cookies to false
     #[arg(long, default_value_t = false)]
     pub cookie_http_insecure: bool,
+
+    /// Path to update script invoked by POST /system/update
+    #[arg(long, default_value(""))]
+    pub update_script: String,
 }

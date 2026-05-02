@@ -57,6 +57,7 @@ use crate::server::user_control::*;
 use std::collections::HashMap;
 
 use crate::server::setting::*;
+use crate::server::system::*;
 
 use crate::state::state::*;
 use actix_cors::Cors;
@@ -119,6 +120,7 @@ async fn main() -> std::io::Result<()> {
         srv.public_url = args.pub_url.to_string();
         srv.port = args.bind_port;
         srv.max_payload_bytes = args.max_payload_bytes;
+        srv.update_script = args.update_script.to_string();
 
         info!("Data storage: connecting");
         // Put options to internal structures and connect to database
@@ -271,7 +273,8 @@ async fn main() -> std::io::Result<()> {
             .route(
                 "/setting/gcal_auth_end",
                 web::post().to(setting_gcal_auth_end),
-            );
+            )
+            .route("/system/update", web::post().to(system_update));
         // Set up extra protected routes
         for route in &new_routes {
             if route.1 == "post" {
