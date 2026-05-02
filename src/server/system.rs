@@ -57,7 +57,21 @@ pub async fn system_update(
 
     info!("System update: invoking {}", script);
 
-    let output = Command::new(&script).output();
+    let parts: Vec<&str> = script.split_whitespace().collect();
+    let (program, args) = match parts.split_first() {
+        Some((p, a)) => (*p, a),
+        None => {
+            return HttpResponse::Ok().body(
+                serde_json::to_string(&ProcessResult {
+                    succeeded: false,
+                    error: "update script is not configured".to_string(),
+                    data: HashMap::new(),
+                })
+                .unwrap(),
+            );
+        }
+    };
+    let output = Command::new(program).args(args).output();
     match output {
         Ok(out) => {
             let mut data_map: HashMap<String, String> = HashMap::new();
