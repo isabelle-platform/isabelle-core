@@ -185,11 +185,7 @@ impl SecretStore {
             }
         }
 
-        let name = final_item
-            .strs
-            .get(NAME_FIELD)
-            .cloned()
-            .unwrap_or_default();
+        let name = final_item.strs.get(NAME_FIELD).cloned().unwrap_or_default();
         if name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -200,10 +196,7 @@ impl SecretStore {
             if other_id != target_id {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
-                    format!(
-                        "secret name '{}' already in use by id {}",
-                        name, other_id
-                    ),
+                    format!("secret name '{}' already in use by id {}", name, other_id),
                 ));
             }
         }
@@ -248,28 +241,21 @@ impl SecretStore {
         Ok(true)
     }
 
-    fn flush_state(
-        &self,
-        entries: &HashMap<u64, Item>,
-        next_id: u64,
-    ) -> io::Result<()> {
+    fn flush_state(&self, entries: &HashMap<u64, Item>, next_id: u64) -> io::Result<()> {
         let env = Envelope {
             v: FORMAT_VERSION,
             next_id,
             entries: entries.clone(),
         };
-        let plaintext = serde_json::to_vec(&env).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {}", e))
-        })?;
+        let plaintext = serde_json::to_vec(&env)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("serialize: {}", e)))?;
         let blob = encrypt_blob(&self.cipher, &plaintext)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("encrypt: {}", e)))?;
         atomic_write(&self.path, &blob, 0o600)
     }
 }
 
-fn build_name_index(
-    entries: &HashMap<u64, Item>,
-) -> io::Result<HashMap<String, u64>> {
+fn build_name_index(entries: &HashMap<u64, Item>) -> io::Result<HashMap<String, u64>> {
     let mut idx: HashMap<String, u64> = HashMap::new();
     for (id, it) in entries {
         if let Some(name) = it.strs.get(NAME_FIELD) {
@@ -290,10 +276,7 @@ fn build_name_index(
     Ok(idx)
 }
 
-fn decrypt_and_parse(
-    cipher: &Aes256Gcm,
-    blob: &[u8],
-) -> Result<(HashMap<u64, Item>, u64), String> {
+fn decrypt_and_parse(cipher: &Aes256Gcm, blob: &[u8]) -> Result<(HashMap<u64, Item>, u64), String> {
     if blob.len() < NONCE_LEN {
         return Err("blob shorter than nonce".to_string());
     }
@@ -562,7 +545,10 @@ mod tests {
         let err = expect_err(store.set(&rename_a_to_b, false));
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         // original state must be intact
-        assert_eq!(store.get(id_a).unwrap().strs.get(NAME_FIELD).cloned(), Some("a".into()));
+        assert_eq!(
+            store.get(id_a).unwrap().strs.get(NAME_FIELD).cloned(),
+            Some("a".into())
+        );
     }
 
     #[test]
@@ -575,7 +561,10 @@ mod tests {
         update.id = id;
         let id2 = store.set(&update, false).unwrap();
         assert_eq!(id, id2);
-        assert_eq!(store.get(id).unwrap().strs.get("v").cloned(), Some("2".into()));
+        assert_eq!(
+            store.get(id).unwrap().strs.get("v").cloned(),
+            Some("2".into())
+        );
     }
 
     // -------- persistence --------
@@ -716,7 +705,10 @@ mod tests {
         let (k, s) = paths(&dir);
         let mut store = SecretStore::open(&k, &s).unwrap();
         store
-            .set(&item_named("a", &[("token", "SUPERSECRETVALUE12345")]), false)
+            .set(
+                &item_named("a", &[("token", "SUPERSECRETVALUE12345")]),
+                false,
+            )
             .unwrap();
         let blob = fs::read(&s).unwrap();
         assert!(!blob.windows(20).any(|w| w == b"SUPERSECRETVALUE1234"));
@@ -854,8 +846,14 @@ mod tests {
         assert_eq!(by_name_a.id, store.get(by_name_a.id).unwrap().id);
         assert_eq!(by_name_b.id, store.get(by_name_b.id).unwrap().id);
         // names recorded as strs["name"]
-        assert_eq!(by_name_a.strs.get(NAME_FIELD).cloned(), Some("svc-a".into()));
-        assert_eq!(by_name_b.strs.get(NAME_FIELD).cloned(), Some("svc-b".into()));
+        assert_eq!(
+            by_name_a.strs.get(NAME_FIELD).cloned(),
+            Some("svc-a".into())
+        );
+        assert_eq!(
+            by_name_b.strs.get(NAME_FIELD).cloned(),
+            Some("svc-b".into())
+        );
     }
 
     #[test]
@@ -939,10 +937,19 @@ mod tests {
             .unwrap();
         let masked = store.get_masked(id).unwrap();
         assert_eq!(masked.id, id);
-        assert_eq!(masked.strs.get("secret_token").map(String::as_str), Some(HIDDEN_PLACEHOLDER));
-        assert_eq!(masked.strs.get("secret_refresh").map(String::as_str), Some(HIDDEN_PLACEHOLDER));
+        assert_eq!(
+            masked.strs.get("secret_token").map(String::as_str),
+            Some(HIDDEN_PLACEHOLDER)
+        );
+        assert_eq!(
+            masked.strs.get("secret_refresh").map(String::as_str),
+            Some(HIDDEN_PLACEHOLDER)
+        );
         // Non-secret fields untouched.
-        assert_eq!(masked.strs.get("description").cloned(), Some("production".into()));
+        assert_eq!(
+            masked.strs.get("description").cloned(),
+            Some("production".into())
+        );
         assert_eq!(masked.strs.get(NAME_FIELD).cloned(), Some("stripe".into()));
     }
 
@@ -978,7 +985,10 @@ mod tests {
         );
         // typed maps left intact (masking is strs-only by design)
         assert_eq!(masked.bools.get("secret_revoked").copied(), Some(true));
-        assert_eq!(masked.u64s.get("secret_expires_at").copied(), Some(1735689600));
+        assert_eq!(
+            masked.u64s.get("secret_expires_at").copied(),
+            Some(1735689600)
+        );
     }
 
     #[test]
@@ -1001,11 +1011,23 @@ mod tests {
             )
             .unwrap();
         let masked = store.get_masked(id).unwrap();
-        assert_eq!(masked.strs.get("secret_x").map(String::as_str), Some(HIDDEN_PLACEHOLDER));
+        assert_eq!(
+            masked.strs.get("secret_x").map(String::as_str),
+            Some(HIDDEN_PLACEHOLDER)
+        );
         // Capital S — does not match the lowercase prefix.
-        assert_eq!(masked.strs.get("Secret_y").cloned(), Some("case-sensitive-no-mask".into()));
-        assert_eq!(masked.strs.get("not_secret").cloned(), Some("visible".into()));
-        assert_eq!(masked.strs.get("api_secret").cloned(), Some("visible-too".into()));
+        assert_eq!(
+            masked.strs.get("Secret_y").cloned(),
+            Some("case-sensitive-no-mask".into())
+        );
+        assert_eq!(
+            masked.strs.get("not_secret").cloned(),
+            Some("visible".into())
+        );
+        assert_eq!(
+            masked.strs.get("api_secret").cloned(),
+            Some("visible-too".into())
+        );
     }
 
     #[test]
@@ -1143,7 +1165,11 @@ mod tests {
             .set(
                 &item_named(
                     "svc",
-                    &[("secret_token", "REAL"), ("description", "old"), ("env", "p")],
+                    &[
+                        ("secret_token", "REAL"),
+                        ("description", "old"),
+                        ("env", "p"),
+                    ],
                 ),
                 false,
             )

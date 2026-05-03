@@ -41,10 +41,7 @@ struct SecretRef {
     name: String,
 }
 
-async fn ensure_admin(
-    data: &web::Data<State>,
-    user: &Identity,
-) -> Result<(), HttpResponse> {
+async fn ensure_admin(data: &web::Data<State>, user: &Identity) -> Result<(), HttpResponse> {
     let srv_lock = data.server.lock();
     let srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let usr = get_user(srv, user.id().unwrap()).await;
