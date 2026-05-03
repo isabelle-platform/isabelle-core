@@ -56,6 +56,7 @@ use crate::server::login::*;
 use crate::server::user_control::*;
 use std::collections::HashMap;
 
+use crate::server::secret::*;
 use crate::server::setting::*;
 use crate::server::system::*;
 
@@ -121,6 +122,31 @@ async fn main() -> std::io::Result<()> {
         srv.port = args.bind_port;
         srv.max_payload_bytes = args.max_payload_bytes;
         srv.update_script = args.update_script.to_string();
+
+        // Initialize the encrypted secret store. The master key file
+        // defaults to ${data_path}/.secret-key when not specified.
+        let key_file = if args.secret_key_file.is_empty() {
+            std::path::PathBuf::from(&args.data_path).join(".secret-key")
+        } else {
+            std::path::PathBuf::from(&args.secret_key_file)
+        };
+        let store_file = std::path::PathBuf::from(&args.data_path).join("secrets.enc");
+        if let Some(parent) = key_file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match crate::state::secrets::SecretStore::open(&key_file, &store_file) {
+            Ok(s) => {
+                info!("Secret store: opened ({} entries)", s.list_keys().len());
+                srv.secrets = Some(s);
+            }
+            Err(e) => {
+                log::error!("Secret store: failed to open: {}", e);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("secret store init failed: {}", e),
+                ));
+            }
+        }
 
         info!("Data storage: connecting");
         // Put options to internal structures and connect to database
@@ -274,7 +300,10 @@ async fn main() -> std::io::Result<()> {
                 "/setting/gcal_auth_end",
                 web::post().to(setting_gcal_auth_end),
             )
-            .route("/system/update", web::post().to(system_update));
+            .route("/system/update", web::post().to(system_update))
+            .route("/secret/edit", web::post().to(secret_edit))
+            .route("/secret/del", web::post().to(secret_del))
+            .route("/secret/list", web::get().to(secret_list));
         // Set up extra protected routes
         for route in &new_routes {
             if route.1 == "post" {

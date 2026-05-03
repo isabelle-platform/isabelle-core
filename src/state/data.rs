@@ -510,6 +510,10 @@ pub struct Data {
     /// Path to script invoked by POST /system/update
     pub update_script: String,
 
+    /// Encrypted user-data secret store. Populated in main() after data
+    /// path is known.
+    pub secrets: Option<crate::state::secrets::SecretStore>,
+
     /// Plugin control
     pub plugin_pool: PluginPool,
 
@@ -542,6 +546,7 @@ impl Data {
             port: 8090,
             max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
             update_script: "".to_string(),
+            secrets: None,
             plugin_pool: PluginPool {
                 plugins: Vec::new(),
             },

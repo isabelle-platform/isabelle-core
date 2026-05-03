@@ -84,4 +84,10 @@ pub struct Args {
     /// Path to update script invoked by POST /system/update
     #[arg(long, default_value(""))]
     pub update_script: String,
+
+    /// Path to the master key file used to encrypt the secret store.
+    /// If empty, defaults to ${data_path}/.secret-key. Auto-generated on
+    /// first run if missing.
+    #[arg(long, default_value(""))]
+    pub secret_key_file: String,
 }
