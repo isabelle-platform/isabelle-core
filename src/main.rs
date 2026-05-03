@@ -136,7 +136,7 @@ async fn main() -> std::io::Result<()> {
         }
         match crate::state::secrets::SecretStore::open(&key_file, &store_file) {
             Ok(s) => {
-                info!("Secret store: opened ({} entries)", s.list_keys().len());
+                info!("Secret store: opened ({} entries)", s.list().len());
                 srv.secrets = Some(s);
             }
             Err(e) => {
@@ -303,7 +303,8 @@ async fn main() -> std::io::Result<()> {
             .route("/system/update", web::post().to(system_update))
             .route("/secret/edit", web::post().to(secret_edit))
             .route("/secret/del", web::post().to(secret_del))
-            .route("/secret/list", web::get().to(secret_list));
+            .route("/secret/list", web::get().to(secret_list))
+            .route("/secret/get", web::post().to(secret_get));
         // Set up extra protected routes
         for route in &new_routes {
             if route.1 == "post" {
