@@ -408,6 +408,56 @@ impl PluginApi for IsabellePluginApi {
         }
     }
 
+    fn secret_get(&self, id: u64) -> Option<Item> {
+        trace!("secret_get++");
+        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+        let res = srv_mut.secrets.as_ref().and_then(|s| s.get(id));
+        trace!("secret_get--");
+        res
+    }
+
+    fn secret_get_by_name(&self, name: &str) -> Option<Item> {
+        trace!("secret_get_by_name++");
+        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+        let res = srv_mut.secrets.as_ref().and_then(|s| s.get_by_name(name));
+        trace!("secret_get_by_name--");
+        res
+    }
+
+    fn secret_list(&self) -> Vec<(u64, String)> {
+        trace!("secret_list++");
+        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+        let res = srv_mut
+            .secrets
+            .as_ref()
+            .map(|s| s.list())
+            .unwrap_or_default();
+        trace!("secret_list--");
+        res
+    }
+
+    fn secret_set(&self, item: &Item, merge: bool) -> Result<u64, String> {
+        trace!("secret_set++");
+        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+        let res = match srv_mut.secrets.as_mut() {
+            Some(s) => s.set(item, merge).map_err(|e| e.to_string()),
+            None => Err("secret store is not initialized".to_string()),
+        };
+        trace!("secret_set--");
+        res
+    }
+
+    fn secret_del(&self, id: u64) -> bool {
+        trace!("secret_del++");
+        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+        let res = match srv_mut.secrets.as_mut() {
+            Some(s) => s.del(id).unwrap_or(false),
+            None => false,
+        };
+        trace!("secret_del--");
+        res
+    }
+
     fn fn_set_state(&self, handle: &str, value: Option<Box<dyn Any + Send>>) {
         // Verbose logging for the problematic key to catch who overwrites/clears it.
         trace!("fn_set_state++");
