@@ -196,29 +196,351 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn item_with(pairs: &[(&str, &str)]) -> Item {
+        let mut it = Item::new();
+        for (k, v) in pairs {
+            it.strs.insert((*k).to_string(), (*v).to_string());
+        }
+        it
+    }
+
+    fn paths(dir: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        (dir.path().join("k"), dir.path().join("s.enc"))
+    }
+
+    /// SecretStore intentionally does not implement Debug (no leakage of
+    /// decrypted contents via {:?}), so we can't use Result::unwrap_err.
+    fn expect_err(r: io::Result<SecretStore>) -> io::Error {
+        match r {
+            Ok(_) => panic!("expected Err"),
+            Err(e) => e,
+        }
+    }
+
+    // -------- initialization & key file lifecycle --------
+
     #[test]
-    fn roundtrip_set_get_del() {
+    fn first_open_creates_key_file_and_no_store() {
         let dir = tempdir().unwrap();
-        let key_path = dir.path().join("k");
+        let (k, s) = paths(&dir);
+        let store = SecretStore::open(&k, &s).unwrap();
+        assert!(k.exists(), "key file must be created on first open");
+        assert!(!s.exists(), "store file must not be created until first write");
+        assert!(store.list_keys().is_empty());
+        let bytes = fs::read(&k).unwrap();
+        assert_eq!(bytes.len(), KEY_LEN, "key file must hold exactly 32 bytes");
+    }
+
+    #[test]
+    fn key_file_is_reused_across_opens() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let _ = SecretStore::open(&k, &s).unwrap();
+        let key1 = fs::read(&k).unwrap();
+        let _ = SecretStore::open(&k, &s).unwrap();
+        let key2 = fs::read(&k).unwrap();
+        assert_eq!(key1, key2, "subsequent opens must not regenerate the key");
+    }
+
+    #[test]
+    fn rejects_key_file_of_wrong_size() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        fs::write(&k, b"too-short").unwrap();
+        let err = expect_err(SecretStore::open(&k, &s));
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn creates_parent_directory_for_key_file() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("nested/deep/key");
         let store_path = dir.path().join("s.enc");
+        let _ = SecretStore::open(&nested, &store_path).unwrap();
+        assert!(nested.exists());
+    }
 
-        let mut item_a = Item::new();
-        item_a.strs.insert("login".into(), "alpha".into());
-        item_a.strs.insert("token".into(), "tok-a".into());
+    // -------- round-trip and persistence --------
 
-        let mut item_b = Item::new();
-        item_b.strs.insert("login".into(), "beta".into());
+    #[test]
+    fn set_get_returns_full_item_fields() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        let it = item_with(&[("login", "alice"), ("token", "tok-1"), ("scope", "r/w")]);
+        store.set("svc", &it).unwrap();
+        let got = store.get("svc").unwrap();
+        assert_eq!(got.strs.get("login").cloned(), Some("alice".into()));
+        assert_eq!(got.strs.get("token").cloned(), Some("tok-1".into()));
+        assert_eq!(got.strs.get("scope").cloned(), Some("r/w".into()));
+    }
 
-        let mut s = SecretStore::open(&key_path, &store_path).unwrap();
-        s.set("a", &item_a).unwrap();
-        s.set("b", &item_b).unwrap();
-        assert_eq!(s.get("a").unwrap().strs.get("token").cloned(), Some("tok-a".into()));
+    #[test]
+    fn set_overwrites_existing_value() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        store.set("dup", &item_with(&[("v", "1")])).unwrap();
+        store.set("dup", &item_with(&[("v", "2")])).unwrap();
+        assert_eq!(store.get("dup").unwrap().strs.get("v").cloned(), Some("2".into()));
+        assert_eq!(store.list_keys(), vec!["dup".to_string()]);
+    }
 
-        let s2 = SecretStore::open(&key_path, &store_path).unwrap();
-        assert_eq!(s2.get("b").unwrap().strs.get("login").cloned(), Some("beta".into()));
+    #[test]
+    fn persists_across_reopen() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        {
+            let mut store = SecretStore::open(&k, &s).unwrap();
+            store.set("k1", &item_with(&[("x", "y")])).unwrap();
+            store.set("k2", &item_with(&[("a", "b")])).unwrap();
+        }
+        let store = SecretStore::open(&k, &s).unwrap();
+        assert_eq!(store.get("k1").unwrap().strs.get("x").cloned(), Some("y".into()));
+        assert_eq!(store.get("k2").unwrap().strs.get("a").cloned(), Some("b".into()));
+    }
 
-        let mut s3 = SecretStore::open(&key_path, &store_path).unwrap();
-        assert!(s3.del("a").unwrap());
-        assert_eq!(s3.list_keys(), vec!["b".to_string()]);
+    #[test]
+    fn get_missing_returns_none() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let store = SecretStore::open(&k, &s).unwrap();
+        assert!(store.get("nope").is_none());
+    }
+
+    #[test]
+    fn del_missing_returns_false_and_skips_flush() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        assert!(!store.del("ghost").unwrap());
+        assert!(!s.exists(), "deleting a missing key from empty store must not create the blob");
+    }
+
+    #[test]
+    fn del_existing_removes_and_persists() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        store.set("a", &item_with(&[("v", "1")])).unwrap();
+        store.set("b", &item_with(&[("v", "2")])).unwrap();
+        assert!(store.del("a").unwrap());
+        let store2 = SecretStore::open(&k, &s).unwrap();
+        assert!(store2.get("a").is_none());
+        assert!(store2.get("b").is_some());
+    }
+
+    // -------- list ordering --------
+
+    #[test]
+    fn list_keys_is_sorted() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        for name in &["zeta", "alpha", "mu", "beta"] {
+            store.set(name, &item_with(&[("v", name)])).unwrap();
+        }
+        assert_eq!(
+            store.list_keys(),
+            vec!["alpha".to_string(), "beta".into(), "mu".into(), "zeta".into()]
+        );
+    }
+
+    // -------- security properties --------
+
+    #[test]
+    fn nonce_is_random_per_write() {
+        // Writing the same plaintext twice must produce different ciphertexts
+        // (random nonce + tag), otherwise we have nonce reuse.
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        store.set("k", &item_with(&[("v", "1")])).unwrap();
+        let blob1 = fs::read(&s).unwrap();
+        store.set("k", &item_with(&[("v", "1")])).unwrap();
+        let blob2 = fs::read(&s).unwrap();
+        assert_ne!(blob1, blob2, "two writes of identical content must differ on disk");
+        assert_ne!(&blob1[..NONCE_LEN], &blob2[..NONCE_LEN], "nonces must differ");
+    }
+
+    #[test]
+    fn store_blob_does_not_contain_plaintext() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        store
+            .set("k", &item_with(&[("token", "SUPERSECRETVALUE12345")]))
+            .unwrap();
+        let blob = fs::read(&s).unwrap();
+        assert!(
+            !blob.windows(20).any(|w| w == b"SUPERSECRETVALUE1234"),
+            "ciphertext must not contain plaintext substring"
+        );
+    }
+
+    #[test]
+    fn tampered_blob_fails_to_decrypt() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        {
+            let mut store = SecretStore::open(&k, &s).unwrap();
+            store.set("k", &item_with(&[("v", "x")])).unwrap();
+        }
+        // Flip a byte inside the ciphertext (past the nonce).
+        let mut blob = fs::read(&s).unwrap();
+        let idx = NONCE_LEN + 1;
+        blob[idx] ^= 0xFF;
+        fs::write(&s, &blob).unwrap();
+        let err = expect_err(SecretStore::open(&k, &s));
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn truncated_blob_fails_to_decrypt() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        {
+            let mut store = SecretStore::open(&k, &s).unwrap();
+            store.set("k", &item_with(&[("v", "x")])).unwrap();
+        }
+        // Cut off the GCM tag at the end.
+        let blob = fs::read(&s).unwrap();
+        fs::write(&s, &blob[..blob.len() - 4]).unwrap();
+        let err = expect_err(SecretStore::open(&k, &s));
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn blob_shorter_than_nonce_is_rejected() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        // First create a valid key.
+        let _ = SecretStore::open(&k, &s).unwrap();
+        // Now write a too-short blob.
+        fs::write(&s, vec![0u8; NONCE_LEN - 1]).unwrap();
+        let err = expect_err(SecretStore::open(&k, &s));
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn wrong_key_cannot_decrypt_existing_store() {
+        let dir = tempdir().unwrap();
+        let (k1, s) = paths(&dir);
+        {
+            let mut store = SecretStore::open(&k1, &s).unwrap();
+            store.set("k", &item_with(&[("v", "x")])).unwrap();
+        }
+        // Replace the key file with a different 32-byte key.
+        fs::write(&k1, vec![0xAAu8; KEY_LEN]).unwrap();
+        let err = expect_err(SecretStore::open(&k1, &s));
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    // -------- edge cases --------
+
+    #[test]
+    fn empty_item_round_trip() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        store.set("empty", &Item::new()).unwrap();
+        let got = store.get("empty").unwrap();
+        assert!(got.strs.is_empty());
+    }
+
+    #[test]
+    fn unicode_and_binary_safe_values() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        let payload = "пароль 🔐 with \"quotes\", newlines\nand tabs\t";
+        store
+            .set("ключ", &item_with(&[("значение", payload)]))
+            .unwrap();
+        let store2 = SecretStore::open(&k, &s).unwrap();
+        assert_eq!(
+            store2.get("ключ").unwrap().strs.get("значение").cloned(),
+            Some(payload.into())
+        );
+    }
+
+    #[test]
+    fn large_value_round_trip() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        let big = "X".repeat(64 * 1024);
+        store.set("big", &item_with(&[("v", &big)])).unwrap();
+        let store2 = SecretStore::open(&k, &s).unwrap();
+        assert_eq!(store2.get("big").unwrap().strs.get("v").map(String::len), Some(big.len()));
+    }
+
+    #[test]
+    fn many_keys() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        for i in 0..200 {
+            store
+                .set(&format!("k{:03}", i), &item_with(&[("i", &i.to_string())]))
+                .unwrap();
+        }
+        let store2 = SecretStore::open(&k, &s).unwrap();
+        assert_eq!(store2.list_keys().len(), 200);
+        assert_eq!(
+            store2.get("k042").unwrap().strs.get("i").cloned(),
+            Some("42".into())
+        );
+    }
+
+    // -------- file layout --------
+
+    #[test]
+    fn no_tmp_file_left_after_successful_write() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        store.set("k", &item_with(&[("v", "1")])).unwrap();
+        let tmp = s.with_extension("tmp");
+        assert!(!tmp.exists(), "tmp file must be renamed away after flush");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_and_store_files_have_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        store.set("k", &item_with(&[("v", "1")])).unwrap();
+
+        let key_mode = fs::metadata(&k).unwrap().permissions().mode() & 0o777;
+        let store_mode = fs::metadata(&s).unwrap().permissions().mode() & 0o777;
+        assert_eq!(key_mode, 0o600, "key file must be 0600");
+        assert_eq!(store_mode, 0o600, "store file must be 0600");
+    }
+
+    #[test]
+    fn empty_value_string_round_trip() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        store.set("k", &item_with(&[("v", "")])).unwrap();
+        assert_eq!(
+            store.get("k").unwrap().strs.get("v").cloned(),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn empty_key_string_is_storable() {
+        // Documents current behavior: empty string is a valid key at the
+        // SecretStore layer. The HTTP layer rejects empty keys separately.
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        store.set("", &item_with(&[("v", "x")])).unwrap();
+        assert_eq!(store.list_keys(), vec!["".to_string()]);
+        assert!(store.get("").is_some());
     }
 }
