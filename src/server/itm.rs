@@ -72,17 +72,18 @@ pub async fn itm_edit(
         }
     }
 
+    // `itm_auth_hook` is a flat handler list with no ":"-split, so it's still
+    // read straight from the cached internals. Pre-/post-edit hooks are read
+    // from the pre-parsed route cache below.
+    let internals = srv.rw.get_internals().await;
+    let cache = srv.route_cache.clone();
+
     /* call auth hooks */
-    {
-        let routes = srv
-            .rw
-            .get_internals()
-            .await
-            .safe_strstr("itm_auth_hook", &HashMap::new());
+    if let Some(routes) = internals.strstrs.get("itm_auth_hook") {
         for route in routes {
             if !call_item_auth_hook(
                 &mut srv,
-                &route.1,
+                route.1,
                 &usr,
                 &mc.collection,
                 itm.id,
@@ -105,34 +106,31 @@ pub async fn itm_edit(
         let old_itm = srv_mut.rw.get_item(&mc.collection, itm.id).await;
         /* call pre edit hooks */
         {
-            let routes = (*srv_mut)
-                .rw
-                .get_internals()
-                .await
-                .safe_strstr("item_pre_edit_hook", &HashMap::new());
-            for route in &routes {
-                let parts: Vec<&str> = route.1.split(":").collect();
-                if parts[0] == mc.collection || parts[0] == "*" {
-                    let res = call_item_pre_edit_hook(
-                        &mut (*srv_mut),
-                        parts[1],
-                        &usr,
-                        &mc.collection,
-                        old_itm.clone(),
-                        &mut itm_clone,
-                        if old_itm.is_some() {
-                            DataObjectAction::Modify
-                        } else {
-                            DataObjectAction::Create
-                        },
-                        mc.merge,
-                    )
-                    .await;
-                    if !res.succeeded {
-                        info!("Item pre edit hook failed: {} - {}", parts[1], res.error);
-                        let s = serde_json::to_string(&res);
-                        return HttpResponse::Ok().body(s.unwrap_or("{}".to_string()));
-                    }
+            let specific = cache.item_pre_edit.get(&mc.collection);
+            for handler in specific
+                .into_iter()
+                .flatten()
+                .chain(cache.item_pre_edit_wildcard.iter())
+            {
+                let res = call_item_pre_edit_hook(
+                    &mut (*srv_mut),
+                    handler,
+                    &usr,
+                    &mc.collection,
+                    old_itm.clone(),
+                    &mut itm_clone,
+                    if old_itm.is_some() {
+                        DataObjectAction::Modify
+                    } else {
+                        DataObjectAction::Create
+                    },
+                    mc.merge,
+                )
+                .await;
+                if !res.succeeded {
+                    info!("Item pre edit hook failed: {} - {}", handler, res.error);
+                    let s = serde_json::to_string(&res);
+                    return HttpResponse::Ok().body(s.unwrap_or("{}".to_string()));
                 }
             }
         }
@@ -143,30 +141,27 @@ pub async fn itm_edit(
             .await;
         info!("Collection {} element {} set", mc.collection, itm.id);
 
-        /* call hooks */
+        /* call post edit hooks */
         {
-            let routes = (*srv_mut)
-                .rw
-                .get_internals()
-                .await
-                .safe_strstr("item_post_edit_hook", &HashMap::new());
-            for route in routes {
-                let parts: Vec<&str> = route.1.split(":").collect();
-                if parts[0] == mc.collection || parts[0] == "*" {
-                    call_item_post_edit_hook(
-                        &mut (*srv_mut),
-                        &parts[1],
-                        &mc.collection,
-                        old_itm.clone(),
-                        itm.id,
-                        if old_itm.is_some() {
-                            DataObjectAction::Modify
-                        } else {
-                            DataObjectAction::Create
-                        },
-                    )
-                    .await;
-                }
+            let specific = cache.item_post_edit.get(&mc.collection);
+            for handler in specific
+                .into_iter()
+                .flatten()
+                .chain(cache.item_post_edit_wildcard.iter())
+            {
+                call_item_post_edit_hook(
+                    &mut (*srv_mut),
+                    handler,
+                    &mc.collection,
+                    old_itm.clone(),
+                    itm.id,
+                    if old_itm.is_some() {
+                        DataObjectAction::Modify
+                    } else {
+                        DataObjectAction::Create
+                    },
+                )
+                .await;
             }
         }
 
@@ -197,15 +192,14 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
     let mc = serde_qs::from_str::<MergeColl>(&req.query_string()).unwrap();
     let itm = serde_qs::from_str::<Item>(&req.query_string()).unwrap();
 
+    // See itm_edit for the cache/internals split rationale.
+    let internals = srv.rw.get_internals().await;
+    let cache = srv.route_cache.clone();
+
     /* call auth hooks */
-    {
-        let routes = srv
-            .rw
-            .get_internals()
-            .await
-            .safe_strstr("itm_auth_hook", &HashMap::new());
+    if let Some(routes) = internals.strstrs.get("itm_auth_hook") {
         for route in routes {
-            if !call_item_auth_hook(&mut srv, &route.1, &usr, &mc.collection, itm.id, None, true)
+            if !call_item_auth_hook(&mut srv, route.1, &usr, &mc.collection, itm.id, None, true)
                 .await
             {
                 return HttpResponse::Forbidden().into();
@@ -220,30 +214,27 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
 
         /* call pre edit hooks before removal */
         {
-            let routes = (*srv_mut)
-                .rw
-                .get_internals()
-                .await
-                .safe_strstr("item_pre_edit_hook", &HashMap::new());
-            for route in &routes {
-                let parts: Vec<&str> = route.1.split(":").collect();
-                if parts[0] == mc.collection || parts[0] == "*" {
-                    let res = call_item_pre_edit_hook(
-                        &mut (*srv_mut),
-                        parts[1],
-                        &usr,
-                        &mc.collection,
-                        old_itm.clone(),
-                        &mut new_itm,
-                        DataObjectAction::Delete,
-                        mc.merge,
-                    )
-                    .await;
-                    if !res.succeeded {
-                        info!("Item pre edit hook failed: {} - {}", parts[1], res.error);
-                        let s = serde_json::to_string(&res);
-                        return HttpResponse::Ok().body(s.unwrap_or("{}".to_string()));
-                    }
+            let specific = cache.item_pre_edit.get(&mc.collection);
+            for handler in specific
+                .into_iter()
+                .flatten()
+                .chain(cache.item_pre_edit_wildcard.iter())
+            {
+                let res = call_item_pre_edit_hook(
+                    &mut (*srv_mut),
+                    handler,
+                    &usr,
+                    &mc.collection,
+                    old_itm.clone(),
+                    &mut new_itm,
+                    DataObjectAction::Delete,
+                    mc.merge,
+                )
+                .await;
+                if !res.succeeded {
+                    info!("Item pre edit hook failed: {} - {}", handler, res.error);
+                    let s = serde_json::to_string(&res);
+                    return HttpResponse::Ok().body(s.unwrap_or("{}".to_string()));
                 }
             }
         }
@@ -252,26 +243,23 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
             info!("Collection {} element {} removed", mc.collection, itm.id);
         }
 
-        /* call hooks */
+        /* call post edit hooks */
         {
-            let routes = srv_mut
-                .rw
-                .get_internals()
-                .await
-                .safe_strstr("item_post_edit_hook", &HashMap::new());
-            for route in routes {
-                let parts: Vec<&str> = route.1.split(":").collect();
-                if parts[0] == mc.collection || parts[0] == "*" {
-                    call_item_post_edit_hook(
-                        srv_mut,
-                        &parts[1],
-                        &mc.collection,
-                        old_itm.clone(),
-                        itm.id,
-                        DataObjectAction::Delete,
-                    )
-                    .await;
-                }
+            let specific = cache.item_post_edit.get(&mc.collection);
+            for handler in specific
+                .into_iter()
+                .flatten()
+                .chain(cache.item_post_edit_wildcard.iter())
+            {
+                call_item_post_edit_hook(
+                    srv_mut,
+                    handler,
+                    &mc.collection,
+                    old_itm.clone(),
+                    itm.id,
+                    DataObjectAction::Delete,
+                )
+                .await;
             }
         }
 
@@ -339,19 +327,19 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
             filters.push(lq.filter.to_string());
         }
 
-        let db_filter_routes =
-            internals.safe_strstr("itm_list_db_filter_hook", &HashMap::new());
-        for route in db_filter_routes {
-            let new_filters = call_item_list_db_filter_hook(
-                &mut srv,
-                &route.1,
-                &usr,
-                &lq.collection,
-                &lq.context,
-                "mongo",
-            )
-            .await;
-            filters.extend(new_filters);
+        if let Some(db_filter_routes) = internals.strstrs.get("itm_list_db_filter_hook") {
+            for route in db_filter_routes {
+                let new_filters = call_item_list_db_filter_hook(
+                    &mut srv,
+                    route.1,
+                    &usr,
+                    &lq.collection,
+                    &lq.context,
+                    "mongo",
+                )
+                .await;
+                filters.extend(new_filters);
+            }
         }
 
         for filt in filters {
@@ -407,14 +395,13 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
      * (or remove) items on the current page. They do not affect total_count
      * — for cross-page filtering use itm_list_db_filter_hook instead, which
      * is pushed down into the database query. */
-    {
-        let routes = internals.safe_strstr("itm_list_filter_hook", &HashMap::new());
+    if let Some(routes) = internals.strstrs.get("itm_list_filter_hook") {
         let mut sorted_routes: Vec<_> = routes.iter().collect();
         sorted_routes.sort_by(|a, b| a.0.cmp(b.0));
         for route in sorted_routes {
             call_item_list_filter_hook(
                 &mut srv,
-                &route.1,
+                route.1,
                 &usr,
                 &lq.collection,
                 &lq.context,

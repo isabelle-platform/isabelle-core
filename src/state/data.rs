@@ -28,6 +28,7 @@ use crate::get_password_hash;
 use crate::handler::route_call::call_collection_read_hook;
 use crate::init_google;
 use crate::send_email;
+use crate::state::route_cache::RouteCache;
 use crate::state::store::Store;
 use crate::state::store_local::*;
 #[cfg(not(feature = "full_file_database"))]
@@ -573,6 +574,13 @@ pub struct Data {
     /// Opaque data (mainly for plugins)
     pub opaque_data: HashMap<String, Option<Box<dyn Any + Send>>>,
 
+    /// Pre-parsed routing tables derived from `internals.js`. Built once at
+    /// startup via `rebuild_route_cache()` and treated as immutable from then
+    /// on (matches the immutability of `internals.js` itself). Handed out
+    /// to request handlers via `Arc::clone` so they can read without holding
+    /// a borrow of `self`.
+    pub route_cache: Arc<RouteCache>,
+
     /// Purely internal none-object for proper boxing
     none_object: Option<Box<dyn Any + Send>>,
 }
@@ -602,8 +610,27 @@ impl Data {
             },
             plugin_api: Box::new(IsabellePluginApi::new()),
             opaque_data: HashMap::new(),
+            route_cache: Arc::new(RouteCache::default()),
             none_object: None,
         }
+    }
+
+    /// Rebuild the pre-parsed route cache from the current `internals.js`.
+    /// Called once at startup; `internals.js` is treated as immutable so
+    /// no invalidation logic is required.
+    pub async fn rebuild_route_cache(&mut self) {
+        let internals = self.rw.get_internals().await;
+        self.route_cache = Arc::new(RouteCache::from_internals(&internals));
+        info!(
+            "Route cache built: {} url + {} unprotected + {} rest + {} pre-edit ({} wildcard) + {} post-edit ({} wildcard)",
+            self.route_cache.url_routes.len(),
+            self.route_cache.unprotected_url_routes.len(),
+            self.route_cache.rest_routes.len(),
+            self.route_cache.item_pre_edit.values().map(|v| v.len()).sum::<usize>(),
+            self.route_cache.item_pre_edit_wildcard.len(),
+            self.route_cache.item_post_edit.values().map(|v| v.len()).sum::<usize>(),
+            self.route_cache.item_post_edit_wildcard.len(),
+        );
     }
 
     /// Check existence of collection
@@ -614,7 +641,11 @@ impl Data {
     /// Early initialization
     pub async fn init_checks(&mut self) {
         let internals = self.rw.get_internals().await;
-        let routes = internals.safe_strstr("collection_read_hook", &HashMap::new());
+        let routes: Vec<String> = internals
+            .strstrs
+            .get("collection_read_hook")
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
         let collections = self.rw.get_collections().await;
 
         // Load all collections
@@ -628,9 +659,8 @@ impl Data {
                 }
                 let mut loaded_item = loaded_item_opt.unwrap();
                 let mut should_be_saved = false;
-                for route in &routes {
-                    if call_collection_read_hook(self, &route.1, collection, &mut loaded_item).await
-                    {
+                for hndl in &routes {
+                    if call_collection_read_hook(self, hndl, collection, &mut loaded_item).await {
                         should_be_saved = true;
                     }
                 }

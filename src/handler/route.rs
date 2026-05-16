@@ -23,7 +23,6 @@
  */
 use crate::handler::route_call::*;
 use crate::handler::web_response::conv_response;
-use crate::state::store::Store;
 use crate::State;
 use actix_identity::Identity;
 use actix_multipart::Multipart;
@@ -33,7 +32,6 @@ use actix_web::{HttpRequest, HttpResponse};
 use futures_util::StreamExt;
 use isabelle_plugin_api::api::WebResponse;
 use log::trace;
-use std::collections::HashMap;
 
 /// Call HTTP URL hooks. This function checks actual location from request
 /// first.
@@ -44,20 +42,13 @@ pub async fn url_route(
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
     let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let routes = srv
-        .rw
-        .get_internals()
-        .await
-        .safe_strstr("extra_route", &HashMap::new());
+    let cache = srv.route_cache.clone();
 
     trace!("Custom URL: {}", req.path());
 
-    for route in routes {
-        let parts: Vec<&str> = route.1.split(":").collect();
-        if parts[0] == req.path() {
-            trace!("Call custom route {}", parts[2]);
-            return call_url_route(&mut srv, user, parts[2], req.query_string()).await;
-        }
+    if let Some(handler) = cache.url_routes.get(req.path()) {
+        trace!("Call custom route {}", handler);
+        return call_url_route(&mut srv, user, handler, req.query_string()).await;
     }
 
     HttpResponse::NotFound().into()
@@ -73,22 +64,13 @@ pub async fn url_post_route(
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
     let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-
-    let routes = srv
-        .rw
-        .get_internals()
-        .await
-        .safe_strstr("extra_route", &HashMap::new());
+    let cache = srv.route_cache.clone();
 
     trace!("Custom post URL: {}", req.path());
 
-    for route in routes {
-        let parts: Vec<&str> = route.1.split(":").collect();
-        if parts[0] == req.path() {
-            trace!("Call custom route {}", parts[2]);
-            return call_url_post_route(&mut srv, user, parts[2], req.query_string(), payload)
-                .await;
-        }
+    if let Some(handler) = cache.url_routes.get(req.path()) {
+        trace!("Call custom route {}", handler);
+        return call_url_post_route(&mut srv, user, handler, req.query_string(), payload).await;
     }
 
     HttpResponse::NotFound().into()
@@ -103,20 +85,13 @@ pub async fn url_unprotected_route(
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
     let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let routes = srv
-        .rw
-        .get_internals()
-        .await
-        .safe_strstr("extra_unprotected_route", &HashMap::new());
+    let cache = srv.route_cache.clone();
 
     trace!("Custom unprotected URL: {}", req.path());
 
-    for route in routes {
-        let parts: Vec<&str> = route.1.split(":").collect();
-        if parts[0] == req.path() {
-            trace!("Call custom route {}", parts[2]);
-            return call_url_unprotected_route(&mut srv, user, parts[2], req.query_string()).await;
-        }
+    if let Some(handler) = cache.unprotected_url_routes.get(req.path()) {
+        trace!("Call custom route {}", handler);
+        return call_url_unprotected_route(&mut srv, user, handler, req.query_string()).await;
     }
 
     HttpResponse::NotFound().into()
@@ -132,28 +107,20 @@ pub async fn url_unprotected_post_route(
 ) -> HttpResponse {
     let srv_lock = data.server.lock();
     let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-
-    let routes = srv
-        .rw
-        .get_internals()
-        .await
-        .safe_strstr("extra_unprotected_route", &HashMap::new());
+    let cache = srv.route_cache.clone();
 
     trace!("Custom unprotected post URL: {}", req.path());
 
-    for route in routes {
-        let parts: Vec<&str> = route.1.split(":").collect();
-        if parts[0] == req.path() {
-            trace!("Call custom route {}", parts[2]);
-            return call_url_unprotected_post_route(
-                &mut srv,
-                user,
-                parts[2],
-                req.query_string(),
-                payload,
-            )
-            .await;
-        }
+    if let Some(handler) = cache.unprotected_url_routes.get(req.path()) {
+        trace!("Call custom route {}", handler);
+        return call_url_unprotected_post_route(
+            &mut srv,
+            user,
+            handler,
+            req.query_string(),
+            payload,
+        )
+        .await;
     }
 
     HttpResponse::NotFound().into()
@@ -191,28 +158,20 @@ pub async fn url_generic_rest_route(
 
     let srv_lock = data.server.lock();
     let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let routes = srv
-        .rw
-        .get_internals()
-        .await
-        .safe_strstr("extra_rest_route", &HashMap::new());
+    let cache = srv.route_cache.clone();
 
-    for route in routes {
-        let parts: Vec<&str> = route.1.split(":").collect();
-        if parts[0] == req.path() {
-            trace!("Call custom route {}", parts[2]);
-            let resp =
-                call_url_rest_route(&mut srv, user, parts[2], method, req.query_string(), body)
-                    .await;
-            match &resp {
-                WebResponse::Login(email) => {
-                    Identity::login(&req.extensions(), email.to_string()).unwrap();
-                }
-                WebResponse::Logout => { /* FIXME */ }
-                _ => {}
+    if let Some(handler) = cache.rest_routes.get(req.path()) {
+        trace!("Call custom route {}", handler);
+        let resp =
+            call_url_rest_route(&mut srv, user, handler, method, req.query_string(), body).await;
+        match &resp {
+            WebResponse::Login(email) => {
+                Identity::login(&req.extensions(), email.to_string()).unwrap();
             }
-            return conv_response(resp).await;
+            WebResponse::Logout => { /* FIXME */ }
+            _ => {}
         }
+        return conv_response(resp).await;
     }
 
     HttpResponse::NotFound().into()

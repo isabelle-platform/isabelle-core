@@ -205,6 +205,11 @@ async fn main() -> std::io::Result<()> {
         srv.init_checks().await;
         info!("Flow: performed initialization checks");
 
+        // Pre-parse routing tables from internals.js so request handlers
+        // can do O(1) lookups instead of re-splitting "path:method:handler"
+        // strings on every request.
+        srv.rebuild_route_cache().await;
+
         // Initialize Google Calendar
         info!("Flow: initializing Google Calendar");
         init_google(&mut srv).await;

@@ -23,6 +23,7 @@
  */
 pub mod data;
 pub mod merger;
+pub mod route_cache;
 pub mod secrets;
 pub mod state;
 pub mod store;
