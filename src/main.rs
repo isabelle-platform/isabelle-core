@@ -247,7 +247,6 @@ async fn main() -> std::io::Result<()> {
                 info!("Adding rest route: {} : {}", parts[0], parts[1]);
             }
         }
-
     }
 
     let data = Data::new(G_STATE.clone());
