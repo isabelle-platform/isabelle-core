@@ -45,6 +45,10 @@ pub struct StoreLocal {
 
     /// Item counters
     pub items_count: HashMap<u64, u64>,
+
+    /// Cached `internals.js` (loaded lazily on first access, never invalidated:
+    /// the file is treated as immutable runtime configuration).
+    pub internals_cache: Option<Item>,
 }
 
 unsafe impl Send for StoreLocal {}
@@ -56,6 +60,7 @@ impl StoreLocal {
             collections: HashMap::new(),
             items: HashMap::new(),
             items_count: HashMap::new(),
+            internals_cache: None,
         }
     }
 }
@@ -306,15 +311,15 @@ impl Store for StoreLocal {
     }
 
     async fn get_internals(&mut self) -> Item {
-        let tmp_data_path = self.path.clone() + "/internals.js";
-
-        let read_data = std::fs::read_to_string(tmp_data_path);
-        if let Err(_e) = read_data {
-            return Item::new();
+        if self.internals_cache.is_none() {
+            let tmp_data_path = self.path.clone() + "/internals.js";
+            let itm = match std::fs::read_to_string(&tmp_data_path) {
+                Ok(text) => serde_json::from_str(&text).unwrap(),
+                Err(_) => Item::new(),
+            };
+            self.internals_cache = Some(itm);
         }
-        let text = read_data.unwrap();
-        let itm: Item = serde_json::from_str(&text).unwrap();
-        return itm;
+        self.internals_cache.as_ref().unwrap().clone()
     }
 
     async fn get_settings(&mut self) -> Item {
