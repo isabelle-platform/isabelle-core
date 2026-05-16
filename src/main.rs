@@ -155,6 +155,15 @@ async fn main() -> std::io::Result<()> {
             srv.file_rw.connect(&args.data_path, "").await;
             srv.rw.database_name = args.db_name.clone();
             srv.rw.connect(&args.db_url, &args.data_path).await;
+
+            // First-run autodetect: if the target database has no collections,
+            // seed it from the file-backed store. Idempotent across restarts:
+            // once seeded, the database is non-empty and this is a no-op.
+            if srv.rw.get_collections().await.is_empty() {
+                info!("Flow: empty database detected, seeding from file store");
+                merge_database(&mut srv.file_rw, &mut srv.rw).await;
+                info!("Flow: seeding complete");
+            }
         }
 
         info!("Data storage: connected");
@@ -239,20 +248,6 @@ async fn main() -> std::io::Result<()> {
             }
         }
 
-        // If it is a first run, merge database and normalize via init checks.
-        #[cfg(not(feature = "full_file_database"))]
-        if args.first_run {
-            let m = &mut srv;
-            info!("Flow: first run - merge database and normalize");
-            merge_database(&mut m.file_rw, &mut m.rw).await;
-            m.init_checks().await;
-            info!("Flow: first run - merge/normalize complete; exiting");
-        }
-    }
-
-    // If it is first run, don't do anything else
-    if args.first_run {
-        return Ok(());
     }
 
     let data = Data::new(G_STATE.clone());

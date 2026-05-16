@@ -30,7 +30,6 @@ if [ ! -f "${py_path}" ] ; then
 fi
 
 # Parse arguments
-first_run="${FIRST_RUN:+--first-run}"
 port="8090"
 pub_url="http://localhost:8081"
 pub_fqdn="localhost"
@@ -69,9 +68,6 @@ while test -n "$1" ; do
         --gc-path)
             gc_path="$2"
             shift 1
-            ;;
-        --first-run)
-            first_run="--first-run"
             ;;
         --database)
             database="$2"
@@ -128,7 +124,6 @@ if [ "$(uname)" == "Darwin" ] ; then
 fi
 
 echo Starting Isabelle Core...
-# Build plugin args only when provided, so --first-run is not consumed as value
 plugin_dir_arg=()
 if [ -n "${plugin_dir}" ] ; then
     plugin_dir_arg=(--plugin-dir "${plugin_dir}")
@@ -147,5 +142,4 @@ RUST_BACKTRACE=1 \
     --db-url "${db_url}" \
     --py-path "${py_path}" \
     ${cookie_http_insecure:+--cookie-http-insecure} \
-    "${plugin_dir_arg[@]}" \
-    ${first_run}
+    "${plugin_dir_arg[@]}"

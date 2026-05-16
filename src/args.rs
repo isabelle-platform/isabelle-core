@@ -73,10 +73,6 @@ pub struct Args {
     #[arg(long, default_value_t = DEFAULT_MAX_PAYLOAD_BYTES, visible_alias("max-payload"))]
     pub max_payload_bytes: usize,
 
-    /// First run
-    #[arg(long, default_value_t = false)]
-    pub first_run: bool,
-
     /// Set http-secure on cookies to false
     #[arg(long, default_value_t = false)]
     pub cookie_http_insecure: bool,
