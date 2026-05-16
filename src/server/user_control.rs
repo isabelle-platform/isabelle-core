@@ -23,6 +23,7 @@
  */
 use crate::state::store::Store;
 use isabelle_dm::data_model::item::Item;
+#[cfg(feature = "full_file_database")]
 use log::trace;
 
 /// Check if login has bad symbols
@@ -43,19 +44,43 @@ pub async fn get_user(srv: &mut crate::state::data::Data, login: String) -> Opti
         + "{ \"strs.email\": \""
         + &login
         + "\" } ]}";
-    let users = srv.rw.get_all_items("user", "name", &filter).await;
-    let tmp_login = login.to_lowercase();
-    trace!("Users: {}", users.map.len());
-    for item in &users.map {
-        if item.1.strs.contains_key("login") && item.1.strs["login"].to_lowercase() == tmp_login {
-            return Some(item.1.clone());
-        }
-        if item.1.strs.contains_key("email") && item.1.strs["email"].to_lowercase() == tmp_login {
-            return Some(item.1.clone());
-        }
+
+    // Mongo path: a single indexed find_one. Indexes on `strs.login` and
+    // `strs.email` (declared in `internals.js`) are required for this to
+    // be cheap; without them it's a COLLSCAN per authenticated request.
+    //
+    // The previous code did `get_all_items(...) + count_documents` and then
+    // a post-filter case-insensitive match. The Mongo filter is exact-match
+    // by design, so the lowercase comparison never actually changed
+    // outcomes — it's dropped here.
+    #[cfg(not(feature = "full_file_database"))]
+    {
+        srv.rw.find_one("user", &filter).await
     }
 
-    return None;
+    // File-store path: filter strings aren't parsed by StoreLocal, so we
+    // fall back to fetching everything and matching in Rust (original
+    // behaviour). Performance here isn't critical — file store is for
+    // sample/test deployments.
+    #[cfg(feature = "full_file_database")]
+    {
+        let users = srv.rw.get_all_items("user", "name", &filter).await;
+        let tmp_login = login.to_lowercase();
+        trace!("Users: {}", users.map.len());
+        for item in &users.map {
+            if item.1.strs.contains_key("login")
+                && item.1.strs["login"].to_lowercase() == tmp_login
+            {
+                return Some(item.1.clone());
+            }
+            if item.1.strs.contains_key("email")
+                && item.1.strs["email"].to_lowercase() == tmp_login
+            {
+                return Some(item.1.clone());
+            }
+        }
+        None
+    }
 }
 
 /// Check user role

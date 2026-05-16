@@ -108,6 +108,40 @@ impl StoreMongo {
         return true;
     }
 
+    /// Single-document lookup by a JSON filter string. Bypasses the
+    /// `count_documents + find + cursor` cycle of `get_items(... limit=1)`,
+    /// so it's the right primitive for things like `get_user` where the
+    /// caller only needs the first match.
+    pub async fn find_one(&mut self, collection: &str, filter: &str) -> Option<Item> {
+        let bson_filter = if filter.is_empty() {
+            Document::new()
+        } else {
+            match self.json_to_bson(filter).await {
+                Ok(d) => d,
+                Err(_) => {
+                    trace!("find_one: failed to parse filter, returning None: {}", filter);
+                    return None;
+                }
+            }
+        };
+
+        let coll: Collection<BsonItem> = self
+            .client
+            .as_ref()
+            .unwrap()
+            .database(&self.database_name)
+            .collection(collection);
+
+        match coll.find_one(bson_filter).await {
+            Ok(Some(bson_item)) => Some(bson_item.into()),
+            Ok(None) => None,
+            Err(e) => {
+                trace!("find_one error on {}: {}", collection, e);
+                None
+            }
+        }
+    }
+
     pub async fn json_to_bson(&mut self, json_string: &str) -> Result<Document, bool> {
         // Parse JSON string into serde_json::Value
         let js_res = serde_json::from_str(json_string);
