@@ -30,9 +30,10 @@ use crate::state::store::Store;
 use crate::util::bson_wrapper::{u64_to_decimal128, BsonItem};
 use async_trait::async_trait;
 use isabelle_dm::data_model::item::*;
-use log::{debug, info, trace};
+use log::{debug, info, trace, warn};
 use serde_json::Value;
 
+use mongodb::options::IndexOptions;
 use mongodb::{bson::doc, Client, Collection, IndexModel};
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
@@ -148,7 +149,15 @@ impl Store for StoreMongo {
             info!("Connected {} / {}!", url, self.database_name);
             let internals = self.get_internals().await;
             let collections = internals.safe_strstr("collections", &HashMap::new());
-            debug!("Collections: {}", collections.len());
+            // Extra indexes declared in internals.js as a `strstrs` category
+            // "indexes". Each value is "collection:field[:unique]"; fields are
+            // indexed ascending (covers descending sort too for single-field).
+            let extra_indexes = internals.safe_strstr("indexes", &HashMap::new());
+            debug!(
+                "Collections: {}, declared indexes: {}",
+                collections.len(),
+                extra_indexes.len()
+            );
             let db = self.client.as_ref().unwrap().database(&self.database_name);
             for coll_name in collections {
                 debug!("Create collection {}", &coll_name.1);
@@ -173,6 +182,38 @@ impl Store for StoreMongo {
                     let coll: Collection<BsonItem> = db.collection(&coll_name.1);
                     let index: IndexModel = IndexModel::builder().keys(doc! { "id": 1 }).build();
                     let _result = coll.create_index(index).await;
+
+                    // Ensure declared extra indexes for this collection.
+                    for (_, spec) in &extra_indexes {
+                        let parts: Vec<&str> = spec.split(':').collect();
+                        if parts.len() < 2 || parts[0] != coll_name.1.as_str() {
+                            continue;
+                        }
+                        let field = parts[1];
+                        if field.is_empty() {
+                            warn!("Skipping malformed index spec: {}", spec);
+                            continue;
+                        }
+                        let unique = parts.get(2).copied() == Some("unique");
+                        let model = if unique {
+                            IndexModel::builder()
+                                .keys(doc! { field: 1 })
+                                .options(IndexOptions::builder().unique(true).build())
+                                .build()
+                        } else {
+                            IndexModel::builder().keys(doc! { field: 1 }).build()
+                        };
+                        match coll.create_index(model).await {
+                            Ok(r) => debug!(
+                                "Index ensured: {}.{} (unique={}) → {}",
+                                coll_name.1, field, unique, r.index_name
+                            ),
+                            Err(e) => warn!(
+                                "Failed to ensure index {}.{}: {}",
+                                coll_name.1, field, e
+                            ),
+                        }
+                    }
 
                     let coll_idx = self.collections.len().try_into().unwrap();
                     self.collections.insert(coll_name.1.to_string(), coll_idx);
