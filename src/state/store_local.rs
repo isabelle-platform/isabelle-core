@@ -183,40 +183,42 @@ impl Store for StoreLocal {
             .get_mut(&self.collections[collection])
             .unwrap()
             .clone();
-        let mut eff_id_min = id_min;
-        let eff_id_max = id_max;
-        let mut count = 0;
-        let mut eff_skip = skip;
 
-        if eff_skip == u64::MAX {
-            eff_skip = 0;
-        }
+        let eff_skip = if skip == u64::MAX { 0 } else { skip };
+        let eff_id_min = if id_min == u64::MAX { 0 } else { id_min };
+        let eff_id_max = if id_max == u64::MAX { u64::MAX } else { id_max };
+        // u64::MAX → effectively unbounded
+        let eff_limit = limit;
 
-        if eff_id_min == u64::MAX {
-            eff_id_min = 0;
-        }
+        // Deterministic order: sort ids ascending before applying skip/limit.
+        // sort_key / filter are not supported by the file store; ignored.
+        let mut ids: Vec<u64> = itms
+            .keys()
+            .copied()
+            .filter(|id| *id >= eff_id_min && *id <= eff_id_max)
+            .collect();
+        ids.sort_unstable();
+        lr.total_count = ids.len() as u64;
 
         debug!(
-            "Getting {} in range {} - {} limit {}",
-            &collection, eff_id_min, eff_id_max, limit
+            "Getting {} in range {} - {} skip {} limit {} total {}",
+            &collection, eff_id_min, eff_id_max, eff_skip, eff_limit, lr.total_count
         );
-        for itm in &itms {
-            if itm.0 >= &eff_id_min && itm.0 <= &eff_id_max {
-                let new_item = self.get_item(collection, *itm.0).await;
-                if !new_item.is_none() {
-                    if count >= eff_skip {
-                        lr.map.insert(*itm.0, new_item.unwrap());
-                    }
-                    count = count + 1;
-                    if count >= eff_skip && (count - eff_skip) >= limit {
-                        break;
-                    }
+
+        let mut count: u64 = 0;
+        for id in ids {
+            if count >= eff_skip {
+                if (count - eff_skip) >= eff_limit {
+                    break;
+                }
+                if let Some(item) = self.get_item(collection, id).await {
+                    lr.map.insert(id, item);
                 }
             }
+            count += 1;
         }
-        debug!(" - result: {} items", count - eff_skip);
-        lr.total_count = itms.len() as u64;
 
+        debug!(" - result: {} items", lr.map.len());
         return lr;
     }
 

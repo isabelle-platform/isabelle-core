@@ -291,7 +291,13 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
     let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
     let usr = get_user(&mut srv, user.id().unwrap()).await;
 
-    let lq = serde_qs::from_str::<ListQuery>(&req.query_string()).unwrap();
+    let lq = match serde_qs::from_str::<ListQuery>(&req.query_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Malformed list query: {}", e);
+            return HttpResponse::BadRequest().into();
+        }
+    };
 
     if !srv.has_collection(&lq.collection) {
         error!("Collection {} doesn't exist", lq.collection);
@@ -303,6 +309,9 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
         total_count: 0,
     };
 
+    // Cache internals once per request to avoid repeated disk reads.
+    let internals = srv.rw.get_internals().await;
+
     if lq.id != u64::MAX {
         let res = srv.rw.get_item(&lq.collection, lq.id).await;
         if res == None {
@@ -313,14 +322,9 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
             return HttpResponse::BadRequest().into();
         }
 
-        if lq.limit == u64::MAX || lq.limit >= 1 {
-            lr.map.insert(lq.id, res.unwrap());
-            lr.total_count = 1;
-            info!(
-                "Collection {} requested element {} limit {}",
-                lq.collection, lq.id, lq.limit
-            );
-        }
+        lr.map.insert(lq.id, res.unwrap());
+        lr.total_count = 1;
+        info!("Collection {} requested element {}", lq.collection, lq.id);
     } else if lq.id_min != u64::MAX || lq.id_max != u64::MAX || lq.sort_key != "" || lq.filter != ""
     {
         info!(
@@ -335,12 +339,9 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
             filters.push(lq.filter.to_string());
         }
 
-        let routes = srv
-            .rw
-            .get_internals()
-            .await
-            .safe_strstr("itm_list_db_filter_hook", &HashMap::new());
-        for route in routes {
+        let db_filter_routes =
+            internals.safe_strstr("itm_list_db_filter_hook", &HashMap::new());
+        for route in db_filter_routes {
             let new_filters = call_item_list_db_filter_hook(
                 &mut srv,
                 &route.1,
@@ -373,26 +374,41 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
                 lq.limit,
             )
             .await;
-    } else if lq.id_list.len() > 0 {
-        for id in lq.id_list {
-            let res = srv.rw.get_item(&lq.collection, id).await;
-            if res != None {
-                lr.map.insert(id, res.unwrap());
-                lr.total_count += 1;
+    } else if !lq.id_list.is_empty() {
+        // Fetch all requested ids, then paginate deterministically.
+        // total_count reflects how many of the requested ids actually exist.
+        let mut found: Vec<(u64, Item)> = Vec::new();
+        for id in &lq.id_list {
+            if let Some(itm) = srv.rw.get_item(&lq.collection, *id).await {
+                found.push((*id, itm));
             }
         }
-        info!("Collection {} requested list of IDs", lq.collection);
+        found.sort_by_key(|(id, _)| *id);
+        lr.total_count = found.len() as u64;
+
+        let skip = if lq.skip == u64::MAX { 0 } else { lq.skip } as usize;
+        let limit = if lq.limit == u64::MAX {
+            usize::MAX
+        } else {
+            lq.limit as usize
+        };
+        for (id, item) in found.into_iter().skip(skip).take(limit) {
+            lr.map.insert(id, item);
+        }
+        info!(
+            "Collection {} requested list of IDs: {} matched, skip {} limit {}",
+            lq.collection, lr.total_count, lq.skip, lq.limit
+        );
     } else {
         info!("Collection {} unknown filter", lq.collection);
     }
 
-    /* itm filter hooks */
+    /* itm filter hooks. NOTE: these run after pagination and may mutate
+     * (or remove) items on the current page. They do not affect total_count
+     * — for cross-page filtering use itm_list_db_filter_hook instead, which
+     * is pushed down into the database query. */
     {
-        let routes = srv
-            .rw
-            .get_internals()
-            .await
-            .safe_strstr("itm_list_filter_hook", &HashMap::new());
+        let routes = internals.safe_strstr("itm_list_filter_hook", &HashMap::new());
         let mut sorted_routes: Vec<_> = routes.iter().collect();
         sorted_routes.sort_by(|a, b| a.0.cmp(b.0));
         for route in sorted_routes {

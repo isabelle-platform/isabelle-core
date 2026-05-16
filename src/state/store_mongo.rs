@@ -314,116 +314,86 @@ impl Store for StoreMongo {
             map: HashMap::new(),
             total_count: 0,
         };
-        let itms = self
-            .items
-            .get_mut(&self.collections[collection])
-            .unwrap()
-            .clone();
-        let mut eff_id_min = id_min;
-        let eff_id_max = id_max;
-        let mut count = 0;
-        let mut eff_skip = skip;
-        let mut care_about_sort = false;
-        let eff_limit: i64;
 
-        if eff_skip == u64::MAX {
-            eff_skip = 0;
-        }
-
-        if eff_id_min == u64::MAX {
-            eff_id_min = 0;
-            if sort_key != "" {
-                care_about_sort = true;
-            }
-        }
-
-        if limit > (i64::MAX as u64) {
-            eff_limit = i64::MAX;
+        let eff_skip = if skip == u64::MAX { 0 } else { skip };
+        let eff_limit: i64 = if limit == u64::MAX || limit > i64::MAX as u64 {
+            i64::MAX
         } else {
-            eff_limit = limit as i64;
+            limit as i64
+        };
+        // Default sort_key to "id" so pagination is deterministic. There is a
+        // Mongo index on "id" set up in connect(), so this is cheap.
+        let eff_sort_key = if sort_key.is_empty() { "id" } else { sort_key };
+
+        let mut base: Document = if !filter.is_empty() {
+            match self.json_to_bson(filter).await {
+                Ok(d) => d,
+                Err(_) => {
+                    trace!("get_items: failed to parse filter, using empty: {}", filter);
+                    Document::new()
+                }
+            }
+        } else {
+            Document::new()
+        };
+
+        if id_min != u64::MAX || id_max != u64::MAX {
+            let mut id_constraint = Document::new();
+            if id_min != u64::MAX {
+                id_constraint.insert("$gte", u64_to_decimal128(id_min));
+            }
+            if id_max != u64::MAX {
+                id_constraint.insert("$lte", u64_to_decimal128(id_max));
+            }
+            let id_doc = doc! { "id": id_constraint };
+            if base.is_empty() {
+                base = id_doc;
+            } else {
+                let prev = std::mem::take(&mut base);
+                base.insert("$and", vec![prev, id_doc]);
+            }
         }
 
         debug!(
-            "Getting {} in range {} - {} ({}-{}) skip {} limit {} sort key {} (care {}) filter {}",
-            &collection,
-            eff_id_min,
-            eff_id_max,
-            id_min,
-            id_max,
-            eff_skip,
-            eff_limit,
-            sort_key,
-            care_about_sort,
-            filter
+            "Getting {} id range {} - {} sort {} skip {} limit {} filter {:?}",
+            collection, id_min, id_max, eff_sort_key, eff_skip, eff_limit, base
         );
-        if care_about_sort {
-            let coll: Collection<BsonItem> = self
-                .client
-                .as_ref()
-                .unwrap()
-                .database(&self.database_name)
-                .collection(collection);
 
-            let json_bson: Document = if filter != "" {
-                debug!("Using real filter: {}", filter);
-                let bson_document = self.json_to_bson(filter).await;
-                match bson_document {
-                    Ok(d) => d,
-                    Err(_err) => {
-                        trace!("Using empty filter due to error");
-                        Document::new()
-                    }
-                }
-            } else {
-                trace!("Using empty filter");
-                Document::new()
-            };
+        let coll: Collection<BsonItem> = self
+            .client
+            .as_ref()
+            .unwrap()
+            .database(&self.database_name)
+            .collection(collection);
 
-            let count = coll.count_documents(json_bson.clone()).await;
-            lr.total_count = count.unwrap_or(0);
+        lr.total_count = coll.count_documents(base.clone()).await.unwrap_or(0);
 
-            let mut cursor = coll
-                .find(json_bson)
-                .sort(doc! { sort_key: 1 })
-                .skip(eff_skip)
-                .limit(eff_limit)
-                .await;
-            loop {
-                let result = cursor.as_mut().unwrap().try_next().await;
-                match result {
-                    Ok(r) => {
-                        let c = r.clone();
-                        if c.is_none() {
-                            break;
-                        }
-
-                        let bson_item = c.as_ref().unwrap();
-                        let item: Item = bson_item.clone().into();
-                        lr.map.insert(item.id, item);
-                    }
-                    Err(_e) => {
-                        debug!("Error: {}", _e);
-                        break;
-                    }
-                };
+        let mut cursor = match coll
+            .find(base)
+            .sort(doc! { eff_sort_key: 1 })
+            .skip(eff_skip)
+            .limit(eff_limit)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                debug!("get_items cursor error: {}", e);
+                return lr;
             }
-        } else {
-            for itm in &itms {
-                if itm.0 >= &eff_id_min && itm.0 <= &eff_id_max {
-                    let new_item = self.get_item(collection, *itm.0).await;
-                    if !new_item.is_none() {
-                        if count >= eff_skip {
-                            lr.map.insert(*itm.0, new_item.unwrap());
-                        }
-                        count = count + 1;
-                        if count >= eff_skip && (count - eff_skip) >= eff_limit as u64 {
-                            break;
-                        }
-                    }
+        };
+
+        loop {
+            match cursor.try_next().await {
+                Ok(Some(bson_item)) => {
+                    let item: Item = bson_item.into();
+                    lr.map.insert(item.id, item);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    debug!("get_items iteration error: {}", e);
+                    break;
                 }
             }
-
-            lr.total_count = itms.len() as u64;
         }
 
         debug!(
@@ -431,7 +401,7 @@ impl Store for StoreMongo {
             lr.map.len(),
             lr.total_count
         );
-        return lr;
+        lr
     }
 
     async fn set_item(&mut self, collection: &str, exp_itm: &Item, merge: bool) -> u64 {
