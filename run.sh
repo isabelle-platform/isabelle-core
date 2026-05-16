@@ -135,7 +135,6 @@ if [ -n "${plugin_dir}" ] ; then
 fi
 
 # Run the binary
-LD_LIBRARY_PATH="${plugin_dir}" \
 RUST_LOG=info \
 RUST_BACKTRACE=1 \
 "${binary}" \
