@@ -168,7 +168,24 @@ async fn main() -> std::io::Result<()> {
         info!("Plugins: loading");
         {
             let s = &mut srv;
-            s.plugin_pool.load_plugins(&args.plugin_dir);
+            let result = s.plugin_pool.load_plugins(&args.plugin_dir);
+            if !result.is_ok() {
+                for failure in &result.failures {
+                    log::error!("Plugin load failure at {}: {}", failure.path, failure.error);
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!(
+                        "Failed to load {} plugin(s) from {}",
+                        result.failed(),
+                        &args.plugin_dir
+                    ),
+                ));
+            }
+            info!(
+                "Plugins: {} loaded out of {} candidate(s) from {}",
+                result.loaded, result.considered, &args.plugin_dir
+            );
             info!("Plugins: ensuring operation");
             s.plugin_pool.ping_plugins();
         }
