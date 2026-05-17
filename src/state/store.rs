@@ -26,7 +26,16 @@ use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::list_result::ListResult;
 use std::collections::HashMap;
 
-/// Store implementation
+/// Store implementation.
+///
+/// All runtime operations take `&self` so the store can be shared across
+/// concurrent request handlers without an outer lock. Implementations use
+/// interior mutability (typically `parking_lot::Mutex`) for caches that
+/// need to be updated at runtime.
+///
+/// `connect`/`disconnect` are the exceptions — they take `&mut self`
+/// because they (re)build all internal state and are only called from
+/// startup/shutdown paths where exclusive access is naturally available.
 #[async_trait]
 pub trait Store {
     /// Connect the store to database
@@ -37,21 +46,20 @@ pub trait Store {
     async fn disconnect(&mut self);
 
     /// Get all collections
-    async fn get_collections(&mut self) -> Vec<String>;
+    async fn get_collections(&self) -> Vec<String>;
 
     /// Get all item IDs (can be exhausting)
-    async fn get_item_ids(&mut self, collection: &str) -> HashMap<u64, bool>;
+    async fn get_item_ids(&self, collection: &str) -> HashMap<u64, bool>;
 
     /// Get all items (can be exhausting unless you provide filter)
-    async fn get_all_items(&mut self, collection: &str, sort_key: &str, filter: &str)
-        -> ListResult;
+    async fn get_all_items(&self, collection: &str, sort_key: &str, filter: &str) -> ListResult;
 
     /// Get item by specific ID
-    async fn get_item(&mut self, collection: &str, id: u64) -> Option<Item>;
+    async fn get_item(&self, collection: &str, id: u64) -> Option<Item>;
 
     /// Get items by given parameters. Use u64::MAX for IDs you don't know.
     async fn get_items(
-        &mut self,
+        &self,
         collection: &str,
         id_min: u64,
         id_max: u64,
@@ -62,23 +70,23 @@ pub trait Store {
     ) -> ListResult;
 
     /// Write the item to the database
-    async fn set_item(&mut self, collection: &str, itm: &Item, merge: bool) -> u64;
+    async fn set_item(&self, collection: &str, itm: &Item, merge: bool) -> u64;
 
     /// Read the item from the database
-    async fn del_item(&mut self, collection: &str, id: u64) -> bool;
+    async fn del_item(&self, collection: &str, id: u64) -> bool;
 
     /// Get credentials
-    async fn get_credentials(&mut self) -> String;
+    async fn get_credentials(&self) -> String;
 
     /// Get Google Authentication pickle
-    async fn get_pickle(&mut self) -> String;
+    async fn get_pickle(&self) -> String;
 
     /// Read internal data (like internal settings not exposed to user)
-    async fn get_internals(&mut self) -> Item;
+    async fn get_internals(&self) -> Item;
 
     /// Read settings item
-    async fn get_settings(&mut self) -> Item;
+    async fn get_settings(&self) -> Item;
 
     /// Write settings item
-    async fn set_settings(&mut self, itm: Item);
+    async fn set_settings(&self, itm: Item);
 }

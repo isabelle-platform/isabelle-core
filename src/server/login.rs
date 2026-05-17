@@ -278,11 +278,22 @@ pub async fn logout(
 
 /// Check if the user is logged in. Additionally, this function returns a json
 /// with a few more basic site settings and user roles.
+///
+/// Lock-discipline note: this handler used to hold the global
+/// `parking_lot::ReentrantMutex` across the Mongo round-trip in
+/// `get_all_items("user", …)`, which serialised every concurrent request on
+/// that one mutex. The body now follows a two-phase pattern:
+///
+///   1. Brief locked phase — read cached settings/internals (all in-memory,
+///      no real awaits), compute defaults, and clone out the Mongo handle.
+///   2. Lock-free phase — do the user lookup directly on the cloned Mongo
+///      collection, which holds its own internal Arc to the connection pool.
+///
+/// Multiple concurrent `/is_logged_in` requests now overlap on Mongo I/O
+/// instead of queuing on the mutex. The same pattern can (and should) be
+/// applied to other read-heavy handlers in subsequent passes.
 pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> impl Responder {
-    let srv_lock = data.server.lock();
-    let srv = unsafe { &mut (*srv_lock.as_ptr()) };
-
-    let mut user: DetailedLoginUser = DetailedLoginUser {
+    let mut user = DetailedLoginUser {
         username: "".to_string(),
         id: 0,
         role: Vec::new(),
@@ -292,94 +303,133 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
         params: HashMap::new(),
     };
 
-    user.site_name = srv
-        .rw
-        .get_settings()
-        .await
-        .clone()
-        .safe_str("site_name", "");
-    if user.site_name == "" {
-        user.site_name = srv
-            .rw
-            .get_internals()
-            .await
-            .safe_str("default_site_name", "Isabelle");
-    }
+    // Phase 1: under the lock, read in-memory caches and clone the Mongo
+    // handles we'll need. No real awaits here — `get_settings`/`get_internals`
+    // are sync I/O wrapped in async-trait, and Client::clone is just an
+    // Arc bump. The lock guard is dropped at the end of this block.
+    #[cfg(not(feature = "full_file_database"))]
+    let mongo_view: Option<(mongodb::Client, String, String)> = {
+        let srv_lock = data.server.lock();
+        let srv = unsafe { &mut (*srv_lock.as_ptr()) };
 
-    user.site_logo = srv
-        .rw
-        .get_settings()
-        .await
-        .clone()
-        .safe_str("site_logo", "");
-    if user.site_logo == "" {
-        user.site_logo = srv
-            .rw
-            .get_internals()
-            .await
-            .safe_str("default_site_logo", "/logo.png");
-    }
-    info!("Site logo: {}", user.site_logo);
+        let settings = srv.rw.get_settings().await;
+        let internals = srv.rw.get_internals().await;
 
-    user.licensed_to = srv
-        .rw
-        .get_settings()
-        .await
-        .clone()
-        .safe_str("licensed_to", "");
-    if user.licensed_to == "" {
-        user.licensed_to = srv
-            .rw
-            .get_internals()
-            .await
-            .safe_str("default_licensed_to", "end user");
-    }
+        let pick = |key: &str, default_key: &str, default_value: &str| {
+            let s = settings.safe_str(key, "");
+            if s.is_empty() {
+                internals.safe_str(default_key, default_value)
+            } else {
+                s
+            }
+        };
+        user.site_name = pick("site_name", "default_site_name", "Isabelle");
+        user.site_logo = pick("site_logo", "default_site_logo", "/logo.png");
+        user.licensed_to = pick("licensed_to", "default_licensed_to", "end user");
+        let language = pick("language", "default_language", "en");
+        user.params.insert("language".to_string(), language);
 
-    let mut language = srv.rw.get_settings().await.clone().safe_str("language", "");
-    if language == "" {
-        language = srv
-            .rw
-            .get_internals()
-            .await
-            .safe_str("default_language", "en");
-    }
-    user.params.insert("language".to_string(), language.clone());
+        info!("Site logo: {}", user.site_logo);
 
-    if _user.is_none() || !srv.has_collection("user") {
-        info!("No user or user database");
-        return web::Json(user);
-    }
+        if _user.is_none() || !srv.has_collection("user") {
+            info!("No user or user database");
+            None
+        } else {
+            let role_is = internals.safe_str("user_role_prefix", "role_is_");
+            match srv.rw.client.as_ref() {
+                Some(c) => Some((c.clone(), srv.rw.database_name.clone(), role_is)),
+                None => None,
+            }
+        }
+    }; // ← lock released here
 
-    let role_is = srv
-        .rw
-        .get_internals()
-        .await
-        .safe_str("user_role_prefix", "role_is_");
-    let email = _user.as_ref().unwrap().id().unwrap();
-    if !login_has_bad_symbols(&email) {
-        let filter = "{ \"strs.email\": \"".to_owned() + &email + "\" }";
-        let all_users = srv.rw.get_all_items("user", "name", &filter).await;
-        for item in &all_users.map {
-            if item.1.strs.contains_key("email") && item.1.strs["email"] == email {
-                user.username = _user.as_ref().unwrap().id().unwrap();
-                user.id = *item.0;
-                // Derive roles from bool flags with prefix `role_is_...`.
-                //
-                // Important: avoid granting "admin" unless role_is_admin is explicitly true.
-                // Previously we pushed every role key regardless of its boolean value, which
-                // caused non-admin users (role_is_admin=false) to still receive "admin" in
-                // /is_logged_in payload, leading to incorrect UI gating.
-                for bp in &item.1.bools {
-                    if bp.0.starts_with(&role_is) {
-                        if bp.0 == "role_is_admin" && *bp.1 == false {
-                            continue;
-                        }
-                        if *bp.1 == true {
-                            user.role.push(bp.0[8..].to_string());
+    #[cfg(feature = "full_file_database")]
+    let _ = data;
+
+    // Phase 2: lock-free Mongo lookup. Concurrent requests parallelise here.
+    #[cfg(not(feature = "full_file_database"))]
+    if let Some((client, db_name, role_is)) = mongo_view {
+        let email = _user.as_ref().unwrap().id().unwrap();
+        if !login_has_bad_symbols(&email) {
+            let coll: mongodb::Collection<crate::util::bson_wrapper::BsonItem> =
+                client.database(&db_name).collection("user");
+            let filter = mongodb::bson::doc! { "strs.email": &email };
+            if let Ok(Some(bson_item)) = coll.find_one(filter).await {
+                let item: Item = bson_item.into();
+                if item.strs.get("email").map(String::as_str) == Some(email.as_str()) {
+                    user.username = email.clone();
+                    user.id = item.id;
+                    // Derive roles from bool flags with prefix `role_is_...`.
+                    //
+                    // Important: avoid granting "admin" unless role_is_admin
+                    // is explicitly true. Previously we pushed every role
+                    // key regardless of its boolean value, which caused
+                    // non-admin users (role_is_admin=false) to still receive
+                    // "admin" in /is_logged_in payload, leading to incorrect
+                    // UI gating.
+                    for bp in &item.bools {
+                        if bp.0.starts_with(&role_is) {
+                            if bp.0 == "role_is_admin" && !*bp.1 {
+                                continue;
+                            }
+                            if *bp.1 {
+                                user.role.push(bp.0[8..].to_string());
+                            }
                         }
                     }
                 }
-                break;
+            }
+        }
+    }
+    // File-store path: fall back to the original lock-held flow. StoreLocal
+    // doesn't speak Mongo so we can't split the same way. Same correctness,
+    // unchanged perf — this feature is sample/test only.
+    #[cfg(feature = "full_file_database")]
+    {
+        let srv_lock = data.server.lock();
+        let srv = unsafe { &mut (*srv_lock.as_ptr()) };
+        let settings = srv.rw.get_settings().await;
+        let internals = srv.rw.get_internals().await;
+        let pick = |key: &str, default_key: &str, default_value: &str| {
+            let s = settings.safe_str(key, "");
+            if s.is_empty() {
+                internals.safe_str(default_key, default_value)
+            } else {
+                s
+            }
+        };
+        user.site_name = pick("site_name", "default_site_name", "Isabelle");
+        user.site_logo = pick("site_logo", "default_site_logo", "/logo.png");
+        user.licensed_to = pick("licensed_to", "default_licensed_to", "end user");
+        let language = pick("language", "default_language", "en");
+        user.params.insert("language".to_string(), language);
+        if _user.is_some() && srv.has_collection("user") {
+            let role_is = internals.safe_str("user_role_prefix", "role_is_");
+            let email = _user.as_ref().unwrap().id().unwrap();
+            if !login_has_bad_symbols(&email) {
+                let filter =
+                    "{ \"strs.email\": \"".to_owned() + &email + "\" }";
+                let all_users =
+                    srv.rw.get_all_items("user", "name", &filter).await;
+                for item in &all_users.map {
+                    if item.1.strs.get("email").map(String::as_str)
+                        == Some(email.as_str())
+                    {
+                        user.username = email.clone();
+                        user.id = *item.0;
+                        for bp in &item.1.bools {
+                            if bp.0.starts_with(&role_is) {
+                                if bp.0 == "role_is_admin" && !*bp.1 {
+                                    continue;
+                                }
+                                if *bp.1 {
+                                    user.role.push(bp.0[8..].to_string());
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
             }
         }
     }

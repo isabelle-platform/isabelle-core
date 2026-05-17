@@ -35,6 +35,7 @@ use serde_json::Value;
 
 use mongodb::options::IndexOptions;
 use mongodb::{bson::doc, Client, Collection, IndexModel};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::time::{sleep, Duration};
@@ -44,42 +45,60 @@ use tokio::time::{sleep, Duration};
 /// chatty clients amortise the Mongo round-trip across many requests.
 const USER_CACHE_TTL: Duration = Duration::from_secs(30);
 
-/// Mongo storage implementation
-#[derive(Debug, Clone)]
+/// Mongo storage implementation.
+///
+/// Phase 4 lock decomposition: runtime-mutated fields are wrapped in
+/// `parking_lot::Mutex` so all trait methods can take `&self`. The store is
+/// then shareable across concurrent request handlers without an outer lock.
+/// Connect-time-only state (`path`, `local_path`, `collections`, `client`,
+/// `database_name`) stays plain since `connect` is `&mut self` and not
+/// called concurrently.
 pub struct StoreMongo {
-    /// URL to Mongo database
+    /// URL to Mongo database (set at connect, then read-only)
     pub path: String,
 
-    /// Local settings path (like for Local storage)
+    /// Local settings path (like for Local storage; set at connect)
     pub local_path: String,
 
-    /// Collection hash map
+    /// Collection name → internal coll_id (populated in `connect`, read-only after)
     pub collections: HashMap<String, u64>,
 
-    /// Items map
-    pub items: HashMap<u64, HashMap<u64, bool>>,
+    /// Per-collection set of known item IDs. Mutated by `set_item` / `del_item`.
+    pub items: Mutex<HashMap<u64, HashMap<u64, bool>>>,
 
-    /// Item counters
-    pub items_count: HashMap<u64, u64>,
+    /// Per-collection running max-id counter (used for new-id generation).
+    pub items_count: Mutex<HashMap<u64, u64>>,
 
-    /// Actual Mongo client
+    /// Actual Mongo client. Set in `connect`; the `Client` itself is
+    /// internally `Arc<...>` so it's safely shareable for `&self` reads.
     pub client: Option<mongodb::Client>,
 
-    /// Database name
+    /// Database name (set at construction)
     pub database_name: String,
 
     /// Cached `internals.js` (loaded lazily on first access, never invalidated:
     /// the file is treated as immutable runtime configuration).
-    pub internals_cache: Option<Item>,
+    pub internals_cache: Mutex<Option<Item>>,
 
     /// Session-scope cache for `find_user(login)` results. Key is whatever
     /// the session cookie holds (login or email — same key the caller
     /// passes). TTL is `USER_CACHE_TTL`. Invalidated wholesale on any write
     /// to the `user` collection.
-    pub user_cache: HashMap<String, (Item, Instant)>,
+    pub user_cache: Mutex<HashMap<String, (Item, Instant)>>,
 }
 
 unsafe impl Send for StoreMongo {}
+
+impl std::fmt::Debug for StoreMongo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreMongo")
+            .field("path", &self.path)
+            .field("local_path", &self.local_path)
+            .field("database_name", &self.database_name)
+            .field("collections_len", &self.collections.len())
+            .finish_non_exhaustive()
+    }
+}
 
 impl StoreMongo {
     #[cfg(not(feature = "full_file_database"))]
@@ -88,12 +107,12 @@ impl StoreMongo {
             path: "".to_string(),
             local_path: "".to_string(),
             collections: HashMap::new(),
-            items: HashMap::new(),
-            items_count: HashMap::new(),
+            items: Mutex::new(HashMap::new()),
+            items_count: Mutex::new(HashMap::new()),
             client: None,
             database_name: "isabelle".to_string(),
-            internals_cache: None,
-            user_cache: HashMap::new(),
+            internals_cache: Mutex::new(None),
+            user_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -126,12 +145,15 @@ impl StoreMongo {
     /// in `set_item`/`del_item` for the `user` collection, including
     /// writes that come through the plugin API (which also funnel through
     /// these methods).
-    pub async fn find_user(&mut self, login: &str) -> Option<Item> {
-        if let Some((item, expires)) = self.user_cache.get(login) {
-            if *expires > Instant::now() {
-                return Some(item.clone());
+    pub async fn find_user(&self, login: &str) -> Option<Item> {
+        {
+            let cache = self.user_cache.lock();
+            if let Some((item, expires)) = cache.get(login) {
+                if *expires > Instant::now() {
+                    return Some(item.clone());
+                }
             }
-        }
+        } // ← release the lock before awaiting Mongo
 
         // Caller is expected to have run `login_has_bad_symbols`; the JSON
         // here is hand-built but the input is already screened of `"\\{}[]$`.
@@ -142,7 +164,7 @@ impl StoreMongo {
         let user_opt = self.find_one("user", &filter).await;
 
         if let Some(user) = &user_opt {
-            self.user_cache.insert(
+            self.user_cache.lock().insert(
                 login.to_string(),
                 (user.clone(), Instant::now() + USER_CACHE_TTL),
             );
@@ -155,7 +177,7 @@ impl StoreMongo {
     /// `count_documents + find + cursor` cycle of `get_items(... limit=1)`,
     /// so it's the right primitive for things like `get_user` where the
     /// caller only needs the first match.
-    pub async fn find_one(&mut self, collection: &str, filter: &str) -> Option<Item> {
+    pub async fn find_one(&self, collection: &str, filter: &str) -> Option<Item> {
         let bson_filter = if filter.is_empty() {
             Document::new()
         } else {
@@ -188,7 +210,7 @@ impl StoreMongo {
         }
     }
 
-    pub async fn json_to_bson(&mut self, json_string: &str) -> Result<Document, bool> {
+    pub async fn json_to_bson(&self, json_string: &str) -> Result<Document, bool> {
         // Parse JSON string into serde_json::Value
         let js_res = serde_json::from_str(json_string);
         let js: Value;
@@ -340,8 +362,8 @@ impl Store for StoreMongo {
                         }
                     }
 
-                    self.items.insert(coll_idx, map);
-                    self.items_count.insert(coll_idx, count);
+                    self.items.lock().insert(coll_idx, map);
+                    self.items_count.lock().insert(coll_idx, count);
                     break;
                 }
             }
@@ -352,7 +374,7 @@ impl Store for StoreMongo {
 
     async fn disconnect(&mut self) {}
 
-    async fn get_collections(&mut self) -> Vec<String> {
+    async fn get_collections(&self) -> Vec<String> {
         let colls = self
             .client
             .as_ref()
@@ -370,21 +392,16 @@ impl Store for StoreMongo {
         return lst;
     }
 
-    async fn get_item_ids(&mut self, collection: &str) -> HashMap<u64, bool> {
+    async fn get_item_ids(&self, collection: &str) -> HashMap<u64, bool> {
         if !self.collections.contains_key(collection) {
             return HashMap::new();
         }
-
         let coll_id = self.collections[collection];
-        return self.items[&coll_id].clone();
+        let items = self.items.lock();
+        items.get(&coll_id).cloned().unwrap_or_default()
     }
 
-    async fn get_all_items(
-        &mut self,
-        collection: &str,
-        sort_key: &str,
-        filter: &str,
-    ) -> ListResult {
+    async fn get_all_items(&self, collection: &str, sort_key: &str, filter: &str) -> ListResult {
         return self
             .get_items(
                 collection,
@@ -398,7 +415,7 @@ impl Store for StoreMongo {
             .await;
     }
 
-    async fn get_item(&mut self, collection: &str, id: u64) -> Option<Item> {
+    async fn get_item(&self, collection: &str, id: u64) -> Option<Item> {
         let coll: Collection<BsonItem> = self
             .client
             .as_ref()
@@ -426,7 +443,7 @@ impl Store for StoreMongo {
     }
 
     async fn get_items(
-        &mut self,
+        &self,
         collection: &str,
         id_min: u64,
         id_max: u64,
@@ -529,7 +546,7 @@ impl Store for StoreMongo {
         lr
     }
 
-    async fn set_item(&mut self, collection: &str, exp_itm: &Item, merge: bool) -> u64 {
+    async fn set_item(&self, collection: &str, exp_itm: &Item, merge: bool) -> u64 {
         let mut itm = exp_itm.clone();
         if itm.bools.contains_key("__security_preserve") {
             itm.bools.remove("__security_preserve");
@@ -537,8 +554,11 @@ impl Store for StoreMongo {
 
         if itm.id == u64::MAX {
             let coll_id = self.collections[collection];
-            if self.items.contains_key(&coll_id) {
-                itm.id = self.items_count[&coll_id] + 1;
+            let items = self.items.lock();
+            if items.contains_key(&coll_id) {
+                drop(items);
+                let counts = self.items_count.lock();
+                itm.id = counts[&coll_id] + 1;
             }
         }
 
@@ -578,20 +598,23 @@ impl Store for StoreMongo {
         }
 
         let coll_id = self.collections[collection];
-        if self.items.contains_key(&coll_id) {
-            let coll = self.items.get_mut(&coll_id).unwrap();
-            if coll.contains_key(&new_itm.id) {
-                *(coll.get_mut(&new_itm.id).unwrap()) = true;
-            } else {
-                coll.insert(new_itm.id, true);
+        {
+            let mut items = self.items.lock();
+            if let Some(set) = items.get_mut(&coll_id) {
+                set.insert(new_itm.id, true);
             }
-            if self.items_count.contains_key(&coll_id) {
-                let cnt = self.items_count.get_mut(&coll_id).unwrap();
-                if new_itm.id > *cnt {
-                    *cnt = new_itm.id;
+        }
+        {
+            let mut counts = self.items_count.lock();
+            match counts.get_mut(&coll_id) {
+                Some(cnt) => {
+                    if new_itm.id > *cnt {
+                        *cnt = new_itm.id;
+                    }
                 }
-            } else {
-                self.items_count.insert(coll_id, new_itm.id + 1);
+                None => {
+                    counts.insert(coll_id, new_itm.id + 1);
+                }
             }
         }
 
@@ -600,13 +623,13 @@ impl Store for StoreMongo {
         // drop the whole user cache. Same call site handles plugin writes
         // since `IsabellePluginApi::db_set_item` routes through here.
         if collection == "user" {
-            self.user_cache.clear();
+            self.user_cache.lock().clear();
         }
 
         return new_itm.id;
     }
 
-    async fn del_item(&mut self, collection: &str, id: u64) -> bool {
+    async fn del_item(&self, collection: &str, id: u64) -> bool {
         let coll: Collection<BsonItem> = self
             .client
             .as_ref()
@@ -620,43 +643,50 @@ impl Store for StoreMongo {
         let _res = coll.delete_one(filter).await;
 
         if collection == "user" {
-            self.user_cache.clear();
+            self.user_cache.lock().clear();
         }
 
         let coll_id = self.collections[collection];
-        if self.items.contains_key(&coll_id) {
-            let coll = self.items.get_mut(&coll_id).unwrap();
-            if coll.contains_key(&id) {
-                coll.remove(&id);
+        let mut items = self.items.lock();
+        if let Some(set) = items.get_mut(&coll_id) {
+            if set.contains_key(&id) {
+                set.remove(&id);
                 return true;
             }
         }
         return false;
     }
 
-    async fn get_credentials(&mut self) -> String {
+    async fn get_credentials(&self) -> String {
         return self.local_path.clone() + "/credentials.json";
     }
 
-    async fn get_pickle(&mut self) -> String {
+    async fn get_pickle(&self) -> String {
         return self.local_path.clone() + "/token.pickle";
     }
 
-    async fn get_internals(&mut self) -> Item {
-        if self.internals_cache.is_none() {
-            let tmp_data_path = self.local_path.clone() + "/internals.js";
-            let itm = match std::fs::read_to_string(&tmp_data_path) {
-                Ok(text) => serde_json::from_str(&text).unwrap(),
-                Err(_) => Item::new(),
-            };
-            self.internals_cache = Some(itm);
+    async fn get_internals(&self) -> Item {
+        {
+            let cache = self.internals_cache.lock();
+            if let Some(item) = cache.as_ref() {
+                return item.clone();
+            }
         }
-        self.internals_cache.as_ref().unwrap().clone()
+        // Cache miss: read+parse outside the lock (sync I/O, no await).
+        let tmp_data_path = self.local_path.clone() + "/internals.js";
+        let itm = match std::fs::read_to_string(&tmp_data_path) {
+            Ok(text) => serde_json::from_str(&text).unwrap(),
+            Err(_) => Item::new(),
+        };
+        // Populate cache. Race-tolerant: if another caller filled it
+        // concurrently we just overwrite with an equivalent value.
+        let mut cache = self.internals_cache.lock();
+        *cache = Some(itm.clone());
+        itm
     }
 
-    async fn get_settings(&mut self) -> Item {
+    async fn get_settings(&self) -> Item {
         let tmp_data_path = self.local_path.clone() + "/settings.js";
-
         let read_data = std::fs::read_to_string(tmp_data_path);
         if let Err(_e) = read_data {
             return Item::new();
@@ -666,7 +696,7 @@ impl Store for StoreMongo {
         return itm;
     }
 
-    async fn set_settings(&mut self, itm: Item) {
+    async fn set_settings(&self, itm: Item) {
         let tmp_data_path = self.local_path.clone() + "/settings.js";
         let s = serde_json::to_string(&itm);
         std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
@@ -698,7 +728,7 @@ mod tests {
     /// is itself the assertion that the fast path bypassed Mongo.
     #[test]
     fn find_user_returns_fresh_cache_entry_without_touching_mongo() {
-        let mut store = StoreMongo::new();
+        let store = StoreMongo::new();
         // No client connected — any Mongo call would panic.
         assert!(store.client.is_none());
 
@@ -706,6 +736,7 @@ mod tests {
         let expires = Instant::now() + USER_CACHE_TTL;
         store
             .user_cache
+            .lock()
             .insert("alice".to_string(), (cached.clone(), expires));
 
         let got = rt().block_on(store.find_user("alice"));
@@ -723,9 +754,9 @@ mod tests {
     /// since the function signature returns Option<Item> by value.
     #[test]
     fn find_user_returns_clone_independent_of_cache() {
-        let mut store = StoreMongo::new();
+        let store = StoreMongo::new();
         let expires = Instant::now() + USER_CACHE_TTL;
-        store.user_cache.insert(
+        store.user_cache.lock().insert(
             "alice".to_string(),
             (user_item("alice", "alice@example.com"), expires),
         );
@@ -745,9 +776,9 @@ mod tests {
     /// Mongo round-trip on every cache hit.
     #[test]
     fn user_cache_keyed_by_session_principal_not_canonical_login() {
-        let mut store = StoreMongo::new();
+        let store = StoreMongo::new();
         let expires = Instant::now() + USER_CACHE_TTL;
-        store.user_cache.insert(
+        store.user_cache.lock().insert(
             "alice@example.com".to_string(),
             (user_item("alice", "alice@example.com"), expires),
         );
@@ -758,6 +789,6 @@ mod tests {
         // Looking up the same user by login MISSES — would fall through to
         // Mongo (which would panic here). We assert by checking the cache
         // map directly that no "alice" entry was inserted as a side effect.
-        assert!(!store.user_cache.contains_key("alice"));
+        assert!(!store.user_cache.lock().contains_key("alice"));
     }
 }
