@@ -36,7 +36,13 @@ use serde_json::Value;
 use mongodb::options::IndexOptions;
 use mongodb::{bson::doc, Client, Collection, IndexModel};
 use std::collections::HashMap;
+use std::time::Instant;
 use tokio::time::{sleep, Duration};
+
+/// TTL for the session-scope `user` lookup cache. Short enough that role
+/// demotions / account locks propagate within seconds, long enough that
+/// chatty clients amortise the Mongo round-trip across many requests.
+const USER_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Mongo storage implementation
 #[derive(Debug, Clone)]
@@ -65,6 +71,12 @@ pub struct StoreMongo {
     /// Cached `internals.js` (loaded lazily on first access, never invalidated:
     /// the file is treated as immutable runtime configuration).
     pub internals_cache: Option<Item>,
+
+    /// Session-scope cache for `find_user(login)` results. Key is whatever
+    /// the session cookie holds (login or email — same key the caller
+    /// passes). TTL is `USER_CACHE_TTL`. Invalidated wholesale on any write
+    /// to the `user` collection.
+    pub user_cache: HashMap<String, (Item, Instant)>,
 }
 
 unsafe impl Send for StoreMongo {}
@@ -81,6 +93,7 @@ impl StoreMongo {
             client: None,
             database_name: "isabelle".to_string(),
             internals_cache: None,
+            user_cache: HashMap::new(),
         }
     }
 
@@ -106,6 +119,34 @@ impl StoreMongo {
         }
 
         return true;
+    }
+
+    /// Resolve a session principal (login or email) to its `user` Item,
+    /// using a short-TTL in-memory cache. Cache invalidation is handled
+    /// in `set_item`/`del_item` for the `user` collection, including
+    /// writes that come through the plugin API (which also funnel through
+    /// these methods).
+    pub async fn find_user(&mut self, login: &str) -> Option<Item> {
+        if let Some((item, expires)) = self.user_cache.get(login) {
+            if *expires > Instant::now() {
+                return Some(item.clone());
+            }
+        }
+
+        // Caller is expected to have run `login_has_bad_symbols`; the JSON
+        // here is hand-built but the input is already screened of `"\\{}[]$`.
+        let filter = format!(
+            "{{ \"$or\": [ {{ \"strs.login\": \"{}\" }}, {{ \"strs.email\": \"{}\" }} ] }}",
+            login, login
+        );
+        let user_opt = self.find_one("user", &filter).await;
+
+        if let Some(user) = &user_opt {
+            self.user_cache
+                .insert(login.to_string(), (user.clone(), Instant::now() + USER_CACHE_TTL));
+        }
+
+        user_opt
     }
 
     /// Single-document lookup by a JSON filter string. Bypasses the
@@ -550,6 +591,14 @@ impl Store for StoreMongo {
             }
         }
 
+        // Any write to `user` (registration, profile edit, otp clear, login
+        // counter bump, …) may shift role flags or rename the principal —
+        // drop the whole user cache. Same call site handles plugin writes
+        // since `IsabellePluginApi::db_set_item` routes through here.
+        if collection == "user" {
+            self.user_cache.clear();
+        }
+
         return new_itm.id;
     }
 
@@ -565,6 +614,10 @@ impl Store for StoreMongo {
         };
 
         let _res = coll.delete_one(filter).await;
+
+        if collection == "user" {
+            self.user_cache.clear();
+        }
 
         let coll_id = self.collections[collection];
         if self.items.contains_key(&coll_id) {
