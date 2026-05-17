@@ -357,7 +357,11 @@ mod tests {
         let coll_dir = dir.path().join("collection").join("test");
         std::fs::create_dir_all(&coll_dir).unwrap();
         // `cnt` is used by connect(); harmless extra here.
-        std::fs::write(coll_dir.join("cnt"), ids.iter().max().unwrap_or(&0).to_string()).unwrap();
+        std::fs::write(
+            coll_dir.join("cnt"),
+            ids.iter().max().unwrap_or(&0).to_string(),
+        )
+        .unwrap();
 
         let mut item_map: HashMap<u64, bool> = HashMap::new();
         for &id in ids {
@@ -403,7 +407,8 @@ mod tests {
     fn get_items_returns_all_when_no_paging() {
         let (_dir, mut store) = make_store_with_items(&[3, 1, 2, 5, 4]);
         let rt = rt();
-        let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", u64::MAX, u64::MAX));
+        let lr =
+            rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", u64::MAX, u64::MAX));
         assert_eq!(sorted_ids(&lr), vec![1, 2, 3, 4, 5]);
         assert_eq!(lr.total_count, 5);
     }
@@ -478,7 +483,10 @@ mod tests {
         assert!(store.internals_cache.is_none());
 
         let result = rt().block_on(store.get_internals());
-        assert_eq!(result.strs.get("default_site_name").map(String::as_str), Some("Test"));
+        assert_eq!(
+            result.strs.get("default_site_name").map(String::as_str),
+            Some("Test")
+        );
         assert!(store.internals_cache.is_some());
     }
 
@@ -488,7 +496,8 @@ mod tests {
         let path = dir.path().to_string_lossy().to_string();
 
         let mut it = Item::new();
-        it.strs.insert("default_site_name".into(), "Original".into());
+        it.strs
+            .insert("default_site_name".into(), "Original".into());
         std::fs::write(
             dir.path().join("internals.js"),
             serde_json::to_string(&it).unwrap(),
@@ -500,12 +509,17 @@ mod tests {
 
         let rt = rt();
         let first = rt.block_on(store.get_internals());
-        assert_eq!(first.strs.get("default_site_name").map(String::as_str), Some("Original"));
+        assert_eq!(
+            first.strs.get("default_site_name").map(String::as_str),
+            Some("Original")
+        );
 
         // Mutate the file on disk. Cache should ignore this — internals.js is
         // treated as immutable runtime config.
         let mut mutated = Item::new();
-        mutated.strs.insert("default_site_name".into(), "Changed".into());
+        mutated
+            .strs
+            .insert("default_site_name".into(), "Changed".into());
         std::fs::write(
             dir.path().join("internals.js"),
             serde_json::to_string(&mutated).unwrap(),
@@ -513,7 +527,10 @@ mod tests {
         .unwrap();
 
         let second = rt.block_on(store.get_internals());
-        assert_eq!(second.strs.get("default_site_name").map(String::as_str), Some("Original"));
+        assert_eq!(
+            second.strs.get("default_site_name").map(String::as_str),
+            Some("Original")
+        );
     }
 
     #[test]

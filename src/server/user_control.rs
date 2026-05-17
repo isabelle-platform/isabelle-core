@@ -60,13 +60,11 @@ pub async fn get_user(srv: &mut crate::state::data::Data, login: String) -> Opti
         let tmp_login = login.to_lowercase();
         trace!("Users: {}", users.map.len());
         for item in &users.map {
-            if item.1.strs.contains_key("login")
-                && item.1.strs["login"].to_lowercase() == tmp_login
+            if item.1.strs.contains_key("login") && item.1.strs["login"].to_lowercase() == tmp_login
             {
                 return Some(item.1.clone());
             }
-            if item.1.strs.contains_key("email")
-                && item.1.strs["email"].to_lowercase() == tmp_login
+            if item.1.strs.contains_key("email") && item.1.strs["email"].to_lowercase() == tmp_login
             {
                 return Some(item.1.clone());
             }

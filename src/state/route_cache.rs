@@ -96,22 +96,21 @@ impl RouteCache {
             parse_path_route(spec, &mut c.rest_routes);
         }
 
-        let parse_collection_hook = |spec: &str,
-                                     by_coll: &mut HashMap<String, Vec<String>>,
-                                     wildcard: &mut Vec<String>| {
-            let parts: Vec<&str> = spec.split(':').collect();
-            // Format: "collection:handler" or "*:handler"
-            if parts.len() >= 2 && !parts[1].is_empty() {
-                if parts[0] == "*" {
-                    wildcard.push(parts[1].to_string());
-                } else if !parts[0].is_empty() {
-                    by_coll
-                        .entry(parts[0].to_string())
-                        .or_default()
-                        .push(parts[1].to_string());
+        let parse_collection_hook =
+            |spec: &str, by_coll: &mut HashMap<String, Vec<String>>, wildcard: &mut Vec<String>| {
+                let parts: Vec<&str> = spec.split(':').collect();
+                // Format: "collection:handler" or "*:handler"
+                if parts.len() >= 2 && !parts[1].is_empty() {
+                    if parts[0] == "*" {
+                        wildcard.push(parts[1].to_string());
+                    } else if !parts[0].is_empty() {
+                        by_coll
+                            .entry(parts[0].to_string())
+                            .or_default()
+                            .push(parts[1].to_string());
+                    }
                 }
-            }
-        };
+            };
 
         for spec in internals
             .strstrs
@@ -182,8 +181,14 @@ mod tests {
             ],
         );
         let c = RouteCache::from_internals(&it);
-        assert_eq!(c.url_routes.get("/system/stat").map(String::as_str), Some("plugin_stat"));
-        assert_eq!(c.url_routes.get("/system/log").map(String::as_str), Some("plugin_log"));
+        assert_eq!(
+            c.url_routes.get("/system/stat").map(String::as_str),
+            Some("plugin_stat")
+        );
+        assert_eq!(
+            c.url_routes.get("/system/log").map(String::as_str),
+            Some("plugin_log")
+        );
         assert!(c.unprotected_url_routes.is_empty());
         assert!(c.rest_routes.is_empty());
     }
@@ -196,8 +201,16 @@ mod tests {
         ]);
         let c = RouteCache::from_internals(&it);
         assert!(c.url_routes.is_empty());
-        assert_eq!(c.unprotected_url_routes.get("/public/x").map(String::as_str), Some("pub_x"));
-        assert_eq!(c.rest_routes.get("/api/y").map(String::as_str), Some("rest_y"));
+        assert_eq!(
+            c.unprotected_url_routes
+                .get("/public/x")
+                .map(String::as_str),
+            Some("pub_x")
+        );
+        assert_eq!(
+            c.rest_routes.get("/api/y").map(String::as_str),
+            Some("rest_y")
+        );
     }
 
     #[test]
@@ -223,7 +236,10 @@ mod tests {
         user_hooks.sort();
         assert_eq!(user_hooks, vec!["check_unique", "hash_password"]);
 
-        assert_eq!(c.item_pre_edit.get("node").unwrap().as_slice(), &["sync".to_string()]);
+        assert_eq!(
+            c.item_pre_edit.get("node").unwrap().as_slice(),
+            &["sync".to_string()]
+        );
         assert_eq!(c.item_pre_edit_wildcard, vec!["audit_log".to_string()]);
         // post_edit untouched
         assert!(c.item_post_edit.is_empty());
@@ -234,14 +250,17 @@ mod tests {
     fn item_post_edit_hook_handles_wildcard_and_specific() {
         let it = item_with(
             "item_post_edit_hook",
-            &[
-                ("1", "*:webhook_fanout"),
-                ("2", "test:notify_engine"),
-            ],
+            &[("1", "*:webhook_fanout"), ("2", "test:notify_engine")],
         );
         let c = RouteCache::from_internals(&it);
-        assert_eq!(c.item_post_edit_wildcard, vec!["webhook_fanout".to_string()]);
-        assert_eq!(c.item_post_edit.get("test").unwrap().as_slice(), &["notify_engine".to_string()]);
+        assert_eq!(
+            c.item_post_edit_wildcard,
+            vec!["webhook_fanout".to_string()]
+        );
+        assert_eq!(
+            c.item_post_edit.get("test").unwrap().as_slice(),
+            &["notify_engine".to_string()]
+        );
         // pre_edit untouched
         assert!(c.item_pre_edit.is_empty());
         assert!(c.item_pre_edit_wildcard.is_empty());
@@ -253,11 +272,11 @@ mod tests {
             (
                 "extra_route",
                 &[
-                    ("1", "nopath"),                  // only 1 segment
-                    ("2", "/p:get"),                  // 2 segments
-                    ("3", ":get:handler"),            // empty path
-                    ("4", "/p:get:"),                 // empty handler
-                    ("5", "/ok:method:handler_ok"),   // good one
+                    ("1", "nopath"),                // only 1 segment
+                    ("2", "/p:get"),                // 2 segments
+                    ("3", ":get:handler"),          // empty path
+                    ("4", "/p:get:"),               // empty handler
+                    ("5", "/ok:method:handler_ok"), // good one
                 ],
             ),
             (
@@ -275,11 +294,17 @@ mod tests {
 
         // Only the "good" extra_route survives.
         assert_eq!(c.url_routes.len(), 1);
-        assert_eq!(c.url_routes.get("/ok").map(String::as_str), Some("handler_ok"));
+        assert_eq!(
+            c.url_routes.get("/ok").map(String::as_str),
+            Some("handler_ok")
+        );
 
         // Only "good" pre-edit + wildcard survive.
         assert_eq!(c.item_pre_edit.len(), 1);
-        assert_eq!(c.item_pre_edit.get("good").unwrap().as_slice(), &["handler_ok".to_string()]);
+        assert_eq!(
+            c.item_pre_edit.get("good").unwrap().as_slice(),
+            &["handler_ok".to_string()]
+        );
         assert_eq!(c.item_pre_edit_wildcard, vec!["wild_ok".to_string()]);
     }
 
@@ -287,10 +312,7 @@ mod tests {
     fn duplicate_paths_last_one_wins() {
         let it = item_with(
             "extra_route",
-            &[
-                ("1", "/dup:get:first"),
-                ("2", "/dup:get:second"),
-            ],
+            &[("1", "/dup:get:first"), ("2", "/dup:get:second")],
         );
         let c = RouteCache::from_internals(&it);
         // HashMap iter order isn't guaranteed; the final value is one of the two
@@ -307,10 +329,7 @@ mod tests {
         // the FIRST colon-delimited handler chunk. Anything after that is
         // dropped. Documenting current behaviour so a future refactor can
         // decide to support multi-colon handlers consciously.
-        let it = item_with(
-            "extra_route",
-            &[("1", "/p:get:handler:with:colons")],
-        );
+        let it = item_with("extra_route", &[("1", "/p:get:handler:with:colons")]);
         let c = RouteCache::from_internals(&it);
         assert_eq!(c.url_routes.get("/p").map(String::as_str), Some("handler"));
     }
@@ -324,4 +343,3 @@ mod tests {
         assert!(c.item_pre_edit.is_empty());
     }
 }
-

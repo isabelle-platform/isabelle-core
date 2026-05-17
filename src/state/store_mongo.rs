@@ -142,8 +142,10 @@ impl StoreMongo {
         let user_opt = self.find_one("user", &filter).await;
 
         if let Some(user) = &user_opt {
-            self.user_cache
-                .insert(login.to_string(), (user.clone(), Instant::now() + USER_CACHE_TTL));
+            self.user_cache.insert(
+                login.to_string(),
+                (user.clone(), Instant::now() + USER_CACHE_TTL),
+            );
         }
 
         user_opt
@@ -160,7 +162,10 @@ impl StoreMongo {
             match self.json_to_bson(filter).await {
                 Ok(d) => d,
                 Err(_) => {
-                    trace!("find_one: failed to parse filter, returning None: {}", filter);
+                    trace!(
+                        "find_one: failed to parse filter, returning None: {}",
+                        filter
+                    );
                     return None;
                 }
             }
@@ -283,10 +288,9 @@ impl Store for StoreMongo {
                                 "Index ensured: {}.{} (unique={}) → {}",
                                 coll_name.1, field, unique, r.index_name
                             ),
-                            Err(e) => warn!(
-                                "Failed to ensure index {}.{}: {}",
-                                coll_name.1, field, e
-                            ),
+                            Err(e) => {
+                                warn!("Failed to ensure index {}.{}: {}", coll_name.1, field, e)
+                            }
                         }
                     }
 
@@ -708,7 +712,10 @@ mod tests {
         assert!(got.is_some());
         let got = got.unwrap();
         assert_eq!(got.strs.get("login").map(String::as_str), Some("alice"));
-        assert_eq!(got.strs.get("email").map(String::as_str), Some("alice@example.com"));
+        assert_eq!(
+            got.strs.get("email").map(String::as_str),
+            Some("alice@example.com")
+        );
     }
 
     /// find_user returns a clone, not a reference — mutating the returned
