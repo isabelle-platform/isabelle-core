@@ -39,6 +39,7 @@ use crate::G_STATE;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::list_result::ListResult;
 use isabelle_dm::data_model::process_result::ProcessResult;
+use isabelle_plugin_api::actor::{CoreHandle, PluginRegistry};
 use isabelle_plugin_api::api::*;
 use isabelle_plugin_api::plugin_pool::PluginPool;
 use log::info;
@@ -565,10 +566,26 @@ pub struct Data {
     /// path is known.
     pub secrets: Option<crate::state::secrets::SecretStore>,
 
-    /// Plugin control
+    /// Plugin control (legacy trait-dispatch path). Phase-out is gradual:
+    /// new plugins register into `plugin_registry` (actor model); old
+    /// trait-based plugins keep using this pool.
     pub plugin_pool: PluginPool,
 
-    /// Plugin API instance
+    /// Actor-model plugin registry. Holds an `mpsc::Sender<PluginHookMessage>`
+    /// per registered plugin actor. Empty until Phase 3 starts migrating
+    /// individual plugins over.
+    pub plugin_registry: PluginRegistry,
+
+    /// Handle to the core processing task that services `CoreMessage`s from
+    /// plugin actors. Set by `main()` after the task is spawned; before
+    /// that it's `None`. Cloned out and passed to each actor plugin at
+    /// register time.
+    pub core_handle: Option<CoreHandle>,
+
+    /// Plugin API instance (legacy thread-pool-bounce path, paired with
+    /// `plugin_pool`). Replaced for actor-mode plugins by `CoreHandle`
+    /// which is given to each plugin at register time and routes through
+    /// the core processing task.
     pub plugin_api: Box<dyn PluginApi>,
 
     /// Opaque data (mainly for plugins)
@@ -608,6 +625,8 @@ impl Data {
             plugin_pool: PluginPool {
                 plugins: Vec::new(),
             },
+            plugin_registry: PluginRegistry::new(),
+            core_handle: None,
             plugin_api: Box::new(IsabellePluginApi::new()),
             opaque_data: HashMap::new(),
             route_cache: Arc::new(RouteCache::default()),

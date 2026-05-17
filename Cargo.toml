@@ -63,6 +63,17 @@ plugin-security = ["dep:isabelle-plugin-security"]
 plugin-midair = ["dep:isabelle-plugin-midair"]
 midair = ["plugin-security", "plugin-midair"]
 
+# Phase 3: register security via the actor-mode entry point instead of the
+# trait-mode one. Currently incomplete — most security hooks are stubs in
+# actor mode (see isabelle-plugin-security/src/lib.rs TODOs). Don't enable
+# this in production until the migration is finished.
+plugin-security-actor = ["dep:isabelle-plugin-security"]
+
+# Phase-3 actor-mode pilot demo plugin. Off by default; enable to register
+# a noop observer plugin via the actor path (logs each hook event it
+# receives). Useful for verifying the dispatcher pipeline end-to-end.
+actor-demo = []
+
 [profile.release]
 lto = "thin"
 codegen-units = 16
@@ -77,3 +88,9 @@ overflow-checks = false
 
 [profile.dev.package."*"]
 codegen-units = 256
+
+# Use the local checkout of isabelle-plugin-api so the actor-model refactor
+# can iterate without round-tripping through a new git tag. Affects all
+# transitive consumers too (the plugins also pick up the local version).
+[patch."https://github.com/isabelle-platform/isabelle-plugin-api"]
+isabelle-plugin-api = { path = "../isabelle-plugin-api" }

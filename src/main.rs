@@ -39,6 +39,8 @@ use crate::state::store::Store;
 mod args;
 mod handler;
 mod notif;
+#[cfg(feature = "actor-demo")]
+mod plugin_actor_demo;
 mod server;
 mod state;
 mod util;
@@ -173,6 +175,12 @@ async fn main() -> std::io::Result<()> {
             srv.rw.connect(&args.data_path, "").await;
         }
 
+        // Spawn the core processing task — it owns the inbox for the new
+        // actor-model `CoreMessage`s and processes them against `Data`.
+        // The returned `CoreHandle` is stored on `srv` so actor plugins
+        // (registered below) can clone it at register time.
+        srv.core_handle = Some(crate::state::core_task::spawn_core_task(G_STATE.clone()));
+
         // Register statically-linked plugins. Each plugin's `register` is
         // compiled into the core binary; which ones are included is decided
         // at build time via cargo features (see Cargo.toml `[features]`).
@@ -180,12 +188,40 @@ async fn main() -> std::io::Result<()> {
         {
             let s = &mut srv;
             let before = s.plugin_pool.plugins.len();
-            #[cfg(feature = "plugin-security")]
+            // Security registers either via trait (default) or actor mode,
+            // controlled by mutually-exclusive features. Both wired off the
+            // same dep so there's no double-link.
+            #[cfg(all(feature = "plugin-security", not(feature = "plugin-security-actor")))]
             isabelle_plugin_security::register(&mut s.plugin_pool);
+            #[cfg(feature = "plugin-security-actor")]
+            {
+                if let Some(core) = s.core_handle.clone() {
+                    isabelle_plugin_security::register_actor(&mut s.plugin_registry, core);
+                }
+            }
             #[cfg(feature = "plugin-midair")]
             isabelle_plugin_midair::register(&mut s.plugin_pool);
+
+            // Phase 3 pilot: register the actor-mode demo plugin.
+            #[cfg(feature = "actor-demo")]
+            {
+                if let Some(core) = s.core_handle.clone() {
+                    let _stats = crate::plugin_actor_demo::register_demo(
+                        &mut s.plugin_registry,
+                        core,
+                    );
+                    // We drop _stats — the demo plugin keeps the Arc'd
+                    // counters; nobody is reading them from production. The
+                    // tests instantiate their own demo and keep the handle.
+                }
+            }
+
             let registered = s.plugin_pool.plugins.len() - before;
-            info!("Plugins: {} registered statically", registered);
+            info!(
+                "Plugins: {} registered (trait), {} registered (actor)",
+                registered,
+                s.plugin_registry.len()
+            );
             info!("Plugins: ensuring operation");
             s.plugin_pool.ping_plugins();
         }
