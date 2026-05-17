@@ -668,3 +668,89 @@ impl Store for StoreMongo {
         std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn user_item(login: &str, email: &str) -> Item {
+        let mut it = Item::new();
+        it.id = 1;
+        it.strs.insert("login".into(), login.into());
+        it.strs.insert("email".into(), email.into());
+        it
+    }
+
+    /// Cache hit must not touch the Mongo client — otherwise `find_user`
+    /// would panic on `self.client.as_ref().unwrap()` because no connection
+    /// is set up in this test. The fact that the call returns successfully
+    /// is itself the assertion that the fast path bypassed Mongo.
+    #[test]
+    fn find_user_returns_fresh_cache_entry_without_touching_mongo() {
+        let mut store = StoreMongo::new();
+        // No client connected — any Mongo call would panic.
+        assert!(store.client.is_none());
+
+        let cached = user_item("alice", "alice@example.com");
+        let expires = Instant::now() + USER_CACHE_TTL;
+        store
+            .user_cache
+            .insert("alice".to_string(), (cached.clone(), expires));
+
+        let got = rt().block_on(store.find_user("alice"));
+        assert!(got.is_some());
+        let got = got.unwrap();
+        assert_eq!(got.strs.get("login").map(String::as_str), Some("alice"));
+        assert_eq!(got.strs.get("email").map(String::as_str), Some("alice@example.com"));
+    }
+
+    /// find_user returns a clone, not a reference — mutating the returned
+    /// Item must not affect the cached copy. Documents the design intent
+    /// since the function signature returns Option<Item> by value.
+    #[test]
+    fn find_user_returns_clone_independent_of_cache() {
+        let mut store = StoreMongo::new();
+        let expires = Instant::now() + USER_CACHE_TTL;
+        store.user_cache.insert(
+            "alice".to_string(),
+            (user_item("alice", "alice@example.com"), expires),
+        );
+
+        let rt = rt();
+        let mut first = rt.block_on(store.find_user("alice")).unwrap();
+        first.strs.insert("login".into(), "tampered".into());
+
+        let second = rt.block_on(store.find_user("alice")).unwrap();
+        assert_eq!(second.strs.get("login").map(String::as_str), Some("alice"));
+    }
+
+    /// Cache key is the session principal (whatever the caller passes).
+    /// A user that logged in via email gets a separate cache entry from
+    /// the same user logged in via login. That's accepted overhead — the
+    /// alternative (canonical-key resolution) would require an extra
+    /// Mongo round-trip on every cache hit.
+    #[test]
+    fn user_cache_keyed_by_session_principal_not_canonical_login() {
+        let mut store = StoreMongo::new();
+        let expires = Instant::now() + USER_CACHE_TTL;
+        store.user_cache.insert(
+            "alice@example.com".to_string(),
+            (user_item("alice", "alice@example.com"), expires),
+        );
+
+        let rt = rt();
+        // Looking up by email hits the cache.
+        assert!(rt.block_on(store.find_user("alice@example.com")).is_some());
+        // Looking up the same user by login MISSES — would fall through to
+        // Mongo (which would panic here). We assert by checking the cache
+        // map directly that no "alice" entry was inserted as a side effect.
+        assert!(!store.user_cache.contains_key("alice"));
+    }
+}

@@ -340,3 +340,196 @@ impl Store for StoreLocal {
         std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Build a StoreLocal with a fixture collection on disk. The store is
+    /// initialised manually (not via `connect`) so tests are independent of
+    /// `connect()`'s own behaviour. We hand-write each item's `data.js` so
+    /// `get_item` (which reads it back) sees the same data we asserted.
+    fn make_store_with_items(ids: &[u64]) -> (TempDir, StoreLocal) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+
+        let coll_dir = dir.path().join("collection").join("test");
+        std::fs::create_dir_all(&coll_dir).unwrap();
+        // `cnt` is used by connect(); harmless extra here.
+        std::fs::write(coll_dir.join("cnt"), ids.iter().max().unwrap_or(&0).to_string()).unwrap();
+
+        let mut item_map: HashMap<u64, bool> = HashMap::new();
+        for &id in ids {
+            let item_dir = coll_dir.join(id.to_string());
+            std::fs::create_dir_all(&item_dir).unwrap();
+            let mut it = Item::new();
+            it.id = id;
+            it.strs.insert("name".into(), format!("item{}", id));
+            std::fs::write(
+                item_dir.join("data.js"),
+                serde_json::to_string(&it).unwrap(),
+            )
+            .unwrap();
+            item_map.insert(id, true);
+        }
+
+        let store = StoreLocal {
+            path,
+            collections: HashMap::from([("test".to_string(), 0u64)]),
+            items: HashMap::from([(0u64, item_map)]),
+            items_count: HashMap::from([(0u64, *ids.iter().max().unwrap_or(&0))]),
+            internals_cache: None,
+        };
+        (dir, store)
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn sorted_ids(lr: &ListResult) -> Vec<u64> {
+        let mut v: Vec<u64> = lr.map.keys().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
+    // ---- get_items pagination ----
+
+    #[test]
+    fn get_items_returns_all_when_no_paging() {
+        let (_dir, mut store) = make_store_with_items(&[3, 1, 2, 5, 4]);
+        let rt = rt();
+        let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", u64::MAX, u64::MAX));
+        assert_eq!(sorted_ids(&lr), vec![1, 2, 3, 4, 5]);
+        assert_eq!(lr.total_count, 5);
+    }
+
+    #[test]
+    fn get_items_paginates_in_id_ascending_order() {
+        // Items inserted out-of-order; with skip=2 limit=2 we must get the
+        // 3rd and 4th by sorted id (3, 4), not arbitrary HashMap order.
+        let (_dir, mut store) = make_store_with_items(&[5, 1, 4, 2, 3]);
+        let rt = rt();
+        let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", 2, 2));
+        assert_eq!(sorted_ids(&lr), vec![3, 4]);
+        // total_count reflects how many matched the range (all 5), not page size.
+        assert_eq!(lr.total_count, 5);
+    }
+
+    #[test]
+    fn get_items_limit_zero_returns_empty_page_but_full_total() {
+        let (_dir, mut store) = make_store_with_items(&[1, 2, 3]);
+        let rt = rt();
+        let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", 0, 0));
+        assert!(lr.map.is_empty());
+        assert_eq!(lr.total_count, 3);
+    }
+
+    #[test]
+    fn get_items_id_range_filters_total_count_too() {
+        let (_dir, mut store) = make_store_with_items(&[1, 2, 3, 4, 5, 6, 7]);
+        let rt = rt();
+        let lr = rt.block_on(store.get_items("test", 3, 5, "", "", 0, u64::MAX));
+        assert_eq!(sorted_ids(&lr), vec![3, 4, 5]);
+        // Critical: total_count is the size of the filtered range, NOT the
+        // whole collection. This was the bug we fixed.
+        assert_eq!(lr.total_count, 3);
+    }
+
+    #[test]
+    fn get_items_skip_past_end_yields_empty() {
+        let (_dir, mut store) = make_store_with_items(&[1, 2, 3]);
+        let rt = rt();
+        let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", 10, u64::MAX));
+        assert!(lr.map.is_empty());
+        assert_eq!(lr.total_count, 3);
+    }
+
+    #[test]
+    fn get_items_skip_max_is_treated_as_zero() {
+        // skip = u64::MAX is the unset sentinel; must behave as 0.
+        let (_dir, mut store) = make_store_with_items(&[1, 2, 3]);
+        let rt = rt();
+        let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", u64::MAX, 2));
+        assert_eq!(sorted_ids(&lr), vec![1, 2]);
+    }
+
+    // ---- internals_cache ----
+
+    #[test]
+    fn get_internals_loads_from_disk_first_time() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+
+        let mut it = Item::new();
+        it.strs.insert("default_site_name".into(), "Test".into());
+        std::fs::write(
+            dir.path().join("internals.js"),
+            serde_json::to_string(&it).unwrap(),
+        )
+        .unwrap();
+
+        let mut store = StoreLocal::new();
+        store.path = path;
+        assert!(store.internals_cache.is_none());
+
+        let result = rt().block_on(store.get_internals());
+        assert_eq!(result.strs.get("default_site_name").map(String::as_str), Some("Test"));
+        assert!(store.internals_cache.is_some());
+    }
+
+    #[test]
+    fn get_internals_is_cached_across_calls() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+
+        let mut it = Item::new();
+        it.strs.insert("default_site_name".into(), "Original".into());
+        std::fs::write(
+            dir.path().join("internals.js"),
+            serde_json::to_string(&it).unwrap(),
+        )
+        .unwrap();
+
+        let mut store = StoreLocal::new();
+        store.path = path.clone();
+
+        let rt = rt();
+        let first = rt.block_on(store.get_internals());
+        assert_eq!(first.strs.get("default_site_name").map(String::as_str), Some("Original"));
+
+        // Mutate the file on disk. Cache should ignore this — internals.js is
+        // treated as immutable runtime config.
+        let mut mutated = Item::new();
+        mutated.strs.insert("default_site_name".into(), "Changed".into());
+        std::fs::write(
+            dir.path().join("internals.js"),
+            serde_json::to_string(&mutated).unwrap(),
+        )
+        .unwrap();
+
+        let second = rt.block_on(store.get_internals());
+        assert_eq!(second.strs.get("default_site_name").map(String::as_str), Some("Original"));
+    }
+
+    #[test]
+    fn get_internals_missing_file_caches_empty() {
+        let dir = TempDir::new().unwrap();
+        let mut store = StoreLocal::new();
+        store.path = dir.path().to_string_lossy().to_string();
+
+        let rt = rt();
+        let result = rt.block_on(store.get_internals());
+        assert!(result.strs.is_empty());
+        assert!(result.strstrs.is_empty());
+
+        // Second call still returns empty without retrying disk read.
+        let second = rt.block_on(store.get_internals());
+        assert!(second.strs.is_empty());
+        assert!(store.internals_cache.is_some());
+    }
+}
