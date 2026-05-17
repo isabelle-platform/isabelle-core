@@ -49,10 +49,6 @@ pub struct Args {
     #[arg(long, default_value("isabelle"), visible_alias("database"))]
     pub db_name: String,
 
-    /// Plugins directory
-    #[arg(long)]
-    pub plugin_dir: String,
-
     /// Google Calendar path
     #[arg(long, default_value(""))]
     pub gc_path: String,

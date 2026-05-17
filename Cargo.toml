@@ -24,6 +24,12 @@ env_logger = "0.8.4"
 futures-util = "0.3.29"
 isabelle-dm = { "git" = "https://github.com/isabelle-platform/isabelle-dm", tag = "1.10.0" }
 isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.23.0" }
+
+# Statically-linked plugins. Each is gated by a feature so different deploy
+# targets produce different binaries. See [features] below.
+isabelle-plugin-security = { path = "../isabelle-plugin-security", optional = true }
+isabelle-plugin-midair = { path = "../../midair-platform/isabelle-plugin-midair", optional = true }
+
 lazy_static = "1.4.0"
 lettre = { version = "0.11.11", features = [
 	"rustls-tls",
@@ -50,6 +56,12 @@ tempfile = "3"
 
 [features]
 full_file_database = []
+
+# Plugin feature flags — each enables an optional dep above. Convenience
+# profiles bundle the plugins needed by a specific deployment.
+plugin-security = ["dep:isabelle-plugin-security"]
+plugin-midair = ["dep:isabelle-plugin-midair"]
+midair = ["plugin-security", "plugin-midair"]
 
 [profile.release]
 lto = "thin"

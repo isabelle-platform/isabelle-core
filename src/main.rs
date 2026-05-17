@@ -173,28 +173,19 @@ async fn main() -> std::io::Result<()> {
             srv.rw.connect(&args.data_path, "").await;
         }
 
-        // Load plugins
-        info!("Plugins: loading");
+        // Register statically-linked plugins. Each plugin's `register` is
+        // compiled into the core binary; which ones are included is decided
+        // at build time via cargo features (see Cargo.toml `[features]`).
+        info!("Plugins: registering");
         {
             let s = &mut srv;
-            let result = s.plugin_pool.load_plugins(&args.plugin_dir);
-            if !result.is_ok() {
-                for failure in &result.failures {
-                    log::error!("Plugin load failure at {}: {}", failure.path, failure.error);
-                }
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!(
-                        "Failed to load {} plugin(s) from {}",
-                        result.failed(),
-                        &args.plugin_dir
-                    ),
-                ));
-            }
-            info!(
-                "Plugins: {} loaded out of {} candidate(s) from {}",
-                result.loaded, result.considered, &args.plugin_dir
-            );
+            let before = s.plugin_pool.plugins.len();
+            #[cfg(feature = "plugin-security")]
+            isabelle_plugin_security::register(&mut s.plugin_pool);
+            #[cfg(feature = "plugin-midair")]
+            isabelle_plugin_midair::register(&mut s.plugin_pool);
+            let registered = s.plugin_pool.plugins.len() - before;
+            info!("Plugins: {} registered statically", registered);
             info!("Plugins: ensuring operation");
             s.plugin_pool.ping_plugins();
         }
