@@ -653,7 +653,7 @@ impl Data {
     }
 
     /// Check existence of collection
-    pub fn has_collection(&mut self, collection: &str) -> bool {
+    pub fn has_collection(&self, collection: &str) -> bool {
         return self.rw.collections.contains_key(collection);
     }
 

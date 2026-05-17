@@ -28,39 +28,49 @@ use crate::state::store::Store;
 use async_trait::async_trait;
 use isabelle_dm::data_model::item::*;
 use log::{debug, error, trace};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fs;
 
-/// Local storage implementation
-#[derive(Debug, Clone)]
+/// Local storage implementation. See StoreMongo's docstring for the
+/// `&self` + interior-mutability pattern; same reasoning applies here.
 pub struct StoreLocal {
-    /// Path to folder
+    /// Path to folder (set at connect)
     pub path: String,
 
-    /// Collection hash map
+    /// Collection name → coll_id (set at connect)
     pub collections: HashMap<String, u64>,
 
-    /// All items
-    pub items: HashMap<u64, HashMap<u64, bool>>,
+    /// Per-collection set of known item IDs.
+    pub items: Mutex<HashMap<u64, HashMap<u64, bool>>>,
 
-    /// Item counters
-    pub items_count: HashMap<u64, u64>,
+    /// Per-collection running max-id counter.
+    pub items_count: Mutex<HashMap<u64, u64>>,
 
     /// Cached `internals.js` (loaded lazily on first access, never invalidated:
     /// the file is treated as immutable runtime configuration).
-    pub internals_cache: Option<Item>,
+    pub internals_cache: Mutex<Option<Item>>,
 }
 
 unsafe impl Send for StoreLocal {}
+
+impl std::fmt::Debug for StoreLocal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreLocal")
+            .field("path", &self.path)
+            .field("collections_len", &self.collections.len())
+            .finish_non_exhaustive()
+    }
+}
 
 impl StoreLocal {
     pub fn new() -> Self {
         Self {
             path: "".to_string(),
             collections: HashMap::new(),
-            items: HashMap::new(),
-            items_count: HashMap::new(),
-            internals_cache: None,
+            items: Mutex::new(HashMap::new()),
+            items_count: Mutex::new(HashMap::new()),
+            internals_cache: Mutex::new(None),
         }
     }
 }
@@ -72,9 +82,8 @@ impl Store for StoreLocal {
         let collections = fs::read_dir(self.path.to_string() + "/collection").unwrap();
         for coll in collections {
             let idx = coll.as_ref().unwrap().file_name().into_string().unwrap();
-            let new_col: HashMap<u64, bool> = HashMap::new();
-            let coll_index = self.items.len().try_into().unwrap();
-            self.items.insert(coll_index, new_col);
+            let coll_index: u64 = self.items.lock().len().try_into().unwrap();
+            self.items.lock().insert(coll_index, HashMap::new());
             self.collections.insert(idx.clone(), coll_index);
             trace!("New collection {}", idx.clone());
 
@@ -92,6 +101,7 @@ impl Store for StoreLocal {
             }
 
             self.items_count
+                .lock()
                 .insert(self.collections[&idx], *parsed.as_ref().unwrap());
             trace!(" - index: {}", self.collections[&idx]);
             trace!(" - counter: {}", parsed.as_ref().unwrap());
@@ -106,8 +116,9 @@ impl Store for StoreLocal {
                     .unwrap();
                 let tmp_path = self.path.to_string() + "/collection/" + &idx + "/" + &data_file_idx;
                 if Path::new(&tmp_path).is_dir() {
-                    let m = self.items.get_mut(&coll_index).unwrap();
-                    (*m).insert(data_file_idx.parse::<u64>().unwrap(), true);
+                    let mut items = self.items.lock();
+                    let m = items.get_mut(&coll_index).unwrap();
+                    m.insert(data_file_idx.parse::<u64>().unwrap(), true);
                     trace!("{}: idx {}", &idx, &data_file_idx);
                 }
             }
@@ -116,31 +127,19 @@ impl Store for StoreLocal {
 
     async fn disconnect(&mut self) {}
 
-    async fn get_collections(&mut self) -> Vec<String> {
-        let mut lst: Vec<String> = Vec::new();
-
-        for coll in &self.collections {
-            lst.push(coll.0.clone());
-        }
-
-        return lst;
+    async fn get_collections(&self) -> Vec<String> {
+        self.collections.keys().cloned().collect()
     }
 
-    async fn get_item_ids(&mut self, collection: &str) -> HashMap<u64, bool> {
+    async fn get_item_ids(&self, collection: &str) -> HashMap<u64, bool> {
         if !self.collections.contains_key(collection) {
             return HashMap::new();
         }
-
         let coll_id = self.collections[collection];
-        return self.items[&coll_id].clone();
+        self.items.lock().get(&coll_id).cloned().unwrap_or_default()
     }
 
-    async fn get_all_items(
-        &mut self,
-        collection: &str,
-        sort_key: &str,
-        filter: &str,
-    ) -> ListResult {
+    async fn get_all_items(&self, collection: &str, sort_key: &str, filter: &str) -> ListResult {
         return self
             .get_items(
                 collection,
@@ -154,7 +153,7 @@ impl Store for StoreLocal {
             .await;
     }
 
-    async fn get_item(&mut self, collection: &str, id: u64) -> Option<Item> {
+    async fn get_item(&self, collection: &str, id: u64) -> Option<Item> {
         let tmp_path = self.path.to_string()
             + "/collection/"
             + collection
@@ -170,7 +169,7 @@ impl Store for StoreLocal {
     }
 
     async fn get_items(
-        &mut self,
+        &self,
         collection: &str,
         id_min: u64,
         id_max: u64,
@@ -185,9 +184,10 @@ impl Store for StoreLocal {
         };
         let itms = self
             .items
-            .get_mut(&self.collections[collection])
-            .unwrap()
-            .clone();
+            .lock()
+            .get(&self.collections[collection])
+            .cloned()
+            .unwrap_or_default();
 
         let eff_skip = if skip == u64::MAX { 0 } else { skip };
         let eff_id_min = if id_min == u64::MAX { 0 } else { id_min };
@@ -227,7 +227,7 @@ impl Store for StoreLocal {
         return lr;
     }
 
-    async fn set_item(&mut self, collection: &str, exp_itm: &Item, merge: bool) -> u64 {
+    async fn set_item(&self, collection: &str, exp_itm: &Item, merge: bool) -> u64 {
         let mut itm = exp_itm.clone();
 
         if itm.bools.contains_key("__security_preserve") {
@@ -236,8 +236,9 @@ impl Store for StoreLocal {
 
         if itm.id == u64::MAX {
             let coll_id = self.collections[collection];
-            if self.items.contains_key(&coll_id) {
-                itm.id = self.items_count[&coll_id] + 1;
+            let has = self.items.lock().contains_key(&coll_id);
+            if has {
+                itm.id = self.items_count.lock()[&coll_id] + 1;
             }
         }
 
@@ -257,43 +258,46 @@ impl Store for StoreLocal {
         std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
 
         let coll_id = self.collections[collection];
-        if self.items.contains_key(&coll_id) {
-            let coll = self.items.get_mut(&coll_id).unwrap();
-            if coll.contains_key(&new_itm.id) {
-                *(coll.get_mut(&new_itm.id).unwrap()) = true;
-            } else {
+        let has = self.items.lock().contains_key(&coll_id);
+        if has {
+            {
+                let mut items = self.items.lock();
+                let coll = items.get_mut(&coll_id).unwrap();
                 coll.insert(new_itm.id, true);
             }
-            if self.items_count.contains_key(&coll_id) {
-                let cnt = self.items_count.get_mut(&coll_id).unwrap();
-                if new_itm.id > *cnt {
-                    *cnt = new_itm.id;
+            let mut counts = self.items_count.lock();
+            match counts.get_mut(&coll_id) {
+                Some(cnt) => {
+                    if new_itm.id > *cnt {
+                        *cnt = new_itm.id;
+                        let _res = std::fs::write(
+                            self.path.to_string() + "/collection/" + collection + "/cnt",
+                            (new_itm.id + 1).to_string(),
+                        );
+                    }
+                }
+                None => {
+                    counts.insert(coll_id, new_itm.id + 1);
                     let _res = std::fs::write(
                         self.path.to_string() + "/collection/" + collection + "/cnt",
                         (new_itm.id + 1).to_string(),
                     );
                 }
-            } else {
-                self.items_count.insert(coll_id, new_itm.id + 1);
-                let _res = std::fs::write(
-                    self.path.to_string() + "/collection/" + collection + "/cnt",
-                    (new_itm.id + 1).to_string(),
-                );
             }
         }
 
         return new_itm.id;
     }
 
-    async fn del_item(&mut self, collection: &str, id: u64) -> bool {
+    async fn del_item(&self, collection: &str, id: u64) -> bool {
         let tmp_path = self.path.to_string() + "/" + collection + "/" + &id.to_string();
         let path = Path::new(&tmp_path);
         if path.exists() {
             let _res = std::fs::remove_dir_all(tmp_path);
         }
         let coll_id = self.collections[collection];
-        if self.items.contains_key(&coll_id) {
-            let coll = self.items.get_mut(&coll_id).unwrap();
+        let mut items = self.items.lock();
+        if let Some(coll) = items.get_mut(&coll_id) {
             if coll.contains_key(&id) {
                 coll.remove(&id);
                 return true;
@@ -302,29 +306,33 @@ impl Store for StoreLocal {
         return false;
     }
 
-    async fn get_credentials(&mut self) -> String {
+    async fn get_credentials(&self) -> String {
         return self.path.clone() + "/credentials.json";
     }
 
-    async fn get_pickle(&mut self) -> String {
+    async fn get_pickle(&self) -> String {
         return self.path.clone() + "/token.pickle";
     }
 
-    async fn get_internals(&mut self) -> Item {
-        if self.internals_cache.is_none() {
-            let tmp_data_path = self.path.clone() + "/internals.js";
-            let itm = match std::fs::read_to_string(&tmp_data_path) {
-                Ok(text) => serde_json::from_str(&text).unwrap(),
-                Err(_) => Item::new(),
-            };
-            self.internals_cache = Some(itm);
+    async fn get_internals(&self) -> Item {
+        {
+            let cache = self.internals_cache.lock();
+            if let Some(item) = cache.as_ref() {
+                return item.clone();
+            }
         }
-        self.internals_cache.as_ref().unwrap().clone()
+        let tmp_data_path = self.path.clone() + "/internals.js";
+        let itm = match std::fs::read_to_string(&tmp_data_path) {
+            Ok(text) => serde_json::from_str(&text).unwrap(),
+            Err(_) => Item::new(),
+        };
+        let mut cache = self.internals_cache.lock();
+        *cache = Some(itm.clone());
+        itm
     }
 
-    async fn get_settings(&mut self) -> Item {
+    async fn get_settings(&self) -> Item {
         let tmp_data_path = self.path.clone() + "/settings.js";
-
         let read_data = std::fs::read_to_string(tmp_data_path);
         if let Err(_e) = read_data {
             return Item::new();
@@ -334,7 +342,7 @@ impl Store for StoreLocal {
         return itm;
     }
 
-    async fn set_settings(&mut self, itm: Item) {
+    async fn set_settings(&self, itm: Item) {
         let tmp_data_path = self.path.clone() + "/settings.js";
         let s = serde_json::to_string(&itm);
         std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
@@ -381,9 +389,9 @@ mod tests {
         let store = StoreLocal {
             path,
             collections: HashMap::from([("test".to_string(), 0u64)]),
-            items: HashMap::from([(0u64, item_map)]),
-            items_count: HashMap::from([(0u64, *ids.iter().max().unwrap_or(&0))]),
-            internals_cache: None,
+            items: Mutex::new(HashMap::from([(0u64, item_map)])),
+            items_count: Mutex::new(HashMap::from([(0u64, *ids.iter().max().unwrap_or(&0))])),
+            internals_cache: Mutex::new(None),
         };
         (dir, store)
     }
@@ -480,14 +488,14 @@ mod tests {
 
         let mut store = StoreLocal::new();
         store.path = path;
-        assert!(store.internals_cache.is_none());
+        assert!(store.internals_cache.lock().is_none());
 
         let result = rt().block_on(store.get_internals());
         assert_eq!(
             result.strs.get("default_site_name").map(String::as_str),
             Some("Test")
         );
-        assert!(store.internals_cache.is_some());
+        assert!(store.internals_cache.lock().is_some());
     }
 
     #[test]
@@ -547,6 +555,6 @@ mod tests {
         // Second call still returns empty without retrying disk read.
         let second = rt.block_on(store.get_internals());
         assert!(second.strs.is_empty());
-        assert!(store.internals_cache.is_some());
+        assert!(store.internals_cache.lock().is_some());
     }
 }
