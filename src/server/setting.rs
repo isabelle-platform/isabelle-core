@@ -43,12 +43,11 @@ pub async fn setting_edit(
     req: HttpRequest,
     mut payload: Multipart,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let usr = get_user(&mut srv, user.id().unwrap()).await;
+    let srv: &crate::state::data::Data = &data.server;
+    let usr = get_user(srv, user.id().unwrap()).await;
 
     // Settings can't be edited by non-admins.
-    if !check_role(&mut srv, &usr, "admin").await {
+    if !check_role(srv, &usr, "admin").await {
         return HttpResponse::Forbidden().into();
     }
 
@@ -91,12 +90,11 @@ pub async fn setting_list(
     data: web::Data<State>,
     _req: HttpRequest,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let usr = get_user(&mut srv, user.id().unwrap()).await;
+    let srv: &crate::state::data::Data = &data.server;
+    let usr = get_user(srv, user.id().unwrap()).await;
 
     // Non-admins can't list settings
-    if !check_role(&mut srv, &usr, "admin").await {
+    if !check_role(srv, &usr, "admin").await {
         return HttpResponse::Forbidden().into();
     }
 
@@ -113,17 +111,16 @@ pub async fn setting_gcal_auth(
     data: web::Data<State>,
     _req: HttpRequest,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let usr = get_user(&mut srv, user.id().unwrap()).await;
+    let srv: &crate::state::data::Data = &data.server;
+    let usr = get_user(srv, user.id().unwrap()).await;
 
     // Non-admins can't authenticate with Google Calendar
-    if !check_role(&mut srv, &usr, "admin").await {
+    if !check_role(srv, &usr, "admin").await {
         return HttpResponse::Forbidden().into();
     }
 
     // Start authentication
-    HttpResponse::Ok().body(auth_google(&mut srv).await).into()
+    HttpResponse::Ok().body(auth_google(srv).await).into()
 }
 
 pub async fn setting_gcal_auth_end(
@@ -131,12 +128,11 @@ pub async fn setting_gcal_auth_end(
     data: web::Data<State>,
     _req: HttpRequest,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let usr = get_user(&mut srv, user.id().unwrap()).await;
+    let srv: &crate::state::data::Data = &data.server;
+    let usr = get_user(srv, user.id().unwrap()).await;
 
     // Non-admins can't finish Google Authentication
-    if !check_role(&mut srv, &usr, "admin").await {
+    if !check_role(srv, &usr, "admin").await {
         return HttpResponse::Forbidden().into();
     }
 
@@ -153,11 +149,11 @@ pub async fn setting_gcal_auth_end(
     let data: AuthEndData = config.deserialize_str(&_req.query_string()).unwrap();
 
     // Finish authentication
-    let public_url = srv.public_url.clone();
+    let public_url = srv.public_url.lock().clone();
     HttpResponse::Ok()
         .body(
             auth_google_end(
-                &mut srv,
+                srv,
                 public_url + "/?" + _req.query_string(),
                 data.state,
                 data.code,

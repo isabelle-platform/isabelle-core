@@ -22,13 +22,18 @@
  * DEALINGS IN THE SOFTWARE.
  */
 use crate::state::data::*;
-use std::cell::RefCell;
 use std::sync::Arc;
 
-use parking_lot::ReentrantMutex;
-
+/// Server-wide state shared across actix worker arbiters.
+///
+/// Phase-4 lock decomposition: `Data` is wrapped in plain `Arc` — no outer
+/// `parking_lot::ReentrantMutex` anymore. All runtime-mutable fields inside
+/// `Data` use interior mutability (`parking_lot::Mutex` on caches, secrets,
+/// plugin pool, route cache). HTTP handlers get a `&Data` directly via
+/// `&data.server` and never serialise on a single global lock — only on
+/// the specific subsystem they touch.
 pub struct State {
-    pub server: Arc<ReentrantMutex<RefCell<Data>>>,
+    pub server: Arc<Data>,
 }
 
 impl Clone for State {
@@ -41,9 +46,8 @@ impl Clone for State {
 
 impl State {
     pub fn new() -> Self {
-        let srv = Data::new();
         Self {
-            server: Arc::new(ReentrantMutex::new(RefCell::new(srv))),
+            server: Arc::new(Data::new()),
         }
     }
 }

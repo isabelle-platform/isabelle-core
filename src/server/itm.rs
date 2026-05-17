@@ -38,7 +38,6 @@ use isabelle_dm::data_model::process_result::ProcessResult;
 use log::{error, info};
 use serde_qs;
 use std::collections::HashMap;
-use std::ops::DerefMut;
 
 /// Action that is called on editing items. This function unrolls the
 /// multipart data, all needed hooks, and eventually prepare response.
@@ -48,9 +47,8 @@ pub async fn itm_edit(
     req: HttpRequest,
     mut payload: Multipart,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let usr = get_user(&mut srv, user.id().unwrap()).await;
+    let srv: &crate::state::data::Data = &data.server;
+    let usr = get_user(srv, user.id().unwrap()).await;
 
     let mc = serde_qs::from_str::<MergeColl>(&req.query_string()).unwrap();
     let mut itm = serde_qs::from_str::<Item>(&req.query_string()).unwrap();
@@ -76,13 +74,13 @@ pub async fn itm_edit(
     // read straight from the cached internals. Pre-/post-edit hooks are read
     // from the pre-parsed route cache below.
     let internals = srv.rw.get_internals().await;
-    let cache = srv.route_cache.clone();
+    let cache = srv.route_cache.lock().clone();
 
     /* call auth hooks */
     if let Some(routes) = internals.strstrs.get("itm_auth_hook") {
         for route in routes {
             if !call_item_auth_hook(
-                &mut srv,
+                srv,
                 route.1,
                 &usr,
                 &mc.collection,
@@ -100,10 +98,9 @@ pub async fn itm_edit(
     itm.normalize_negated();
 
     if srv.has_collection(&mc.collection) {
-        let srv_mut = unsafe { &mut (*srv_lock.as_ptr()) };
         let mut itm_clone = itm.clone();
 
-        let old_itm = srv_mut.rw.get_item(&mc.collection, itm.id).await;
+        let old_itm = srv.rw.get_item(&mc.collection, itm.id).await;
         /* call pre edit hooks */
         {
             let specific = cache.item_pre_edit.get(&mc.collection);
@@ -113,7 +110,7 @@ pub async fn itm_edit(
                 .chain(cache.item_pre_edit_wildcard.iter())
             {
                 let res = call_item_pre_edit_hook(
-                    &mut (*srv_mut),
+                    srv,
                     handler,
                     &usr,
                     &mc.collection,
@@ -135,10 +132,7 @@ pub async fn itm_edit(
             }
         }
 
-        let r = (*srv_mut)
-            .rw
-            .set_item(&mc.collection, &itm_clone, mc.merge)
-            .await;
+        let r = srv.rw.set_item(&mc.collection, &itm_clone, mc.merge).await;
         info!("Collection {} element {} set", mc.collection, itm.id);
 
         /* call post edit hooks */
@@ -150,7 +144,7 @@ pub async fn itm_edit(
                 .chain(cache.item_post_edit_wildcard.iter())
             {
                 call_item_post_edit_hook(
-                    &mut (*srv_mut),
+                    srv,
                     handler,
                     &mc.collection,
                     old_itm.clone(),
@@ -185,31 +179,28 @@ pub async fn itm_edit(
 /// Action that is called on removing the item. This function calls
 /// all necessary hooks and actually performs removal.
 pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let usr = get_user(&mut srv, user.id().unwrap()).await;
+    let srv: &crate::state::data::Data = &data.server;
+    let usr = get_user(srv, user.id().unwrap()).await;
 
     let mc = serde_qs::from_str::<MergeColl>(&req.query_string()).unwrap();
     let itm = serde_qs::from_str::<Item>(&req.query_string()).unwrap();
 
     // See itm_edit for the cache/internals split rationale.
     let internals = srv.rw.get_internals().await;
-    let cache = srv.route_cache.clone();
+    let cache = srv.route_cache.lock().clone();
 
     /* call auth hooks */
     if let Some(routes) = internals.strstrs.get("itm_auth_hook") {
         for route in routes {
-            if !call_item_auth_hook(&mut srv, route.1, &usr, &mc.collection, itm.id, None, true)
-                .await
+            if !call_item_auth_hook(srv, route.1, &usr, &mc.collection, itm.id, None, true).await
             {
                 return HttpResponse::Forbidden().into();
             }
         }
     }
 
-    let srv_mut = srv.deref_mut();
-    if srv_mut.has_collection(&mc.collection) {
-        let old_itm = srv_mut.rw.get_item(&mc.collection, itm.id).await;
+    if srv.has_collection(&mc.collection) {
+        let old_itm = srv.rw.get_item(&mc.collection, itm.id).await;
         let mut new_itm = Item::new();
 
         /* call pre edit hooks before removal */
@@ -221,7 +212,7 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
                 .chain(cache.item_pre_edit_wildcard.iter())
             {
                 let res = call_item_pre_edit_hook(
-                    &mut (*srv_mut),
+                    srv,
                     handler,
                     &usr,
                     &mc.collection,
@@ -239,7 +230,7 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
             }
         }
 
-        if srv_mut.rw.del_item(&mc.collection, itm.id).await {
+        if srv.rw.del_item(&mc.collection, itm.id).await {
             info!("Collection {} element {} removed", mc.collection, itm.id);
         }
 
@@ -252,7 +243,7 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
                 .chain(cache.item_post_edit_wildcard.iter())
             {
                 call_item_post_edit_hook(
-                    srv_mut,
+                    srv,
                     handler,
                     &mc.collection,
                     old_itm.clone(),
@@ -275,9 +266,8 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
 /// This function invokes all necessary hooks before giving away the list
 /// in form of json array.
 pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let usr = get_user(&mut srv, user.id().unwrap()).await;
+    let srv: &crate::state::data::Data = &data.server;
+    let usr = get_user(srv, user.id().unwrap()).await;
 
     let lq = match serde_qs::from_str::<ListQuery>(&req.query_string()) {
         Ok(v) => v,
@@ -330,7 +320,7 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
         if let Some(db_filter_routes) = internals.strstrs.get("itm_list_db_filter_hook") {
             for route in db_filter_routes {
                 let new_filters = call_item_list_db_filter_hook(
-                    &mut srv,
+                    srv,
                     route.1,
                     &usr,
                     &lq.collection,
@@ -400,7 +390,7 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
         sorted_routes.sort_by(|a, b| a.0.cmp(b.0));
         for route in sorted_routes {
             call_item_list_filter_hook(
-                &mut srv,
+                srv,
                 route.1,
                 &usr,
                 &lq.collection,

@@ -72,7 +72,6 @@ use actix_web::web::Data;
 use actix_web::{cookie::Key, cookie::SameSite, rt, web, App, HttpServer};
 use clap::Parser;
 use log::info;
-use std::ops::DerefMut;
 use std::thread;
 
 /// Session middleware based on cookies
@@ -113,17 +112,27 @@ async fn main() -> std::io::Result<()> {
     let mut new_rest_routes: HashMap<String, String> = HashMap::new();
 
     {
-        let srv_lock = G_STATE.server.lock();
-        let mut srv_mut = srv_lock.borrow_mut();
-        let mut srv = srv_mut.deref_mut();
+        let srv: &crate::state::data::Data = &G_STATE.server;
+        // SAFETY: this is the single-threaded startup phase. No other code
+        // observes `Data` yet — actix HTTP workers and core_task haven't
+        // started. We mutate the remaining `&mut`-only fields (`file_rw`,
+        // `rw.database_name`, `rw.connect`'s internals, `core_handle`)
+        // through a raw pointer aliasing the Arc<Data>'s payload. Cleaner
+        // long-term: switch G_STATE to a `OnceLock<State>` that's set after
+        // full construction, eliminating the unsafe entirely.
+        #[allow(invalid_reference_casting)]
+        let srv_mut: &mut crate::state::data::Data = unsafe {
+            &mut *(srv as *const crate::state::data::Data as *mut crate::state::data::Data)
+        };
 
-        srv.gc_path = args.gc_path.to_string();
-        srv.py_path = args.py_path.to_string();
-        srv.data_path = args.data_path.to_string();
-        srv.public_url = args.pub_url.to_string();
-        srv.port = args.bind_port;
-        srv.max_payload_bytes = args.max_payload_bytes;
-        srv.update_script = args.update_script.to_string();
+        *srv.gc_path.lock() = args.gc_path.to_string();
+        *srv.py_path.lock() = args.py_path.to_string();
+        *srv.data_path.lock() = args.data_path.to_string();
+        *srv.public_url.lock() = args.pub_url.to_string();
+        srv.port.store(args.bind_port, std::sync::atomic::Ordering::Relaxed);
+        srv.max_payload_bytes
+            .store(args.max_payload_bytes, std::sync::atomic::Ordering::Relaxed);
+        *srv.update_script.lock() = args.update_script.to_string();
 
         // Initialize the encrypted secret store. The master key file
         // defaults to ${data_path}/.secret-key when not specified.
@@ -139,7 +148,7 @@ async fn main() -> std::io::Result<()> {
         match crate::state::secrets::SecretStore::open(&key_file, &store_file) {
             Ok(s) => {
                 info!("Secret store: opened ({} entries)", s.list().len());
-                srv.secrets = Some(s);
+                *srv.secrets.lock() = Some(s);
             }
             Err(e) => {
                 log::error!("Secret store: failed to open: {}", e);
@@ -154,16 +163,16 @@ async fn main() -> std::io::Result<()> {
         // Put options to internal structures and connect to database
         #[cfg(not(feature = "full_file_database"))]
         {
-            srv.file_rw.connect(&args.data_path, "").await;
-            srv.rw.database_name = args.db_name.clone();
-            srv.rw.connect(&args.db_url, &args.data_path).await;
+            srv_mut.file_rw.connect(&args.data_path, "").await;
+            srv_mut.rw.database_name = args.db_name.clone();
+            srv_mut.rw.connect(&args.db_url, &args.data_path).await;
 
             // First-run autodetect: if the target database has no collections,
             // seed it from the file-backed store. Idempotent across restarts:
             // once seeded, the database is non-empty and this is a no-op.
             if srv.rw.get_collections().await.is_empty() {
                 info!("Flow: empty database detected, seeding from file store");
-                merge_database(&mut srv.file_rw, &mut srv.rw).await;
+                merge_database(&mut srv_mut.file_rw, &mut srv_mut.rw).await;
                 info!("Flow: seeding complete");
             }
         }
@@ -172,27 +181,27 @@ async fn main() -> std::io::Result<()> {
 
         #[cfg(feature = "full_file_database")]
         {
-            srv.rw.connect(&args.data_path, "").await;
+            srv_mut.rw.connect(&args.data_path, "").await;
         }
 
         // Spawn the core processing task — it owns the inbox for the new
         // actor-model `CoreMessage`s and processes them against `Data`.
         // The returned `CoreHandle` is stored on `srv` so actor plugins
         // (registered below) can clone it at register time.
-        srv.core_handle = Some(crate::state::core_task::spawn_core_task(G_STATE.clone()));
+        srv_mut.core_handle = Some(crate::state::core_task::spawn_core_task(G_STATE.clone()));
 
         // Register statically-linked plugins. Each plugin's `register` is
         // compiled into the core binary; which ones are included is decided
         // at build time via cargo features (see Cargo.toml `[features]`).
         info!("Plugins: registering");
         {
-            let s = &mut srv;
-            let before = s.plugin_pool.plugins.len();
+            let s: &mut crate::state::data::Data = srv_mut;
+            let before = s.plugin_pool.lock().plugins.len();
             // Security registers either via trait (default) or actor mode,
             // controlled by mutually-exclusive features. Both wired off the
             // same dep so there's no double-link.
             #[cfg(all(feature = "plugin-security", not(feature = "plugin-security-actor")))]
-            isabelle_plugin_security::register(&mut s.plugin_pool);
+            isabelle_plugin_security::register(&mut *s.plugin_pool.lock());
             #[cfg(feature = "plugin-security-actor")]
             {
                 if let Some(core) = s.core_handle.clone() {
@@ -200,7 +209,7 @@ async fn main() -> std::io::Result<()> {
                 }
             }
             #[cfg(feature = "plugin-midair")]
-            isabelle_plugin_midair::register(&mut s.plugin_pool);
+            isabelle_plugin_midair::register(&mut *s.plugin_pool.lock());
 
             // Phase 3 pilot: register the actor-mode demo plugin.
             #[cfg(feature = "actor-demo")]
@@ -216,14 +225,14 @@ async fn main() -> std::io::Result<()> {
                 }
             }
 
-            let registered = s.plugin_pool.plugins.len() - before;
+            let registered = s.plugin_pool.lock().plugins.len() - before;
             info!(
                 "Plugins: {} registered (trait), {} registered (actor)",
                 registered,
                 s.plugin_registry.len()
             );
             info!("Plugins: ensuring operation");
-            s.plugin_pool.ping_plugins();
+            s.plugin_pool.lock().ping_plugins();
         }
         info!("Plugins: loaded");
 
@@ -239,7 +248,7 @@ async fn main() -> std::io::Result<()> {
 
         // Initialize Google Calendar
         info!("Flow: initializing Google Calendar");
-        init_google(&mut srv).await;
+        init_google(srv).await;
         info!("Flow: initialized Google Calendar");
 
         // Get all extra routes and put them to map
@@ -285,9 +294,7 @@ async fn main() -> std::io::Result<()> {
     let data_clone = data.clone();
 
     {
-        let srv_lock = G_STATE.server.lock();
-        let mut srv_mut = srv_lock.borrow_mut();
-        let srv = srv_mut.deref_mut();
+        let srv: &crate::state::data::Data = &G_STATE.server;
         srv.init_data_path().await;
     }
 
@@ -306,12 +313,11 @@ async fn main() -> std::io::Result<()> {
 
             if let Some(datetime) = upcoming.next() {
                 if datetime.timestamp() <= local.timestamp() {
-                    let srv_lock = data_clone.server.lock();
-                    let mut srv = srv_lock.borrow_mut();
+                    let srv: &crate::state::data::Data = &data_clone.server;
                     if local.time().second() == 0 {
-                        call_periodic_job_hook(&mut srv, "min");
+                        call_periodic_job_hook(srv, "min");
                     }
-                    call_periodic_job_hook(&mut srv, "sec");
+                    call_periodic_job_hook(srv, "sec");
                 }
             }
         }

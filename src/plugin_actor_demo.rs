@@ -187,23 +187,25 @@ mod tests {
             let state = State::new();
             let handle = spawn_core_task(state.clone());
 
-            // Grab &mut Data from the state and register the demo plugin
-            // into its plugin_registry.
+            // Register the demo plugin into plugin_registry.
+            // SAFETY: single-threaded test setup before any concurrent
+            // access; same justification as main.rs init.
             let stats = {
-                let srv_lock = state.server.lock();
-                let srv = unsafe { &mut (*srv_lock.as_ptr()) };
-                register_demo(&mut srv.plugin_registry, handle.clone())
+                let s: &Data = &state.server;
+                #[allow(invalid_reference_casting)]
+                let s_mut: &mut Data =
+                    unsafe { &mut *(s as *const Data as *mut Data) };
+                register_demo(&mut s_mut.plugin_registry, handle.clone())
             };
 
             // Fire each hook variant once.
-            let srv_lock = state.server.lock();
-            let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
+            let srv: &Data = &state.server;
             let usr: Option<Item> = None;
 
             // pre_edit
             let mut itm = Item::new();
             let r = call_item_pre_edit_hook_actor(
-                srv.deref_mut(),
+                srv,
                 "demo-hndl",
                 &usr,
                 "test",
@@ -217,7 +219,7 @@ mod tests {
 
             // post_edit
             call_item_post_edit_hook_actor(
-                srv.deref_mut(),
+                srv,
                 "demo-hndl",
                 "test",
                 None,
@@ -228,18 +230,10 @@ mod tests {
 
             // auth
             let allowed = call_item_auth_hook_actor(
-                srv.deref_mut(),
-                "demo-hndl",
-                &usr,
-                "test",
-                1,
-                None,
-                false,
+                srv, "demo-hndl", &usr, "test", 1, None, false,
             )
             .await;
             assert!(allowed, "demo plugin allows everything");
-
-            drop(srv_lock);
 
             // Post_edit is fire-and-forget — give the task a tick to
             // actually pick it up before we assert on counters.

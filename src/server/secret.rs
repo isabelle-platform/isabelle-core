@@ -42,8 +42,7 @@ struct SecretRef {
 }
 
 async fn ensure_admin(data: &web::Data<State>, user: &Identity) -> Result<(), HttpResponse> {
-    let srv_lock = data.server.lock();
-    let srv = unsafe { &mut (*srv_lock.as_ptr()) };
+    let srv: &crate::state::data::Data = &data.server;
     let usr = get_user(srv, user.id().unwrap()).await;
     if !check_role(srv, &usr, "admin").await {
         return Err(HttpResponse::Forbidden().into());
@@ -95,9 +94,9 @@ pub async fn secret_edit(
     if let Err(r) = ensure_admin(&data, &user).await {
         return r;
     }
-    let srv_lock = data.server.lock();
-    let srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let store = match srv.secrets.as_mut() {
+    let srv: &crate::state::data::Data = &data.server;
+    let mut secrets = srv.secrets.lock();
+    let store = match secrets.as_mut() {
         Some(s) => s,
         None => return proc_err("secret store is not initialized"),
     };
@@ -120,9 +119,9 @@ pub async fn secret_get(
     if let Err(r) = ensure_admin(&data, &user).await {
         return r;
     }
-    let srv_lock = data.server.lock();
-    let srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let store = match srv.secrets.as_ref() {
+    let srv: &crate::state::data::Data = &data.server;
+    let secrets = srv.secrets.lock();
+    let store = match secrets.as_ref() {
         Some(s) => s,
         None => return proc_err("secret store is not initialized"),
     };
@@ -141,9 +140,9 @@ pub async fn secret_del(
     if let Err(r) = ensure_admin(&data, &user).await {
         return r;
     }
-    let srv_lock = data.server.lock();
-    let srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let store = match srv.secrets.as_mut() {
+    let srv: &crate::state::data::Data = &data.server;
+    let mut secrets = srv.secrets.lock();
+    let store = match secrets.as_mut() {
         Some(s) => s,
         None => return proc_err("secret store is not initialized"),
     };
@@ -161,9 +160,9 @@ pub async fn secret_list(
     if let Err(r) = ensure_admin(&data, &user).await {
         return r;
     }
-    let srv_lock = data.server.lock();
-    let srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let refs: Vec<SecretRef> = match srv.secrets.as_ref() {
+    let srv: &crate::state::data::Data = &data.server;
+    let secrets = srv.secrets.lock();
+    let refs: Vec<SecretRef> = match secrets.as_ref() {
         Some(s) => s
             .list()
             .into_iter()

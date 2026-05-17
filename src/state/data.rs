@@ -42,6 +42,7 @@ use isabelle_dm::data_model::process_result::ProcessResult;
 use isabelle_plugin_api::actor::{CoreHandle, PluginRegistry};
 use isabelle_plugin_api::api::*;
 use isabelle_plugin_api::plugin_pool::PluginPool;
+use parking_lot::Mutex;
 use log::info;
 use log::trace;
 use std::any::Any;
@@ -84,7 +85,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     srv_mut
                         .rw
                         .get_all_items(&collection1, &sort_key1, &filter1)
@@ -117,7 +118,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     srv_mut
                         .rw
                         .get_items(
@@ -147,7 +148,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     srv_mut.rw.get_item(&collection1, id).await
                 }))
                 .unwrap()
@@ -167,7 +168,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     srv_mut.rw.set_item(&collection1, &itm1, merge).await
                 }))
                 .unwrap()
@@ -186,7 +187,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     srv_mut.rw.del_item(&collection1, id).await
                 }))
                 .unwrap()
@@ -198,8 +199,8 @@ impl PluginApi for IsabellePluginApi {
 
     fn globals_get_public_url(&self) -> String {
         trace!("globals_get_public_url++");
-        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
-        let url = srv_mut.public_url.clone();
+        let srv_mut: &crate::state::data::Data = &G_STATE.server;
+        let url = srv_mut.public_url.lock().clone();
         trace!("globals_get_public_url--");
         url
     }
@@ -211,7 +212,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     srv_mut.rw.get_settings().await
                 }))
                 .unwrap()
@@ -229,7 +230,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     srv_mut.rw.set_settings(item_clone).await
                 }))
                 .unwrap()
@@ -249,7 +250,7 @@ impl PluginApi for IsabellePluginApi {
             sender
                 .send(rt.block_on(async {
                     trace!("blocking check role 1");
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     trace!("blocking check role 2");
                     let r = check_role(srv_mut, &user, &role).await;
                     trace!("blocking check role 3");
@@ -313,7 +314,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     send_email(srv_mut, &to, &subject, &body).await
                 }))
                 .unwrap()
@@ -330,7 +331,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     init_google(srv_mut).await
                 }))
                 .unwrap()
@@ -347,7 +348,7 @@ impl PluginApi for IsabellePluginApi {
         self.thread_pool.execute(move || {
             sender
                 .send(rt.block_on(async {
-                    let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+                    let srv_mut: &crate::state::data::Data = &G_STATE.server;
                     sync_with_google(srv_mut, add, name, date_time).await
                 }))
                 .unwrap()
@@ -359,14 +360,22 @@ impl PluginApi for IsabellePluginApi {
 
     fn fn_get_state(&self, handle: &str) -> &mut Option<Box<dyn Any + Send>> {
         // NOTE: returning a mutable reference to a global slot is inherently risky;
-        // we add verbose logging for the specific key that is currently problematic.
+        // see the `UnsafeCell` field doc for the safety story.
         trace!("fn_get_state++");
-        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+        let srv_mut: &crate::state::data::Data = &G_STATE.server;
+        // SAFETY: cooperative serialization — IsabellePluginApi is called
+        // by trait-mode plugins which run synchronously within an HTTP
+        // handler that's blocked awaiting their reply, so no concurrent
+        // access happens.
+        let opaque: &mut HashMap<String, Option<Box<dyn Any + Send>>> =
+            unsafe { &mut *srv_mut.opaque_data.get() };
+        let none_slot: &mut Option<Box<dyn Any + Send>> =
+            unsafe { &mut *srv_mut.none_object.get() };
 
         if handle == "opt_data_path" {
-            let present = srv_mut.opaque_data.contains_key(handle);
+            let present = opaque.contains_key(handle);
             let kind = if present {
-                match srv_mut.opaque_data.get(handle) {
+                match opaque.get(handle) {
                     Some(Some(v)) => {
                         if v.downcast_ref::<Vec<u8>>().is_some() {
                             "Some(Vec<u8>)"
@@ -387,10 +396,10 @@ impl PluginApi for IsabellePluginApi {
                 handle,
                 present,
                 kind,
-                srv_mut.opaque_data.len()
+                opaque.len()
             );
 
-            if let Some(Some(v)) = srv_mut.opaque_data.get(handle) {
+            if let Some(Some(v)) = opaque.get(handle) {
                 if let Some(b) = v.downcast_ref::<Vec<u8>>() {
                     let s = String::from_utf8_lossy(b).to_string();
                     log::info!("[plugin_state][get] key='{}' value(bytes)='{}'", handle, s);
@@ -400,37 +409,42 @@ impl PluginApi for IsabellePluginApi {
             }
         }
 
-        if srv_mut.opaque_data.contains_key(handle) {
-            let obj = srv_mut.opaque_data.get_mut(handle).unwrap();
+        if opaque.contains_key(handle) {
+            let obj = opaque.get_mut(handle).unwrap();
             trace!("fn_get_state--");
             return obj;
         } else {
             trace!("fn_get_state--");
-            return &mut srv_mut.none_object;
+            return none_slot;
         }
     }
 
     fn secret_get(&self, id: u64) -> Option<Item> {
         trace!("secret_get++");
-        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
-        let res = srv_mut.secrets.as_ref().and_then(|s| s.get(id));
+        let srv_mut: &crate::state::data::Data = &G_STATE.server;
+        let res = srv_mut.secrets.lock().as_ref().and_then(|s| s.get(id));
         trace!("secret_get--");
         res
     }
 
     fn secret_get_by_name(&self, name: &str) -> Option<Item> {
         trace!("secret_get_by_name++");
-        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
-        let res = srv_mut.secrets.as_ref().and_then(|s| s.get_by_name(name));
+        let srv_mut: &crate::state::data::Data = &G_STATE.server;
+        let res = srv_mut
+            .secrets
+            .lock()
+            .as_ref()
+            .and_then(|s| s.get_by_name(name));
         trace!("secret_get_by_name--");
         res
     }
 
     fn secret_list(&self) -> Vec<(u64, String)> {
         trace!("secret_list++");
-        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+        let srv_mut: &crate::state::data::Data = &G_STATE.server;
         let res = srv_mut
             .secrets
+            .lock()
             .as_ref()
             .map(|s| s.list())
             .unwrap_or_default();
@@ -440,8 +454,8 @@ impl PluginApi for IsabellePluginApi {
 
     fn secret_set(&self, item: &Item, merge: bool) -> Result<u64, String> {
         trace!("secret_set++");
-        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
-        let res = match srv_mut.secrets.as_mut() {
+        let srv_mut: &crate::state::data::Data = &G_STATE.server;
+        let res = match srv_mut.secrets.lock().as_mut() {
             Some(s) => s.set(item, merge).map_err(|e| e.to_string()),
             None => Err("secret store is not initialized".to_string()),
         };
@@ -451,8 +465,8 @@ impl PluginApi for IsabellePluginApi {
 
     fn secret_del(&self, id: u64) -> bool {
         trace!("secret_del++");
-        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
-        let res = match srv_mut.secrets.as_mut() {
+        let srv_mut: &crate::state::data::Data = &G_STATE.server;
+        let res = match srv_mut.secrets.lock().as_mut() {
             Some(s) => s.del(id).unwrap_or(false),
             None => false,
         };
@@ -463,7 +477,10 @@ impl PluginApi for IsabellePluginApi {
     fn fn_set_state(&self, handle: &str, value: Option<Box<dyn Any + Send>>) {
         // Verbose logging for the problematic key to catch who overwrites/clears it.
         trace!("fn_set_state++");
-        let srv_mut = unsafe { G_STATE.server.data_ptr().as_mut().unwrap().get_mut() };
+        let srv_mut: &crate::state::data::Data = &G_STATE.server;
+        // SAFETY: see `fn_get_state`.
+        let opaque: &mut HashMap<String, Option<Box<dyn Any + Send>>> =
+            unsafe { &mut *srv_mut.opaque_data.get() };
 
         if handle == "opt_data_path" {
             let new_kind = match &value {
@@ -478,9 +495,9 @@ impl PluginApi for IsabellePluginApi {
                 }
                 None => "None",
             };
-            let old_present = srv_mut.opaque_data.contains_key(handle);
+            let old_present = opaque.contains_key(handle);
             let old_kind = if old_present {
-                match srv_mut.opaque_data.get(handle) {
+                match opaque.get(handle) {
                     Some(Some(v)) => {
                         if v.downcast_ref::<Vec<u8>>().is_some() {
                             "Some(Vec<u8>)"
@@ -503,7 +520,7 @@ impl PluginApi for IsabellePluginApi {
                 old_present,
                 old_kind,
                 new_kind,
-                srv_mut.opaque_data.len()
+                opaque.len()
             );
 
             if let Some(v) = &value {
@@ -520,13 +537,27 @@ impl PluginApi for IsabellePluginApi {
             }
         }
 
-        if srv_mut.opaque_data.contains_key(handle) {
-            srv_mut.opaque_data.remove(handle);
+        if opaque.contains_key(handle) {
+            opaque.remove(handle);
         }
-        srv_mut.opaque_data.insert(handle.to_string(), value);
+        opaque.insert(handle.to_string(), value);
         trace!("fn_set_state--");
     }
 }
+
+// SAFETY: `Data` is shared across actix worker arbiters via `Arc<Data>`.
+// All runtime-mutable fields (`rw`, `file_rw`, `secrets`, `plugin_pool`,
+// `route_cache`) are wrapped in `parking_lot::Mutex` and access goes
+// through `&self`. The remaining non-`Sync` fields — `opaque_data`,
+// `plugin_api: Box<dyn PluginApi>`, `none_object` — are accessed via the
+// same raw-pointer-escape pattern the legacy `IsabellePluginApi` used
+// (and continues to use for trait-mode plugins). That access is
+// cooperatively-serialised by convention: HTTP handlers don't mutate
+// these fields, only `IsabellePluginApi` does, and its callers are
+// already in a sync state when the call happens. Phase-4 cleanup is to
+// wrap `opaque_data` in a `Mutex` too once `fn_get_state`'s `&mut`-
+// returning shape is retired with the trait-mode plugin API.
+unsafe impl Sync for Data {}
 
 /// Server data structure
 pub struct Data {
@@ -541,35 +572,45 @@ pub struct Data {
     #[cfg(not(feature = "full_file_database"))]
     pub rw: StoreMongo,
 
+    // The fields below are set once in `main()` startup and never mutated
+    // again. They live behind `Mutex` only because the outer lock has been
+    // removed — runtime `&Data` access has no other way to assign to them.
+    // Reads do `.lock().clone()`; the cost is one uncontended atomic per
+    // access, negligible against any actual work the handler does.
     /// Path to Google Calendar.
-    pub gc_path: String,
+    pub gc_path: Mutex<String>,
 
     /// Path to Python binary
-    pub py_path: String,
+    pub py_path: Mutex<String>,
 
     /// Path to data directory, which is extremely important for file_rw
-    pub data_path: String,
+    pub data_path: Mutex<String>,
 
     /// Public URL which is needed for constructing backlinks
-    pub public_url: String,
+    pub public_url: Mutex<String>,
 
     /// Port at which Core resides.
-    pub port: u16,
+    pub port: std::sync::atomic::AtomicU16,
 
     /// Max request payload size in bytes
-    pub max_payload_bytes: usize,
+    pub max_payload_bytes: std::sync::atomic::AtomicUsize,
 
     /// Path to script invoked by POST /system/update
-    pub update_script: String,
+    pub update_script: Mutex<String>,
 
     /// Encrypted user-data secret store. Populated in main() after data
-    /// path is known.
-    pub secrets: Option<crate::state::secrets::SecretStore>,
+    /// path is known. Wrapped in `Mutex` so the `secret_*` HTTP handlers
+    /// can access it without holding the outer Data lock.
+    pub secrets: Mutex<Option<crate::state::secrets::SecretStore>>,
 
     /// Plugin control (legacy trait-dispatch path). Phase-out is gradual:
     /// new plugins register into `plugin_registry` (actor model); old
     /// trait-based plugins keep using this pool.
-    pub plugin_pool: PluginPool,
+    ///
+    /// Wrapped in `Mutex` so `Data` can be shared via `Arc` without the
+    /// outer `parking_lot::ReentrantMutex` — hook callsites lock briefly
+    /// to fan out, then release.
+    pub plugin_pool: Mutex<PluginPool>,
 
     /// Actor-model plugin registry. Holds an `mpsc::Sender<PluginHookMessage>`
     /// per registered plugin actor. Empty until Phase 3 starts migrating
@@ -588,18 +629,27 @@ pub struct Data {
     /// the core processing task.
     pub plugin_api: Box<dyn PluginApi>,
 
-    /// Opaque data (mainly for plugins)
-    pub opaque_data: HashMap<String, Option<Box<dyn Any + Send>>>,
+    /// Opaque data (mainly for plugins).
+    ///
+    /// Wrapped in `UnsafeCell` so the legacy `PluginApi::fn_get_state` —
+    /// which returns `&mut Option<Box<dyn Any + Send>>` and can't be
+    /// retrofitted to a `Mutex` guard — keeps compiling under `&Data`.
+    /// Safety relies on cooperative serialization (same model as the
+    /// pre-Phase-4 `IsabellePluginApi` raw-pointer escape).
+    pub opaque_data: std::cell::UnsafeCell<HashMap<String, Option<Box<dyn Any + Send>>>>,
 
     /// Pre-parsed routing tables derived from `internals.js`. Built once at
     /// startup via `rebuild_route_cache()` and treated as immutable from then
-    /// on (matches the immutability of `internals.js` itself). Handed out
-    /// to request handlers via `Arc::clone` so they can read without holding
-    /// a borrow of `self`.
-    pub route_cache: Arc<RouteCache>,
+    /// on (matches the immutability of `internals.js` itself).
+    ///
+    /// Wrapped in `Mutex<Arc<...>>` so `rebuild_route_cache` can be `&self`
+    /// (needed so `Data` can live behind `Arc<Data>` without an outer lock).
+    /// Readers do `state.route_cache.lock().clone()` — cheap atomic Arc bump,
+    /// no contention since the inner Arc is shared.
+    pub route_cache: Mutex<Arc<RouteCache>>,
 
     /// Purely internal none-object for proper boxing
-    none_object: Option<Box<dyn Any + Send>>,
+    none_object: std::cell::UnsafeCell<Option<Box<dyn Any + Send>>>,
 }
 
 impl Data {
@@ -614,42 +664,43 @@ impl Data {
 
             rw: rw,
 
-            gc_path: "".to_string(),
-            py_path: "".to_string(),
-            data_path: "".to_string(),
-            public_url: "".to_string(),
-            port: 8090,
-            max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
-            update_script: "".to_string(),
-            secrets: None,
-            plugin_pool: PluginPool {
+            gc_path: Mutex::new(String::new()),
+            py_path: Mutex::new(String::new()),
+            data_path: Mutex::new(String::new()),
+            public_url: Mutex::new(String::new()),
+            port: std::sync::atomic::AtomicU16::new(8090),
+            max_payload_bytes: std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_PAYLOAD_BYTES),
+            update_script: Mutex::new(String::new()),
+            secrets: Mutex::new(None),
+            plugin_pool: Mutex::new(PluginPool {
                 plugins: Vec::new(),
-            },
+            }),
             plugin_registry: PluginRegistry::new(),
             core_handle: None,
             plugin_api: Box::new(IsabellePluginApi::new()),
-            opaque_data: HashMap::new(),
-            route_cache: Arc::new(RouteCache::default()),
-            none_object: None,
+            opaque_data: std::cell::UnsafeCell::new(HashMap::new()),
+            route_cache: Mutex::new(Arc::new(RouteCache::default())),
+            none_object: std::cell::UnsafeCell::new(None),
         }
     }
 
     /// Rebuild the pre-parsed route cache from the current `internals.js`.
     /// Called once at startup; `internals.js` is treated as immutable so
     /// no invalidation logic is required.
-    pub async fn rebuild_route_cache(&mut self) {
+    pub async fn rebuild_route_cache(&self) {
         let internals = self.rw.get_internals().await;
-        self.route_cache = Arc::new(RouteCache::from_internals(&internals));
+        let new = Arc::new(RouteCache::from_internals(&internals));
         info!(
             "Route cache built: {} url + {} unprotected + {} rest + {} pre-edit ({} wildcard) + {} post-edit ({} wildcard)",
-            self.route_cache.url_routes.len(),
-            self.route_cache.unprotected_url_routes.len(),
-            self.route_cache.rest_routes.len(),
-            self.route_cache.item_pre_edit.values().map(|v| v.len()).sum::<usize>(),
-            self.route_cache.item_pre_edit_wildcard.len(),
-            self.route_cache.item_post_edit.values().map(|v| v.len()).sum::<usize>(),
-            self.route_cache.item_post_edit_wildcard.len(),
+            new.url_routes.len(),
+            new.unprotected_url_routes.len(),
+            new.rest_routes.len(),
+            new.item_pre_edit.values().map(|v| v.len()).sum::<usize>(),
+            new.item_pre_edit_wildcard.len(),
+            new.item_post_edit.values().map(|v| v.len()).sum::<usize>(),
+            new.item_post_edit_wildcard.len(),
         );
+        *self.route_cache.lock() = new;
     }
 
     /// Check existence of collection
@@ -658,7 +709,7 @@ impl Data {
     }
 
     /// Early initialization
-    pub async fn init_checks(&mut self) {
+    pub async fn init_checks(&self) {
         let internals = self.rw.get_internals().await;
         let routes: Vec<String> = internals
             .strstrs
@@ -691,13 +742,14 @@ impl Data {
     }
 
     /// Initialize the data path for plugins
-    pub async fn init_data_path(&mut self) {
-        info!("Data path for plugins: {}", self.data_path);
+    pub async fn init_data_path(&self) {
+        let data_path = self.data_path.lock().clone();
+        info!("Data path for plugins: {}", data_path);
         // Set environment variable for ABI-stable access by plugins
-        std::env::set_var("ISABELLE_DATA_PATH", &self.data_path);
+        std::env::set_var("ISABELLE_DATA_PATH", &data_path);
         self.plugin_api.fn_set_state(
             "opt_data_path",
-            Some(Box::new(self.data_path.clone().into_bytes())),
+            Some(Box::new(data_path.into_bytes())),
         );
     }
 }

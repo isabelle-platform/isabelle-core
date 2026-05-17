@@ -62,10 +62,9 @@ pub async fn gen_otp(
         }
     }
 
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
+    let srv: &crate::state::data::Data = &data.server;
     info!("User name: {}", lu.username.clone());
-    let usr = get_user(&mut srv, lu.username.clone()).await;
+    let usr = get_user(srv, lu.username.clone()).await;
 
     if usr == None {
         info!("No user {} found, couldn't otp", lu.username.clone());
@@ -89,7 +88,7 @@ pub async fn gen_otp(
             .await
             .safe_strstr("otp_hook", &HashMap::new());
         for route in routes {
-            call_otp_hook(&mut srv, &route.1, new_usr_itm.clone()).await;
+            call_otp_hook(srv, &route.1, new_usr_itm.clone()).await;
         }
     }
 
@@ -129,10 +128,9 @@ pub async fn register(
         }
     }
 
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
+    let srv: &crate::state::data::Data = &data.server;
     info!("User name: {}", login);
-    let usr_by_login = get_user(&mut srv, login.clone()).await;
+    let usr_by_login = get_user(srv, login.clone()).await;
 
     if let Some(ref existing) = usr_by_login {
         if existing.safe_bool("logged_once", false) {
@@ -144,7 +142,7 @@ pub async fn register(
         }
     }
 
-    let usr_by_email = get_user(&mut srv, email.clone()).await;
+    let usr_by_email = get_user(srv, email.clone()).await;
     if let Some(ref existing) = usr_by_email {
         if existing.safe_bool("logged_once", false) {
             return web::Json(ProcessResult {
@@ -203,12 +201,11 @@ pub async fn login(
         }
     }
 
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
+    let srv: &crate::state::data::Data = &data.server;
     info!("User name: {}", lu.username.clone());
 
     // Find the user in the database
-    let usr = get_user(&mut srv, lu.username.clone()).await;
+    let usr = get_user(srv, lu.username.clone()).await;
 
     if usr == None {
         // Not found - error out.
@@ -222,7 +219,7 @@ pub async fn login(
         let itm_real = usr.unwrap();
 
         // Clear the OTP data - it is no longer needed
-        clear_otp(&mut srv, lu.username.clone()).await;
+        clear_otp(srv, lu.username.clone()).await;
 
         // Don't let inactive users log in.
         if itm_real.safe_bool("role_is_active", false) == false {
@@ -309,8 +306,7 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
     // Arc bump. The lock guard is dropped at the end of this block.
     #[cfg(not(feature = "full_file_database"))]
     let mongo_view: Option<(mongodb::Client, String, String)> = {
-        let srv_lock = data.server.lock();
-        let srv = unsafe { &mut (*srv_lock.as_ptr()) };
+        let srv: &crate::state::data::Data = &data.server;
 
         let settings = srv.rw.get_settings().await;
         let internals = srv.rw.get_internals().await;
@@ -386,8 +382,7 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
     // unchanged perf — this feature is sample/test only.
     #[cfg(feature = "full_file_database")]
     {
-        let srv_lock = data.server.lock();
-        let srv = unsafe { &mut (*srv_lock.as_ptr()) };
+        let srv: &crate::state::data::Data = &data.server;
         let settings = srv.rw.get_settings().await;
         let internals = srv.rw.get_internals().await;
         let pick = |key: &str, default_key: &str, default_value: &str| {
