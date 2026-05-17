@@ -29,7 +29,7 @@ use lettre::{Message, SmtpTransport, Transport};
 use log::{error, info};
 
 /// Send the email using predefined global options
-pub async fn send_email(srv: &mut crate::state::data::Data, to: &str, subject: &str, body: &str) {
+pub async fn send_email(srv: &crate::state::data::Data, to: &str, subject: &str, body: &str) {
     info!("Checking options...");
 
     let settings = srv.rw.get_settings().await.clone();

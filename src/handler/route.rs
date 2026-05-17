@@ -40,15 +40,14 @@ pub async fn url_route(
     data: actix_web::web::Data<State>,
     req: HttpRequest,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let cache = srv.route_cache.clone();
+    let srv: &crate::state::data::Data = &data.server;
+    let cache = srv.route_cache.lock().clone();
 
     trace!("Custom URL: {}", req.path());
 
     if let Some(handler) = cache.url_routes.get(req.path()) {
         trace!("Call custom route {}", handler);
-        return call_url_route(&mut srv, user, handler, req.query_string()).await;
+        return call_url_route(srv, user, handler, req.query_string()).await;
     }
 
     HttpResponse::NotFound().into()
@@ -62,15 +61,14 @@ pub async fn url_post_route(
     req: HttpRequest,
     payload: Multipart,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let cache = srv.route_cache.clone();
+    let srv: &crate::state::data::Data = &data.server;
+    let cache = srv.route_cache.lock().clone();
 
     trace!("Custom post URL: {}", req.path());
 
     if let Some(handler) = cache.url_routes.get(req.path()) {
         trace!("Call custom route {}", handler);
-        return call_url_post_route(&mut srv, user, handler, req.query_string(), payload).await;
+        return call_url_post_route(srv, user, handler, req.query_string(), payload).await;
     }
 
     HttpResponse::NotFound().into()
@@ -83,15 +81,14 @@ pub async fn url_unprotected_route(
     data: actix_web::web::Data<State>,
     req: HttpRequest,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let cache = srv.route_cache.clone();
+    let srv: &crate::state::data::Data = &data.server;
+    let cache = srv.route_cache.lock().clone();
 
     trace!("Custom unprotected URL: {}", req.path());
 
     if let Some(handler) = cache.unprotected_url_routes.get(req.path()) {
         trace!("Call custom route {}", handler);
-        return call_url_unprotected_route(&mut srv, user, handler, req.query_string()).await;
+        return call_url_unprotected_route(srv, user, handler, req.query_string()).await;
     }
 
     HttpResponse::NotFound().into()
@@ -105,16 +102,15 @@ pub async fn url_unprotected_post_route(
     req: HttpRequest,
     payload: Multipart,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let cache = srv.route_cache.clone();
+    let srv: &crate::state::data::Data = &data.server;
+    let cache = srv.route_cache.lock().clone();
 
     trace!("Custom unprotected post URL: {}", req.path());
 
     if let Some(handler) = cache.unprotected_url_routes.get(req.path()) {
         trace!("Call custom route {}", handler);
         return call_url_unprotected_post_route(
-            &mut srv,
+            srv,
             user,
             handler,
             req.query_string(),
@@ -135,9 +131,9 @@ pub async fn url_generic_rest_route(
     method: &str,
 ) -> HttpResponse {
     let max_payload_bytes = {
-        let srv_lock = data.server.lock();
-        let srv = unsafe { &*srv_lock.as_ptr() };
+        let srv: &crate::state::data::Data = &data.server;
         srv.max_payload_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
     };
     let mut body = web::BytesMut::new();
     while let Some(chunk) = payload.next().await {
@@ -156,14 +152,13 @@ pub async fn url_generic_rest_route(
 
     let body = body.unwrap();
 
-    let srv_lock = data.server.lock();
-    let mut srv = unsafe { &mut (*srv_lock.as_ptr()) };
-    let cache = srv.route_cache.clone();
+    let srv: &crate::state::data::Data = &data.server;
+    let cache = srv.route_cache.lock().clone();
 
     if let Some(handler) = cache.rest_routes.get(req.path()) {
         trace!("Call custom route {}", handler);
         let resp =
-            call_url_rest_route(&mut srv, user, handler, method, req.query_string(), body).await;
+            call_url_rest_route(srv, user, handler, method, req.query_string(), body).await;
         match &resp {
             WebResponse::Login(email) => {
                 Identity::login(&req.extensions(), email.to_string()).unwrap();

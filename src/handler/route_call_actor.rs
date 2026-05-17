@@ -46,7 +46,7 @@ use tokio::sync::oneshot;
 /// next plugin sees the mutated version. This matches the trait-mode
 /// `&mut Item` semantic.
 pub async fn call_item_pre_edit_hook_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     user: &Option<Item>,
     collection: &str,
@@ -106,7 +106,7 @@ pub async fn call_item_pre_edit_hook_actor(
 
 /// Post-edit hook — fire-and-forget fanout. No reply, no short-circuit.
 pub async fn call_item_post_edit_hook_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     collection: &str,
     old_itm: Option<Item>,
@@ -130,7 +130,7 @@ pub async fn call_item_post_edit_hook_actor(
 
 /// Auth hook — any single deny short-circuits to `false`.
 pub async fn call_item_auth_hook_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     user: &Option<Item>,
     collection: &str,
@@ -168,7 +168,7 @@ pub async fn call_item_auth_hook_actor(
 /// actor plugin. Plugins receive the page by-value and return a possibly-
 /// mutated page; the dispatcher swaps it back into `items`.
 pub async fn call_item_list_filter_hook_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     user: &Option<Item>,
     collection: &str,
@@ -197,7 +197,7 @@ pub async fn call_item_list_filter_hook_actor(
 
 /// DB-side filter hook — collects JSON filter strings from each plugin.
 pub async fn call_item_list_db_filter_hook_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     user: &Option<Item>,
     collection: &str,
@@ -231,7 +231,7 @@ pub async fn call_item_list_db_filter_hook_actor(
 /// Collection read hook — sequentially threads the item through plugins.
 /// Returns `true` if any plugin asked for persistence (`should_save`).
 pub async fn call_collection_read_hook_actor(
-    data: &mut Data,
+    data: &Data,
     hndl: &str,
     collection: &str,
     itm: &mut Item,
@@ -268,7 +268,7 @@ pub async fn call_collection_read_hook_actor(
 /// URL routes — first plugin to return anything other than `NotImplemented`
 /// wins. Matches the trait-mode semantic.
 pub async fn call_url_route_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     user: &Option<Item>,
     query: &str,
@@ -295,7 +295,7 @@ pub async fn call_url_route_actor(
 }
 
 pub async fn call_url_post_route_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     user: &Option<Item>,
     query: &str,
@@ -325,7 +325,7 @@ pub async fn call_url_post_route_actor(
 }
 
 pub async fn call_url_unprotected_route_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     user: &Option<Item>,
     query: &str,
@@ -352,7 +352,7 @@ pub async fn call_url_unprotected_route_actor(
 }
 
 pub async fn call_url_unprotected_post_route_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     user: &Option<Item>,
     query: &str,
@@ -382,7 +382,7 @@ pub async fn call_url_unprotected_post_route_actor(
 }
 
 pub async fn call_url_rest_route_actor(
-    srv: &mut Data,
+    srv: &Data,
     hndl: &str,
     method: &str,
     user: &Option<Item>,
@@ -414,7 +414,7 @@ pub async fn call_url_rest_route_actor(
 }
 
 /// OTP hook — fire-and-forget.
-pub async fn call_otp_hook_actor(srv: &mut Data, hndl: &str, itm: Item) {
+pub async fn call_otp_hook_actor(srv: &Data, hndl: &str, itm: Item) {
     let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
     for sender in &senders {
         let msg = PluginHookMessage::Otp {
@@ -432,7 +432,7 @@ pub async fn call_otp_hook_actor(srv: &mut Data, hndl: &str, itm: Item) {
 /// invoke async channel sends. Phase 4 will move that tick onto a tokio
 /// timer and wire this in.
 #[allow(dead_code)]
-pub async fn call_periodic_job_hook_actor(srv: &mut Data, timing: &str) {
+pub async fn call_periodic_job_hook_actor(srv: &Data, timing: &str) {
     let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
     for sender in &senders {
         let msg = PluginHookMessage::PeriodicJob {

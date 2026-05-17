@@ -86,7 +86,7 @@ async fn handle_message(state: &State, msg: CoreMessage) {
     // `IsabellePluginApi` thread-pool path uses. Strictly, this is UB by
     // Rust's aliasing rules; the proper fix is to make `core_task` the
     // sole owner of `Data` (Phase 4) so the mutex disappears entirely.
-    let srv = unsafe { state.server.data_ptr().as_mut().unwrap().get_mut() };
+    let srv: &crate::state::data::Data = &state.server;
 
     match msg {
         // -------- Database --------
@@ -146,10 +146,10 @@ async fn handle_message(state: &State, msg: CoreMessage) {
 
         // -------- Globals --------
         CoreMessage::GlobalsGetPublicUrl { reply } => {
-            let _ = reply.send(srv.public_url.clone());
+            let _ = reply.send(srv.public_url.lock().clone());
         }
         CoreMessage::GlobalsGetDataPath { reply } => {
-            let _ = reply.send(srv.data_path.clone());
+            let _ = reply.send(srv.data_path.lock().clone());
         }
         CoreMessage::GlobalsGetSettings { reply } => {
             let s = srv.rw.get_settings().await;
@@ -216,7 +216,7 @@ async fn handle_message(state: &State, msg: CoreMessage) {
 
         // -------- Secrets --------
         CoreMessage::SecretGet { id, reply } => {
-            let res = srv.secrets.as_ref().and_then(|s| s.get(id));
+            let res = srv.secrets.lock().as_ref().and_then(|s| s.get(id));
             let _ = reply.send(res);
         }
 

@@ -35,15 +35,14 @@ pub async fn system_update(
     data: web::Data<State>,
     _req: HttpRequest,
 ) -> HttpResponse {
-    let srv_lock = data.server.lock();
-    let srv = unsafe { &mut (*srv_lock.as_ptr()) };
+    let srv: &crate::state::data::Data = &data.server;
     let usr = get_user(srv, user.id().unwrap()).await;
 
     if !check_role(srv, &usr, "admin").await {
         return HttpResponse::Forbidden().into();
     }
 
-    let script = srv.update_script.clone();
+    let script = srv.update_script.lock().clone();
     if script.is_empty() {
         return HttpResponse::Ok().body(
             serde_json::to_string(&ProcessResult {

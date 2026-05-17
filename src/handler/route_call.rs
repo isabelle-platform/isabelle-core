@@ -47,7 +47,7 @@ use uuid::Uuid;
 ///
 /// If either path returns a non-success, dispatch short-circuits.
 pub async fn call_item_pre_edit_hook(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     hndl: &str,
     user: &Option<Item>,
     collection: &str,
@@ -56,7 +56,7 @@ pub async fn call_item_pre_edit_hook(
     action: DataObjectAction,
     merge: bool,
 ) -> ProcessResult {
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         let r = plugin.item_pre_edit_hook(
             &srv.plugin_api,
             hndl,
@@ -90,14 +90,14 @@ pub async fn call_item_pre_edit_hook(
 /// Call hook associated with post-editing of item data.
 /// Fans out across both dispatch paths; no short-circuit.
 pub async fn call_item_post_edit_hook(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     hndl: &str,
     collection: &str,
     old_itm: Option<Item>,
     id: u64,
     action: DataObjectAction,
 ) {
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         plugin.item_post_edit_hook(
             &srv.plugin_api,
             hndl,
@@ -114,7 +114,7 @@ pub async fn call_item_post_edit_hook(
 /// Call item action authorization hook that can prohibit editing or removal.
 /// Any deny from either path short-circuits to `false`.
 pub async fn call_item_auth_hook(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     hndl: &str,
     user: &Option<Item>,
     collection: &str,
@@ -122,7 +122,7 @@ pub async fn call_item_auth_hook(
     new_item: Option<Item>,
     del: bool,
 ) -> bool {
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         let res = plugin.item_auth_hook(
             &srv.plugin_api,
             hndl,
@@ -142,14 +142,14 @@ pub async fn call_item_auth_hook(
 
 /// Call list filter hook, allowing for hiding specific list items
 pub async fn call_item_list_filter_hook(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     hndl: &str,
     user: &Option<Item>,
     collection: &str,
     context: &str,
     map: &mut HashMap<u64, Item>,
 ) {
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         plugin.item_list_filter_hook(&srv.plugin_api, hndl, user, collection, context, map);
     }
 
@@ -157,7 +157,7 @@ pub async fn call_item_list_filter_hook(
 }
 
 pub async fn call_item_list_db_filter_hook(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     hndl: &str,
     user: &Option<Item>,
     collection: &str,
@@ -165,7 +165,7 @@ pub async fn call_item_list_db_filter_hook(
     filter_type: &str,
 ) -> Vec<String> {
     let mut filters = Vec::new();
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         let filter = plugin.item_list_db_filter_hook(
             &srv.plugin_api,
             hndl,
@@ -187,14 +187,14 @@ pub async fn call_item_list_db_filter_hook(
 
 /// Call HTTP url hook, allowing for responses to web requests.
 pub async fn call_url_route(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     user: Identity,
     hndl: &str,
     query: &str,
 ) -> HttpResponse {
     let usr: Option<Item> = get_user(srv, user.id().unwrap()).await;
 
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         let wr = plugin.route_url_hook(&srv.plugin_api, hndl, &usr, query);
         match wr {
             WebResponse::NotImplemented => {
@@ -275,7 +275,7 @@ pub async fn handle_file_cleanup(files: &HashMap<String, String>) {
 
 /// Call URL POST route that requires authenticated user.
 pub async fn call_url_post_route(
-    mut srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     user: Identity,
     hndl: &str,
     query: &str,
@@ -283,12 +283,12 @@ pub async fn call_url_post_route(
 ) -> HttpResponse {
     let usr: Option<Item>;
 
-    usr = get_user(&mut srv, user.id().unwrap()).await;
+    usr = get_user(srv, user.id().unwrap()).await;
 
     let (post_itm, files) = handle_item_files(payload).await;
 
     let mut response: WebResponse = WebResponse::Ok;
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         let wr = plugin.route_url_post_hook(&srv.plugin_api, hndl, &usr, query, &post_itm);
         match wr {
             WebResponse::NotImplemented => {
@@ -311,7 +311,7 @@ pub async fn call_url_post_route(
 
 /// Call URL route that doesn't require authenticated user.
 pub async fn call_url_unprotected_route(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     user: Option<Identity>,
     hndl: &str,
     query: &str,
@@ -322,7 +322,7 @@ pub async fn call_url_unprotected_route(
         usr = get_user(srv, user.unwrap().id().unwrap()).await;
     }
 
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         let wr = plugin.route_unprotected_url_hook(&srv.plugin_api, hndl, &usr, query);
         match wr {
             WebResponse::NotImplemented => {
@@ -348,7 +348,7 @@ pub async fn call_url_unprotected_route(
 
 /// Call URL POST route that doesn't require authenticated user.
 pub async fn call_url_unprotected_post_route(
-    mut srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     user: Option<Identity>,
     hndl: &str,
     query: &str,
@@ -357,13 +357,13 @@ pub async fn call_url_unprotected_post_route(
     let mut usr: Option<Item> = None;
 
     if !user.is_none() {
-        usr = get_user(&mut srv, user.unwrap().id().unwrap()).await;
+        usr = get_user(srv, user.unwrap().id().unwrap()).await;
     }
 
     let (post_itm, files) = handle_item_files(payload).await;
     let mut response: WebResponse = WebResponse::Ok;
 
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         let wr =
             plugin.route_unprotected_url_post_hook(&srv.plugin_api, hndl, &usr, query, &post_itm);
         match wr {
@@ -388,7 +388,7 @@ pub async fn call_url_unprotected_post_route(
 
 /// Call URL REST route.
 pub async fn call_url_rest_route(
-    mut srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     user: Option<Identity>,
     hndl: &str,
     method: &str,
@@ -398,12 +398,12 @@ pub async fn call_url_rest_route(
     let mut usr: Option<Item> = None;
 
     if !user.is_none() {
-        usr = get_user(&mut srv, user.unwrap().id().unwrap()).await;
+        usr = get_user(srv, user.unwrap().id().unwrap()).await;
     }
 
     let mut response: WebResponse = WebResponse::Ok;
 
-    for plugin in &mut srv.plugin_pool.plugins {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         let wr = plugin.route_rest_hook(&srv.plugin_api, hndl, method, &usr, query, payload);
         match wr {
             WebResponse::NotImplemented => {
@@ -425,12 +425,12 @@ pub async fn call_url_rest_route(
 
 /// Call collection read hook that can actually filter out particular item
 pub async fn call_collection_read_hook(
-    data: &mut crate::state::data::Data,
+    data: &crate::state::data::Data,
     hndl: &str,
     collection: &str,
     itm: &mut Item,
 ) -> bool {
-    for plugin in &mut data.plugin_pool.plugins {
+    for plugin in data.plugin_pool.lock().plugins.iter_mut() {
         if plugin.collection_read_hook(&data.plugin_api, hndl, collection, itm) {
             return true;
         }
@@ -440,8 +440,8 @@ pub async fn call_collection_read_hook(
 }
 
 /// Call One-Time Password hook
-pub async fn call_otp_hook(srv: &mut crate::state::data::Data, hndl: &str, itm: Item) {
-    for plugin in &mut srv.plugin_pool.plugins {
+pub async fn call_otp_hook(srv: &crate::state::data::Data, hndl: &str, itm: Item) {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         plugin.call_otp_hook(&srv.plugin_api, hndl, &itm);
     }
 
@@ -455,8 +455,8 @@ pub async fn call_otp_hook(srv: &mut crate::state::data::Data, hndl: &str, itm: 
 /// async channels, so it can't be called from here directly. For Phase 3
 /// migration of plugins that want periodic events, the periodic loop will
 /// need to be reworked to live on an async timer — tracked separately.
-pub fn call_periodic_job_hook(srv: &mut crate::state::data::Data, timing: &str) {
-    for plugin in &mut srv.plugin_pool.plugins {
+pub fn call_periodic_job_hook(srv: &crate::state::data::Data, timing: &str) {
+    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         plugin.call_periodic_job_hook(&srv.plugin_api, timing);
     }
     // Actor-mode plugins are not notified yet — see fn doc.

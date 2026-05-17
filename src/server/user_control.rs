@@ -33,7 +33,7 @@ pub fn login_has_bad_symbols(login: &str) -> bool {
 }
 
 /// Get user by given login
-pub async fn get_user(srv: &mut crate::state::data::Data, login: String) -> Option<Item> {
+pub async fn get_user(srv: &crate::state::data::Data, login: String) -> Option<Item> {
     if login_has_bad_symbols(&login) {
         return None;
     }
@@ -75,7 +75,7 @@ pub async fn get_user(srv: &mut crate::state::data::Data, login: String) -> Opti
 
 /// Check user role
 pub async fn check_role(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     user: &Option<Item>,
     role: &str,
 ) -> bool {
@@ -94,7 +94,7 @@ pub async fn check_role(
 }
 
 /// Clear OTP for all users with given login/email
-pub async fn clear_otp(srv: &mut crate::state::data::Data, login: String) {
+pub async fn clear_otp(srv: &crate::state::data::Data, login: String) {
     if login_has_bad_symbols(&login) {
         return;
     }

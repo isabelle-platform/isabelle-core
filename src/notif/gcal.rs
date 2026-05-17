@@ -34,7 +34,7 @@ use std::time::Duration;
 
 /// Sync specific entry with google
 pub async fn sync_with_google(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     add: bool,
     name: String,
     date_time: String,
@@ -60,8 +60,8 @@ pub async fn sync_with_google(
 
     info!("gcal: synchronizing entry...");
     /* Run google calendar sync */
-    Command::new(srv.py_path.clone())
-        .current_dir(srv.gc_path.clone())
+    Command::new(srv.py_path.lock().clone())
+        .current_dir(srv.gc_path.lock().clone())
         .arg("-m")
         .arg("igc")
         .arg("-e")
@@ -83,7 +83,7 @@ pub async fn sync_with_google(
 }
 
 /// Initialize Google Calendar
-pub async fn init_google(srv: &mut crate::state::data::Data) -> String {
+pub async fn init_google(srv: &crate::state::data::Data) -> String {
     let settings = srv.rw.get_settings().await;
     if !settings.safe_bool("sync_google_cal", false)
         || settings.safe_str("sync_google_creds", "") == ""
@@ -109,8 +109,8 @@ pub async fn init_google(srv: &mut crate::state::data::Data) -> String {
 
     info!("Syncing entry with Google...");
     /* Run google calendar sync */
-    let res = Command::new(srv.py_path.clone())
-        .current_dir(srv.gc_path.clone())
+    let res = Command::new(srv.py_path.lock().clone())
+        .current_dir(srv.gc_path.lock().clone())
         .arg("-m")
         .arg("igc")
         .arg("-e")
@@ -129,7 +129,7 @@ pub async fn init_google(srv: &mut crate::state::data::Data) -> String {
 }
 
 /// Authenticate Google
-pub async fn auth_google(srv: &mut crate::state::data::Data) -> String {
+pub async fn auth_google(srv: &crate::state::data::Data) -> String {
     let settings = srv.rw.get_settings().await;
     if !settings.safe_bool("sync_google_cal", false)
         || settings.safe_str("sync_google_creds", "") == ""
@@ -153,15 +153,15 @@ pub async fn auth_google(srv: &mut crate::state::data::Data) -> String {
 
     info!("Authentication with Google...");
     /* Run google calendar sync */
-    let _res = Command::new(srv.py_path.clone())
-        .current_dir(srv.gc_path.clone())
+    let _res = Command::new(srv.py_path.lock().clone())
+        .current_dir(srv.gc_path.lock().clone())
         .arg("-m")
         .arg("igc")
         .arg("-flow-start")
         .arg("-flow-url")
         .arg(dir.display().to_string() + "/flow.url")
         .arg("-flow-backlink")
-        .arg(srv.public_url.clone() + "/setting/gcal_auth")
+        .arg(srv.public_url.lock().clone() + "/setting/gcal_auth")
         .arg("-creds")
         .arg(creds)
         .arg("-pickle")
@@ -185,7 +185,7 @@ pub async fn auth_google(srv: &mut crate::state::data::Data) -> String {
 
 /// Finish Google Authentication
 pub async fn auth_google_end(
-    srv: &mut crate::state::data::Data,
+    srv: &crate::state::data::Data,
     full_query: String,
     state: String,
     code: String,
@@ -216,8 +216,8 @@ pub async fn auth_google_end(
 
     info!("Finish Authentication with Google...");
     /* Run google calendar sync */
-    let _res = Command::new(srv.py_path.clone())
-        .current_dir(srv.gc_path.clone())
+    let _res = Command::new(srv.py_path.lock().clone())
+        .current_dir(srv.gc_path.lock().clone())
         .arg("-m")
         .arg("igc")
         .arg("-flow-end")
@@ -228,7 +228,7 @@ pub async fn auth_google_end(
         .arg("-flow-complete-url")
         .arg(full_query)
         .arg("-flow-backlink")
-        .arg(srv.public_url.clone() + "/setting/gcal_auth")
+        .arg(srv.public_url.lock().clone() + "/setting/gcal_auth")
         .arg("-creds")
         .arg(creds)
         .arg("-pickle")
