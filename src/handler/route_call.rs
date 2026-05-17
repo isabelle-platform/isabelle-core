@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use crate::handler::route_call_actor::*;
 use crate::handler::web_response::*;
 use crate::server::user_control::*;
 use actix_identity::Identity;
@@ -39,6 +40,12 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// Call hook associated with pre-editing of item data.
+///
+/// Fans out across both dispatch paths:
+///  - trait-mode (`plugin_pool`) for legacy plugins;
+///  - actor-mode (`plugin_registry`) for migrated plugins.
+///
+/// If either path returns a non-success, dispatch short-circuits.
 pub async fn call_item_pre_edit_hook(
     srv: &mut crate::state::data::Data,
     hndl: &str,
@@ -65,6 +72,14 @@ pub async fn call_item_pre_edit_hook(
         }
     }
 
+    let r = call_item_pre_edit_hook_actor(
+        srv, hndl, user, collection, old_itm, itm, action, merge,
+    )
+    .await;
+    if !r.succeeded {
+        return r;
+    }
+
     return ProcessResult {
         succeeded: true,
         error: "".to_string(),
@@ -73,6 +88,7 @@ pub async fn call_item_pre_edit_hook(
 }
 
 /// Call hook associated with post-editing of item data.
+/// Fans out across both dispatch paths; no short-circuit.
 pub async fn call_item_post_edit_hook(
     srv: &mut crate::state::data::Data,
     hndl: &str,
@@ -91,9 +107,12 @@ pub async fn call_item_post_edit_hook(
             action.clone(),
         );
     }
+
+    call_item_post_edit_hook_actor(srv, hndl, collection, old_itm, id, action).await;
 }
 
-/// Call item action authorization hook that can prohibit editing or removal
+/// Call item action authorization hook that can prohibit editing or removal.
+/// Any deny from either path short-circuits to `false`.
 pub async fn call_item_auth_hook(
     srv: &mut crate::state::data::Data,
     hndl: &str,
@@ -118,7 +137,7 @@ pub async fn call_item_auth_hook(
         }
     }
 
-    return true;
+    call_item_auth_hook_actor(srv, hndl, user, collection, id, new_item, del).await
 }
 
 /// Call list filter hook, allowing for hiding specific list items
@@ -133,6 +152,8 @@ pub async fn call_item_list_filter_hook(
     for plugin in &mut srv.plugin_pool.plugins {
         plugin.item_list_filter_hook(&srv.plugin_api, hndl, user, collection, context, map);
     }
+
+    call_item_list_filter_hook_actor(srv, hndl, user, collection, context, map).await;
 }
 
 pub async fn call_item_list_db_filter_hook(
@@ -157,6 +178,10 @@ pub async fn call_item_list_db_filter_hook(
             filters.push(filter);
         }
     }
+
+    filters.extend(
+        call_item_list_db_filter_hook_actor(srv, hndl, user, collection, context, filter_type).await,
+    );
     return filters;
 }
 
@@ -179,6 +204,11 @@ pub async fn call_url_route(
                 return conv_response(wr).await;
             }
         }
+    }
+
+    let wr = call_url_route_actor(srv, hndl, &usr, query).await;
+    if !matches!(wr, WebResponse::NotImplemented) {
+        return conv_response(wr).await;
     }
 
     return HttpResponse::NotFound().into();
@@ -270,6 +300,11 @@ pub async fn call_url_post_route(
         }
     }
 
+    let wr = call_url_post_route_actor(srv, hndl, &usr, query, &post_itm).await;
+    if !matches!(wr, WebResponse::NotImplemented) {
+        response = wr;
+    }
+
     handle_file_cleanup(&files).await;
     return conv_response(response).await;
 }
@@ -297,6 +332,11 @@ pub async fn call_url_unprotected_route(
                 return conv_response(wr).await;
             }
         }
+    }
+
+    let wr = call_url_unprotected_route_actor(srv, hndl, &usr, query).await;
+    if !matches!(wr, WebResponse::NotImplemented) {
+        return conv_response(wr).await;
     }
 
     match hndl {
@@ -336,6 +376,11 @@ pub async fn call_url_unprotected_post_route(
         }
     }
 
+    let wr = call_url_unprotected_post_route_actor(srv, hndl, &usr, query, &post_itm).await;
+    if !matches!(wr, WebResponse::NotImplemented) {
+        response = wr;
+    }
+
     handle_file_cleanup(&files).await;
 
     return conv_response(response).await;
@@ -370,6 +415,11 @@ pub async fn call_url_rest_route(
         }
     }
 
+    let wr = call_url_rest_route_actor(srv, hndl, method, &usr, query, payload).await;
+    if !matches!(wr, WebResponse::NotImplemented) {
+        response = wr;
+    }
+
     return response;
 }
 
@@ -386,7 +436,7 @@ pub async fn call_collection_read_hook(
         }
     }
 
-    return false;
+    call_collection_read_hook_actor(data, hndl, collection, itm).await
 }
 
 /// Call One-Time Password hook
@@ -394,11 +444,21 @@ pub async fn call_otp_hook(srv: &mut crate::state::data::Data, hndl: &str, itm: 
     for plugin in &mut srv.plugin_pool.plugins {
         plugin.call_otp_hook(&srv.plugin_api, hndl, &itm);
     }
+
+    call_otp_hook_actor(srv, hndl, itm).await;
 }
 
-/// Call Periodic Job hook
+/// Call Periodic Job hook.
+///
+/// Note: this is invoked from the periodic-tick `thread::spawn` loop in
+/// main.rs, which has no tokio runtime context. The actor fanout uses
+/// async channels, so it can't be called from here directly. For Phase 3
+/// migration of plugins that want periodic events, the periodic loop will
+/// need to be reworked to live on an async timer — tracked separately.
 pub fn call_periodic_job_hook(srv: &mut crate::state::data::Data, timing: &str) {
     for plugin in &mut srv.plugin_pool.plugins {
         plugin.call_periodic_job_hook(&srv.plugin_api, timing);
     }
+    // Actor-mode plugins are not notified yet — see fn doc.
+    let _ = timing;
 }
