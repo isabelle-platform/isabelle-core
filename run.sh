@@ -39,7 +39,6 @@ gc_path="$6"
 database="isabelle"
 gh_login=""
 gh_password=""
-plugin_dir=""
 cookie_http_insecure=""
 db_url="mongodb://localhost:27017"
 
@@ -81,10 +80,6 @@ while test -n "$1" ; do
             gh_password="$2"
             shift 1
             ;;
-        --plugin-dir)
-            plugin_dir="$2"
-            shift 1
-            ;;
         --cookie-http-insecure)
             cookie_http_insecure="true"
             ;;
@@ -115,19 +110,14 @@ if [ "$gc_path" == "" ] ; then
     gc_path="$(pwd)/isabelle-gc"
 fi
 
-# Sign with temporary entitlements
+# Sign binary with temporary entitlements (plugins are now statically
+# linked into the core binary, so only one file to sign).
 if [ "$(uname)" == "Darwin" ] ; then
     /usr/libexec/PlistBuddy -c "Add :com.apple.security.get-task-allow bool true" tmp.entitlements
-    for file in ${binary} $(ls libisabelle_plugin*) ; do
-        codesign -s - -f --entitlements tmp.entitlements "$file"
-    done
+    codesign -s - -f --entitlements tmp.entitlements "${binary}"
 fi
 
 echo Starting Isabelle Core...
-plugin_dir_arg=()
-if [ -n "${plugin_dir}" ] ; then
-    plugin_dir_arg=(--plugin-dir "${plugin_dir}")
-fi
 
 # Run the binary
 RUST_LOG=info \
@@ -141,5 +131,4 @@ RUST_BACKTRACE=1 \
     --database "${database}" \
     --db-url "${db_url}" \
     --py-path "${py_path}" \
-    ${cookie_http_insecure:+--cookie-http-insecure} \
-    "${plugin_dir_arg[@]}"
+    ${cookie_http_insecure:+--cookie-http-insecure}
