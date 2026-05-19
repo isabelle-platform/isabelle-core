@@ -60,14 +60,25 @@ full_file_database = []
 # Plugin feature flags — each enables an optional dep above. Convenience
 # profiles bundle the plugins needed by a specific deployment.
 plugin-security = ["dep:isabelle-plugin-security"]
-plugin-midair = ["dep:isabelle-plugin-midair"]
-midair = ["plugin-security", "plugin-midair"]
 
 # Phase 3: register security via the actor-mode entry point instead of the
 # trait-mode one. Currently incomplete — most security hooks are stubs in
 # actor mode (see isabelle-plugin-security/src/lib.rs TODOs). Don't enable
 # this in production until the migration is finished.
 plugin-security-actor = ["dep:isabelle-plugin-security"]
+
+# midair is actor-only since the BridgeApi removal — all hooks were
+# rewritten to native async with CoreHandle, so there is no trait-mode
+# entry point anymore. `plugin-midair` is an alias that defaults security
+# to trait mode; `plugin-midair-actor` routes security through actor too.
+# Both end up calling the same `register_actor` for midair itself.
+plugin-midair-actor = ["dep:isabelle-plugin-midair", "plugin-security-actor"]
+plugin-midair = ["dep:isabelle-plugin-midair", "plugin-security"]
+
+# Convenience profiles. `midair` keeps security in trait mode; `midair-actor`
+# uses the actor entry point for security too.
+midair = ["plugin-midair"]
+midair-actor = ["plugin-midair-actor"]
 
 # Phase-3 actor-mode pilot demo plugin. Off by default; enable to register
 # a noop observer plugin via the actor path (logs each hook event it
