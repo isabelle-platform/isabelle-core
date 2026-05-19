@@ -269,7 +269,7 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
     let srv: &crate::state::data::Data = &data.server;
     let usr = get_user(srv, user.id().unwrap()).await;
 
-    let lq = match serde_qs::from_str::<ListQuery>(&req.query_string()) {
+    let mut lq = match serde_qs::from_str::<ListQuery>(&req.query_string()) {
         Ok(v) => v,
         Err(e) => {
             error!("Malformed list query: {}", e);
@@ -280,6 +280,15 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
     if !srv.has_collection(&lq.collection) {
         error!("Collection {} doesn't exist", lq.collection);
         return HttpResponse::BadRequest().into();
+    }
+
+    // A single-id get is semantically a "view this one item in full" — the
+    // listing-style trim plugins do via `item_list_filter_hook` (e.g. midair's
+    // `reduce_test` that drops processed_mi*/ai_review for compactness) is
+    // not what the caller wants. Force `context=full` so plugins skip the
+    // trim, unless the caller explicitly overrode it.
+    if lq.id != u64::MAX && lq.context.is_empty() {
+        lq.context = "full".to_string();
     }
 
     let mut lr = ListResult {

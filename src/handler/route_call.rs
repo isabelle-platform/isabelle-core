@@ -450,15 +450,23 @@ pub async fn call_otp_hook(srv: &crate::state::data::Data, hndl: &str, itm: Item
 
 /// Call Periodic Job hook.
 ///
-/// Note: this is invoked from the periodic-tick `thread::spawn` loop in
-/// main.rs, which has no tokio runtime context. The actor fanout uses
-/// async channels, so it can't be called from here directly. For Phase 3
-/// migration of plugins that want periodic events, the periodic loop will
-/// need to be reworked to live on an async timer — tracked separately.
+/// Called from the periodic-tick `thread::spawn` loop in main.rs (no tokio
+/// runtime context). For trait-mode plugins we call directly; for actor-mode
+/// plugins we use `mpsc::Sender::try_send`, which is a sync method and works
+/// without a runtime. If a plugin's mailbox is full we drop the tick rather
+/// than block the periodic loop — periodic ticks are idempotent, the next
+/// one will catch up.
 pub fn call_periodic_job_hook(srv: &crate::state::data::Data, timing: &str) {
     for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
         plugin.call_periodic_job_hook(&srv.plugin_api, timing);
     }
-    // Actor-mode plugins are not notified yet — see fn doc.
-    let _ = timing;
+    for sender in srv.plugin_registry.senders() {
+        let msg = isabelle_plugin_api::actor::PluginHookMessage::PeriodicJob {
+            timing: timing.to_string(),
+        };
+        if let Err(e) = sender.try_send(msg) {
+            log::trace!(target: "core::periodic",
+                "actor periodic tick dropped ({}): {}", timing, e);
+        }
+    }
 }

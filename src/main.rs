@@ -208,8 +208,17 @@ async fn main() -> std::io::Result<()> {
                     isabelle_plugin_security::register_actor(&mut s.plugin_registry, core);
                 }
             }
-            #[cfg(feature = "plugin-midair")]
-            isabelle_plugin_midair::register(&mut *s.plugin_pool.lock());
+            // Midair: actor-only. The trait-mode `register` was removed when
+            // the plugin was migrated to native async with `CoreHandle` — both
+            // `plugin-midair` and `plugin-midair-actor` route through the
+            // same `register_actor`. The cfg matches either feature so the
+            // plugin is wired regardless of how security is registered.
+            #[cfg(any(feature = "plugin-midair", feature = "plugin-midair-actor"))]
+            {
+                if let Some(core) = s.core_handle.clone() {
+                    isabelle_plugin_midair::register_actor(&mut s.plugin_registry, core);
+                }
+            }
 
             // Phase 3 pilot: register the actor-mode demo plugin.
             #[cfg(feature = "actor-demo")]
