@@ -1,4 +1,4 @@
-.PHONY: build midair midair-actor
+.PHONY: build midair
 
 all: midair
 
@@ -6,11 +6,6 @@ all: midair
 build:
 	cargo build
 
-# Midair deployment, trait-mode plugins (legacy, still works).
+# Midair deployment: security + midair plugins (actor-mode, the only mode).
 midair:
 	cargo build --features midair
-
-# Midair deployment, actor-mode plugins (security + midair through the actor
-# pipeline; no global `plugin_pool` Mutex). This is the production target.
-midair-actor:
-	cargo build --features midair-actor

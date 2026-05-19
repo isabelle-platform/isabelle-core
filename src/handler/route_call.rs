@@ -21,6 +21,13 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+
+//! Hook dispatchers used by HTTP handlers. Every hook goes through the
+//! actor pipeline (`plugin_registry`) — trait-mode (`plugin_pool`) was
+//! removed when all in-tree plugins migrated to actor-mode. The signatures
+//! here are kept stable so server-side call sites (itm, login, route) did
+//! not need to change.
+
 use crate::handler::route_call_actor::*;
 use crate::handler::web_response::*;
 use crate::server::user_control::*;
@@ -39,13 +46,6 @@ use std::io::Write;
 use std::path::Path;
 use uuid::Uuid;
 
-/// Call hook associated with pre-editing of item data.
-///
-/// Fans out across both dispatch paths:
-///  - trait-mode (`plugin_pool`) for legacy plugins;
-///  - actor-mode (`plugin_registry`) for migrated plugins.
-///
-/// If either path returns a non-success, dispatch short-circuits.
 pub async fn call_item_pre_edit_hook(
     srv: &crate::state::data::Data,
     hndl: &str,
@@ -56,39 +56,9 @@ pub async fn call_item_pre_edit_hook(
     action: DataObjectAction,
     merge: bool,
 ) -> ProcessResult {
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        let r = plugin.item_pre_edit_hook(
-            &srv.plugin_api,
-            hndl,
-            user,
-            collection,
-            old_itm.clone(),
-            itm,
-            action.clone(),
-            merge,
-        );
-        if !r.succeeded && r.error != "not implemented" {
-            return r;
-        }
-    }
-
-    let r = call_item_pre_edit_hook_actor(
-        srv, hndl, user, collection, old_itm, itm, action, merge,
-    )
-    .await;
-    if !r.succeeded {
-        return r;
-    }
-
-    return ProcessResult {
-        succeeded: true,
-        error: "".to_string(),
-        data: HashMap::new(),
-    };
+    call_item_pre_edit_hook_actor(srv, hndl, user, collection, old_itm, itm, action, merge).await
 }
 
-/// Call hook associated with post-editing of item data.
-/// Fans out across both dispatch paths; no short-circuit.
 pub async fn call_item_post_edit_hook(
     srv: &crate::state::data::Data,
     hndl: &str,
@@ -97,22 +67,9 @@ pub async fn call_item_post_edit_hook(
     id: u64,
     action: DataObjectAction,
 ) {
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        plugin.item_post_edit_hook(
-            &srv.plugin_api,
-            hndl,
-            collection,
-            old_itm.clone(),
-            id,
-            action.clone(),
-        );
-    }
-
     call_item_post_edit_hook_actor(srv, hndl, collection, old_itm, id, action).await;
 }
 
-/// Call item action authorization hook that can prohibit editing or removal.
-/// Any deny from either path short-circuits to `false`.
 pub async fn call_item_auth_hook(
     srv: &crate::state::data::Data,
     hndl: &str,
@@ -122,25 +79,9 @@ pub async fn call_item_auth_hook(
     new_item: Option<Item>,
     del: bool,
 ) -> bool {
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        let res = plugin.item_auth_hook(
-            &srv.plugin_api,
-            hndl,
-            user,
-            collection,
-            id,
-            new_item.clone(),
-            del,
-        );
-        if !res {
-            return res;
-        }
-    }
-
     call_item_auth_hook_actor(srv, hndl, user, collection, id, new_item, del).await
 }
 
-/// Call list filter hook, allowing for hiding specific list items
 pub async fn call_item_list_filter_hook(
     srv: &crate::state::data::Data,
     hndl: &str,
@@ -149,10 +90,6 @@ pub async fn call_item_list_filter_hook(
     context: &str,
     map: &mut HashMap<u64, Item>,
 ) {
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        plugin.item_list_filter_hook(&srv.plugin_api, hndl, user, collection, context, map);
-    }
-
     call_item_list_filter_hook_actor(srv, hndl, user, collection, context, map).await;
 }
 
@@ -164,28 +101,9 @@ pub async fn call_item_list_db_filter_hook(
     context: &str,
     filter_type: &str,
 ) -> Vec<String> {
-    let mut filters = Vec::new();
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        let filter = plugin.item_list_db_filter_hook(
-            &srv.plugin_api,
-            hndl,
-            user,
-            collection,
-            context,
-            filter_type,
-        );
-        if filter != "" {
-            filters.push(filter);
-        }
-    }
-
-    filters.extend(
-        call_item_list_db_filter_hook_actor(srv, hndl, user, collection, context, filter_type).await,
-    );
-    return filters;
+    call_item_list_db_filter_hook_actor(srv, hndl, user, collection, context, filter_type).await
 }
 
-/// Call HTTP url hook, allowing for responses to web requests.
 pub async fn call_url_route(
     srv: &crate::state::data::Data,
     user: Identity,
@@ -193,25 +111,11 @@ pub async fn call_url_route(
     query: &str,
 ) -> HttpResponse {
     let usr: Option<Item> = get_user(srv, user.id().unwrap()).await;
-
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        let wr = plugin.route_url_hook(&srv.plugin_api, hndl, &usr, query);
-        match wr {
-            WebResponse::NotImplemented => {
-                continue;
-            }
-            _ => {
-                return conv_response(wr).await;
-            }
-        }
-    }
-
     let wr = call_url_route_actor(srv, hndl, &usr, query).await;
-    if !matches!(wr, WebResponse::NotImplemented) {
-        return conv_response(wr).await;
+    if matches!(wr, WebResponse::NotImplemented) {
+        return HttpResponse::NotFound().into();
     }
-
-    return HttpResponse::NotFound().into();
+    conv_response(wr).await
 }
 
 pub async fn handle_item_files(mut payload: Multipart) -> (Item, HashMap<String, String>) {
@@ -273,7 +177,6 @@ pub async fn handle_file_cleanup(files: &HashMap<String, String>) {
     }
 }
 
-/// Call URL POST route that requires authenticated user.
 pub async fn call_url_post_route(
     srv: &crate::state::data::Data,
     user: Identity,
@@ -281,35 +184,20 @@ pub async fn call_url_post_route(
     query: &str,
     payload: Multipart,
 ) -> HttpResponse {
-    let usr: Option<Item>;
-
-    usr = get_user(srv, user.id().unwrap()).await;
-
+    let usr = get_user(srv, user.id().unwrap()).await;
     let (post_itm, files) = handle_item_files(payload).await;
 
-    let mut response: WebResponse = WebResponse::Ok;
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        let wr = plugin.route_url_post_hook(&srv.plugin_api, hndl, &usr, query, &post_itm);
-        match wr {
-            WebResponse::NotImplemented => {
-                continue;
-            }
-            _ => {
-                response = wr;
-            }
-        }
-    }
-
     let wr = call_url_post_route_actor(srv, hndl, &usr, query, &post_itm).await;
-    if !matches!(wr, WebResponse::NotImplemented) {
-        response = wr;
-    }
+    let response = if matches!(wr, WebResponse::NotImplemented) {
+        WebResponse::Ok
+    } else {
+        wr
+    };
 
     handle_file_cleanup(&files).await;
-    return conv_response(response).await;
+    conv_response(response).await
 }
 
-/// Call URL route that doesn't require authenticated user.
 pub async fn call_url_unprotected_route(
     srv: &crate::state::data::Data,
     user: Option<Identity>,
@@ -317,36 +205,17 @@ pub async fn call_url_unprotected_route(
     query: &str,
 ) -> HttpResponse {
     let mut usr: Option<Item> = None;
-
-    if !user.is_none() {
-        usr = get_user(srv, user.unwrap().id().unwrap()).await;
-    }
-
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        let wr = plugin.route_unprotected_url_hook(&srv.plugin_api, hndl, &usr, query);
-        match wr {
-            WebResponse::NotImplemented => {
-                continue;
-            }
-            _ => {
-                return conv_response(wr).await;
-            }
-        }
+    if let Some(u) = user {
+        usr = get_user(srv, u.id().unwrap()).await;
     }
 
     let wr = call_url_unprotected_route_actor(srv, hndl, &usr, query).await;
-    if !matches!(wr, WebResponse::NotImplemented) {
-        return conv_response(wr).await;
+    if matches!(wr, WebResponse::NotImplemented) {
+        return HttpResponse::NotFound().into();
     }
-
-    match hndl {
-        &_ => {
-            return HttpResponse::NotFound().into();
-        }
-    }
+    conv_response(wr).await
 }
 
-/// Call URL POST route that doesn't require authenticated user.
 pub async fn call_url_unprotected_post_route(
     srv: &crate::state::data::Data,
     user: Option<Identity>,
@@ -355,38 +224,23 @@ pub async fn call_url_unprotected_post_route(
     payload: Multipart,
 ) -> HttpResponse {
     let mut usr: Option<Item> = None;
-
-    if !user.is_none() {
-        usr = get_user(srv, user.unwrap().id().unwrap()).await;
+    if let Some(u) = user {
+        usr = get_user(srv, u.id().unwrap()).await;
     }
 
     let (post_itm, files) = handle_item_files(payload).await;
-    let mut response: WebResponse = WebResponse::Ok;
-
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        let wr =
-            plugin.route_unprotected_url_post_hook(&srv.plugin_api, hndl, &usr, query, &post_itm);
-        match wr {
-            WebResponse::NotImplemented => {
-                continue;
-            }
-            _ => {
-                response = wr;
-            }
-        }
-    }
 
     let wr = call_url_unprotected_post_route_actor(srv, hndl, &usr, query, &post_itm).await;
-    if !matches!(wr, WebResponse::NotImplemented) {
-        response = wr;
-    }
+    let response = if matches!(wr, WebResponse::NotImplemented) {
+        WebResponse::Ok
+    } else {
+        wr
+    };
 
     handle_file_cleanup(&files).await;
-
-    return conv_response(response).await;
+    conv_response(response).await
 }
 
-/// Call URL REST route.
 pub async fn call_url_rest_route(
     srv: &crate::state::data::Data,
     user: Option<Identity>,
@@ -396,70 +250,35 @@ pub async fn call_url_rest_route(
     payload: &str,
 ) -> WebResponse {
     let mut usr: Option<Item> = None;
-
-    if !user.is_none() {
-        usr = get_user(srv, user.unwrap().id().unwrap()).await;
-    }
-
-    let mut response: WebResponse = WebResponse::Ok;
-
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        let wr = plugin.route_rest_hook(&srv.plugin_api, hndl, method, &usr, query, payload);
-        match wr {
-            WebResponse::NotImplemented => {
-                continue;
-            }
-            _ => {
-                response = wr;
-            }
-        }
+    if let Some(u) = user {
+        usr = get_user(srv, u.id().unwrap()).await;
     }
 
     let wr = call_url_rest_route_actor(srv, hndl, method, &usr, query, payload).await;
-    if !matches!(wr, WebResponse::NotImplemented) {
-        response = wr;
+    if matches!(wr, WebResponse::NotImplemented) {
+        WebResponse::Ok
+    } else {
+        wr
     }
-
-    return response;
 }
 
-/// Call collection read hook that can actually filter out particular item
 pub async fn call_collection_read_hook(
     data: &crate::state::data::Data,
     hndl: &str,
     collection: &str,
     itm: &mut Item,
 ) -> bool {
-    for plugin in data.plugin_pool.lock().plugins.iter_mut() {
-        if plugin.collection_read_hook(&data.plugin_api, hndl, collection, itm) {
-            return true;
-        }
-    }
-
     call_collection_read_hook_actor(data, hndl, collection, itm).await
 }
 
-/// Call One-Time Password hook
 pub async fn call_otp_hook(srv: &crate::state::data::Data, hndl: &str, itm: Item) {
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        plugin.call_otp_hook(&srv.plugin_api, hndl, &itm);
-    }
-
     call_otp_hook_actor(srv, hndl, itm).await;
 }
 
-/// Call Periodic Job hook.
-///
-/// Called from the periodic-tick `thread::spawn` loop in main.rs (no tokio
-/// runtime context). For trait-mode plugins we call directly; for actor-mode
-/// plugins we use `mpsc::Sender::try_send`, which is a sync method and works
-/// without a runtime. If a plugin's mailbox is full we drop the tick rather
-/// than block the periodic loop — periodic ticks are idempotent, the next
-/// one will catch up.
+/// Periodic tick from the `thread::spawn` loop in main.rs. No tokio runtime
+/// context — we use `mpsc::Sender::try_send`, which is a sync method. If a
+/// plugin's mailbox is full we drop the tick (idempotent — next tick catches up).
 pub fn call_periodic_job_hook(srv: &crate::state::data::Data, timing: &str) {
-    for plugin in srv.plugin_pool.lock().plugins.iter_mut() {
-        plugin.call_periodic_job_hook(&srv.plugin_api, timing);
-    }
     for sender in srv.plugin_registry.senders() {
         let msg = isabelle_plugin_api::actor::PluginHookMessage::PeriodicJob {
             timing: timing.to_string(),

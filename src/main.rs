@@ -25,12 +25,9 @@ use crate::args::Args;
 use chrono::Timelike;
 #[macro_use]
 extern crate lazy_static;
-use crate::util::crypto::*;
 use chrono::{FixedOffset, Local};
 use cron::Schedule;
 use std::{str::FromStr, time::Duration};
-
-use crate::notif::email::send_email;
 
 #[cfg(not(feature = "full_file_database"))]
 use crate::state::merger::merge_database;
@@ -55,7 +52,6 @@ use crate::handler::route_call::call_periodic_job_hook;
 use crate::notif::gcal::*;
 use crate::server::itm::*;
 use crate::server::login::*;
-use crate::server::user_control::*;
 use std::collections::HashMap;
 
 use crate::server::secret::*;
@@ -196,24 +192,14 @@ async fn main() -> std::io::Result<()> {
         info!("Plugins: registering");
         {
             let s: &mut crate::state::data::Data = srv_mut;
-            let before = s.plugin_pool.lock().plugins.len();
-            // Security registers either via trait (default) or actor mode,
-            // controlled by mutually-exclusive features. Both wired off the
-            // same dep so there's no double-link.
-            #[cfg(all(feature = "plugin-security", not(feature = "plugin-security-actor")))]
-            isabelle_plugin_security::register(&mut *s.plugin_pool.lock());
-            #[cfg(feature = "plugin-security-actor")]
+
+            #[cfg(feature = "plugin-security")]
             {
                 if let Some(core) = s.core_handle.clone() {
                     isabelle_plugin_security::register_actor(&mut s.plugin_registry, core);
                 }
             }
-            // Midair: actor-only. The trait-mode `register` was removed when
-            // the plugin was migrated to native async with `CoreHandle` — both
-            // `plugin-midair` and `plugin-midair-actor` route through the
-            // same `register_actor`. The cfg matches either feature so the
-            // plugin is wired regardless of how security is registered.
-            #[cfg(any(feature = "plugin-midair", feature = "plugin-midair-actor"))]
+            #[cfg(feature = "plugin-midair")]
             {
                 if let Some(core) = s.core_handle.clone() {
                     isabelle_plugin_midair::register_actor(&mut s.plugin_registry, core);
@@ -234,14 +220,7 @@ async fn main() -> std::io::Result<()> {
                 }
             }
 
-            let registered = s.plugin_pool.lock().plugins.len() - before;
-            info!(
-                "Plugins: {} registered (trait), {} registered (actor)",
-                registered,
-                s.plugin_registry.len()
-            );
-            info!("Plugins: ensuring operation");
-            s.plugin_pool.lock().ping_plugins();
+            info!("Plugins: {} registered", s.plugin_registry.len());
         }
         info!("Plugins: loaded");
 
