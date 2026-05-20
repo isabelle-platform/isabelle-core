@@ -29,8 +29,8 @@ use crate::state::store_local::*;
 #[cfg(not(feature = "full_file_database"))]
 use crate::state::store_mongo::*;
 use isabelle_plugin_api::actor::{CoreHandle, PluginRegistry};
-use parking_lot::Mutex;
 use log::info;
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// Server data structure

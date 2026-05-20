@@ -402,14 +402,10 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
             let role_is = internals.safe_str("user_role_prefix", "role_is_");
             let email = _user.as_ref().unwrap().id().unwrap();
             if !login_has_bad_symbols(&email) {
-                let filter =
-                    "{ \"strs.email\": \"".to_owned() + &email + "\" }";
-                let all_users =
-                    srv.rw.get_all_items("user", "name", &filter).await;
+                let filter = "{ \"strs.email\": \"".to_owned() + &email + "\" }";
+                let all_users = srv.rw.get_all_items("user", "name", &filter).await;
                 for item in &all_users.map {
-                    if item.1.strs.get("email").map(String::as_str)
-                        == Some(email.as_str())
-                    {
+                    if item.1.strs.get("email").map(String::as_str) == Some(email.as_str()) {
                         user.username = email.clone();
                         user.id = *item.0;
                         for bp in &item.1.bools {

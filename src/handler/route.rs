@@ -109,14 +109,8 @@ pub async fn url_unprotected_post_route(
 
     if let Some(handler) = cache.unprotected_url_routes.get(req.path()) {
         trace!("Call custom route {}", handler);
-        return call_url_unprotected_post_route(
-            srv,
-            user,
-            handler,
-            req.query_string(),
-            payload,
-        )
-        .await;
+        return call_url_unprotected_post_route(srv, user, handler, req.query_string(), payload)
+            .await;
     }
 
     HttpResponse::NotFound().into()
@@ -157,8 +151,7 @@ pub async fn url_generic_rest_route(
 
     if let Some(handler) = cache.rest_routes.get(req.path()) {
         trace!("Call custom route {}", handler);
-        let resp =
-            call_url_rest_route(srv, user, handler, method, req.query_string(), body).await;
+        let resp = call_url_rest_route(srv, user, handler, method, req.query_string(), body).await;
         match &resp {
             WebResponse::Login(email) => {
                 Identity::login(&req.extensions(), email.to_string()).unwrap();
