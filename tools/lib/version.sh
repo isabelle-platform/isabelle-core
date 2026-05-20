@@ -5,11 +5,23 @@ function get_version()
 	local top_dir="$1"
 	local verkind="$2"
 
-	if [ -n "${verkind}" ] ; then
-		cat ${top_dir}/tools/_version_$verkind
-	else
-		echo $(get_version ${top_dir} major).$(get_version ${top_dir} minor).$(get_version ${top_dir} patchlevel)
-	fi
+	# Single source of truth: the `[package] version` in Cargo.toml.
+	local full
+	full=$(grep -m1 '^version' "${top_dir}/Cargo.toml" \
+		| sed -E 's/.*"([^"]+)".*/\1/')
+
+	local major rest minor patchlevel
+	major="${full%%.*}"
+	rest="${full#*.}"
+	minor="${rest%%.*}"
+	patchlevel="${rest#*.}"
+
+	case "${verkind}" in
+		major)      echo "${major}" ;;
+		minor)      echo "${minor}" ;;
+		patchlevel) echo "${patchlevel}" ;;
+		*)          echo "${full}" ;;
+	esac
 }
 
 function get_mods()
