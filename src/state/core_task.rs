@@ -96,10 +96,7 @@ async fn handle_message(state: &State, msg: CoreMessage) {
             filter,
             reply,
         } => {
-            let lr = srv
-                .rw
-                .get_all_items(&collection, &sort_key, &filter)
-                .await;
+            let lr = srv.rw.get_all_items(&collection, &sort_key, &filter).await;
             let _ = reply.send(lr);
         }
         CoreMessage::DbGetItems {

@@ -193,8 +193,7 @@ mod tests {
             let stats = {
                 let s: &Data = &state.server;
                 #[allow(invalid_reference_casting)]
-                let s_mut: &mut Data =
-                    unsafe { &mut *(s as *const Data as *mut Data) };
+                let s_mut: &mut Data = unsafe { &mut *(s as *const Data as *mut Data) };
                 register_demo(&mut s_mut.plugin_registry, handle.clone())
             };
 
@@ -229,10 +228,8 @@ mod tests {
             .await;
 
             // auth
-            let allowed = call_item_auth_hook_actor(
-                srv, "demo-hndl", &usr, "test", 1, None, false,
-            )
-            .await;
+            let allowed =
+                call_item_auth_hook_actor(srv, "demo-hndl", &usr, "test", 1, None, false).await;
             assert!(allowed, "demo plugin allows everything");
 
             // Post_edit is fire-and-forget — give the task a tick to

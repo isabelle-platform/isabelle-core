@@ -192,8 +192,7 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
     /* call auth hooks */
     if let Some(routes) = internals.strstrs.get("itm_auth_hook") {
         for route in routes {
-            if !call_item_auth_hook(srv, route.1, &usr, &mc.collection, itm.id, None, true).await
-            {
+            if !call_item_auth_hook(srv, route.1, &usr, &mc.collection, itm.id, None, true).await {
                 return HttpResponse::Forbidden().into();
             }
         }
