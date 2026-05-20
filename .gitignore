@@ -27,3 +27,4 @@ sample-data
 *.dylib
 /data-*
 tmp.entitlements
+/generated

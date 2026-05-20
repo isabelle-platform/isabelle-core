@@ -1,9 +1,18 @@
 [package]
 name = "isabelle-core"
-version = "1.22.0"
+version = "1.23.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# Core ships as both a library (`isabelle_core::run`) and a thin dev
+# binary that calls it with an empty plugin set. Production deployments
+# build a per-flavour shell crate that depends on this library plus the
+# plugin crates it needs.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "isabelle-core"
+path = "src/main.rs"
 
 [dependencies]
 aes-gcm = "0.10"
@@ -23,13 +32,7 @@ cron = "0.12.1"
 env_logger = "0.8.4"
 futures-util = "0.3.29"
 isabelle-dm = { "git" = "https://github.com/isabelle-platform/isabelle-dm", tag = "1.10.0" }
-isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.23.0" }
-
-# Statically-linked plugins. Each is gated by a feature so different deploy
-# targets produce different binaries. See [features] below.
-isabelle-plugin-security = { path = "../isabelle-plugin-security", optional = true }
-isabelle-plugin-midair = { path = "../../midair-platform/isabelle-plugin-midair", optional = true }
-
+isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.24.0" }
 lazy_static = "1.4.0"
 lettre = { version = "0.11.11", features = [
 	"rustls-tls",
@@ -57,18 +60,9 @@ tempfile = "3"
 [features]
 full_file_database = []
 
-# Plugin feature flags — each enables an optional dep above. All plugins
-# are actor-mode only (trait-dispatch was removed); the feature names are
-# kept simple — no `-actor` suffix needed.
-plugin-security = ["dep:isabelle-plugin-security"]
-plugin-midair = ["dep:isabelle-plugin-midair", "plugin-security"]
-
-# Convenience profile for the midair deployment (security + midair).
-midair = ["plugin-midair"]
-
-# Phase-3 actor-mode pilot demo plugin. Off by default; enable to register
-# a noop observer plugin via the actor path (logs each hook event it
-# receives). Useful for verifying the dispatcher pipeline end-to-end.
+# Phase-3 actor-mode pilot demo plugin. Off by default; enable to wire
+# `crate::plugin_actor_demo::register_demo` into a shell binary's
+# `setup` closure. Useful for verifying the dispatcher pipeline end-to-end.
 actor-demo = []
 
 [profile.release]
@@ -85,9 +79,3 @@ overflow-checks = false
 
 [profile.dev.package."*"]
 codegen-units = 256
-
-# Use the local checkout of isabelle-plugin-api so the actor-model refactor
-# can iterate without round-tripping through a new git tag. Affects all
-# transitive consumers too (the plugins also pick up the local version).
-[patch."https://github.com/isabelle-platform/isabelle-plugin-api"]
-isabelle-plugin-api = { path = "../isabelle-plugin-api" }
