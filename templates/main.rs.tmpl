@@ -1,0 +1,15 @@
+/*
+ * Auto-generated shell binary for the `__FLAVOUR__` flavour.
+ *
+ * Regenerated from templates/main.rs.tmpl + flavours/__FLAVOUR__.json by
+ * `make __FLAVOUR__`. Don't edit by hand — edit the template or the
+ * flavour json instead.
+ */
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    isabelle_core::run(|reg, core| {
+__PLUGIN_REGISTRATIONS__
+    })
+    .await
+}

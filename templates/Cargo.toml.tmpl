@@ -1,0 +1,15 @@
+[package]
+name = "isabelle-core-__FLAVOUR__"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "isabelle-core-__FLAVOUR__"
+path = "src/main.rs"
+
+[dependencies]
+actix-web = { version = "4", features = ["cookies", "rustls-0_23"] }
+# Parent core via path — local edits picked up on next `cargo build`.
+isabelle-core = { path = "__CORE_PATH__" }
+# Plugins from flavours/__FLAVOUR__.json:
+__PLUGIN_DEPS__
