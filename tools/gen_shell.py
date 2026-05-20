@@ -24,6 +24,7 @@ Writes:
 
 Placeholders in the templates:
     __FLAVOUR__              — the flavour name (e.g. "midair")
+    __VERSION__              — the core crate's version (from core Cargo.toml)
     __CORE_PATH__            — relative path from <out_dir> to the core crate
     __PLUGIN_DEPS__          — `[dependencies]` lines for each plugin
     __PLUGIN_REGISTRATIONS__ — `register_actor` call per plugin, inside the
@@ -42,7 +43,24 @@ def crate_ident(name: str) -> str:
     return name.replace("-", "_")
 
 
-def render(flavour: str, core_path: str, plugins: list[dict]) -> tuple[str, str]:
+def core_version(core_cargo_toml: Path) -> str:
+    """Read `[package] version` from the core crate's Cargo.toml — the
+    single source of truth for the version stamped on shell crates."""
+    in_package = False
+    for line in core_cargo_toml.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_package = stripped == "[package]"
+            continue
+        if in_package and stripped.startswith("version"):
+            # version = "1.23.0"
+            return stripped.split("=", 1)[1].strip().strip('"')
+    raise SystemExit(f"could not find [package] version in {core_cargo_toml}")
+
+
+def render(
+    flavour: str, core_path: str, version: str, plugins: list[dict]
+) -> tuple[str, str]:
     repo_root = Path(__file__).resolve().parent.parent
     cargo_tmpl = (repo_root / "templates" / "Cargo.toml.tmpl").read_text()
     main_tmpl = (repo_root / "templates" / "main.rs.tmpl").read_text()
@@ -70,6 +88,7 @@ def render(flavour: str, core_path: str, plugins: list[dict]) -> tuple[str, str]
 
     subs = {
         "__FLAVOUR__": flavour,
+        "__VERSION__": version,
         "__CORE_PATH__": core_path,
         "__PLUGIN_DEPS__": "\n".join(dep_lines),
         "__PLUGIN_REGISTRATIONS__": "\n".join(reg_lines),
@@ -102,7 +121,15 @@ def main() -> int:
         print(f"error: {flavour_json} must be a JSON array", file=sys.stderr)
         return 1
 
-    cargo, main_rs = render(flavour, core_path, plugins)
+    # Core version comes from core's own Cargo.toml — `core_path` is
+    # relative to `out_dir`, so resolve it against that.
+    core_cargo = (out_dir / core_path / "Cargo.toml").resolve()
+    if not core_cargo.exists():
+        print(f"error: core Cargo.toml not found at {core_cargo}", file=sys.stderr)
+        return 1
+    version = core_version(core_cargo)
+
+    cargo, main_rs = render(flavour, core_path, version, plugins)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "src").mkdir(parents=True, exist_ok=True)
