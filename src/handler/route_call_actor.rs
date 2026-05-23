@@ -39,8 +39,12 @@ use tokio::sync::oneshot;
 
 /// Pre-edit hook — fans out across all actor plugins, awaiting each reply.
 ///
-/// First plugin that rejects (`succeeded == false`) short-circuits the
-/// dispatcher (same semantics as the trait-mode version).
+/// First plugin that genuinely rejects (`succeeded == false` with an error
+/// other than the `"not implemented"` sentinel) short-circuits the
+/// dispatcher. The `"not implemented"` reply is a legacy "skip me" signal
+/// from the trait-mode era — plugins still emit it when they don't
+/// handle the given handle/collection, and the dispatcher must keep
+/// fanning out instead of failing the whole call.
 ///
 /// If a plugin returns a `modified_item`, it's swapped into `itm` so the
 /// next plugin sees the mutated version. This matches the trait-mode
@@ -87,7 +91,7 @@ pub async fn call_item_pre_edit_hook_actor(
                 if let Some(new_item) = modified_item {
                     *itm = new_item;
                 }
-                if !result.succeeded {
+                if !result.succeeded && result.error != "not implemented" {
                     return result;
                 }
             }
