@@ -153,19 +153,31 @@ pub mod hashmap_vec_u64_as_flexible {
 
 /// BSON-compatible Item wrapper with flexible u64 serialization.
 /// Supports backward compatibility with existing i64 data.
+/// Default for `root_node` when a (legacy) document predates the field.
+/// Mirrors the upstream `Item` serde behaviour so documents written before
+/// `root_node`/`ItemDataNode` existed still deserialize instead of erroring
+/// out the whole startup cursor.
+fn default_root_node() -> ItemDataNode {
+    ItemDataNode::new()
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BsonItem {
     #[serde(with = "u64_as_flexible")]
     pub id: u64,
+    #[serde(default)]
     pub strs: HashMap<String, String>,
+    #[serde(default)]
     pub strstrs: HashMap<String, HashMap<String, String>>,
-    #[serde(with = "hashmap_vec_u64_as_flexible")]
+    #[serde(default, with = "hashmap_vec_u64_as_flexible")]
     pub strids: HashMap<String, Vec<u64>>,
+    #[serde(default)]
     pub bools: HashMap<String, bool>,
-    #[serde(with = "hashmap_u64_as_flexible")]
+    #[serde(default, with = "hashmap_u64_as_flexible")]
     pub u64s: HashMap<String, u64>,
-    #[serde(with = "hashmap_u64_as_flexible")]
+    #[serde(default, with = "hashmap_u64_as_flexible")]
     pub ids: HashMap<String, u64>,
+    #[serde(default = "default_root_node")]
     pub root_node: ItemDataNode,
 }
 
