@@ -15,6 +15,12 @@ Arguments:
 
 Reads:
     <flavour_json>            — list of {name, url, tag} (or {name, url, branch})
+    <flavour>.dbg (optional)  — local-dev plugin path overrides; sits next to
+                                <flavour_json> (e.g. flavours/midair.dbg). A
+                                JSON object {plugin-name: local-path} — each
+                                listed plugin is built from that local
+                                checkout instead of its git tag. For local
+                                debugging only; must never be committed.
     templates/Cargo.toml.tmpl
     templates/main.rs.tmpl
 
@@ -58,8 +64,42 @@ def core_version(core_cargo_toml: Path) -> str:
     raise SystemExit(f"could not find [package] version in {core_cargo_toml}")
 
 
+def load_dbg_overrides(flavour_json: Path) -> dict[str, Path]:
+    """Load the optional `<flavour>.dbg` file sitting next to the flavour JSON.
+
+    It is a JSON object mapping plugin name -> local filesystem path; each
+    listed plugin is built from that checkout instead of its git tag. Relative
+    paths are resolved against the `.dbg` file's directory. For local
+    debugging only — it must never be committed.
+    """
+    dbg = flavour_json.with_suffix(".dbg")
+    if not dbg.is_file():
+        return {}
+
+    raw = json.loads(dbg.read_text())
+    if not isinstance(raw, dict):
+        raise SystemExit(f"error: {dbg} must be a JSON object {{name: path}}")
+
+    overrides: dict[str, Path] = {}
+    for name, raw_path in raw.items():
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = (dbg.parent / path).resolve()
+        if not (path / "Cargo.toml").is_file():
+            raise SystemExit(
+                f"error: {dbg}: override '{name}' -> {path} "
+                f"has no Cargo.toml (not a crate?)"
+            )
+        overrides[name] = path
+    return overrides
+
+
 def render(
-    flavour: str, core_path: str, version: str, plugins: list[dict]
+    flavour: str,
+    core_path: str,
+    version: str,
+    plugins: list[dict],
+    overrides: dict[str, Path],
 ) -> tuple[str, str]:
     repo_root = Path(__file__).resolve().parent.parent
     cargo_tmpl = (repo_root / "templates" / "Cargo.toml.tmpl").read_text()
@@ -68,6 +108,10 @@ def render(
     dep_lines = []
     for p in plugins:
         name = p["name"]
+        # A `.dbg` override pins the plugin to a local checkout.
+        if name in overrides:
+            dep_lines.append(f'{name} = {{ path = "{overrides[name]}" }}')
+            continue
         url = p["url"]
         if "tag" in p:
             ref = f'tag = "{p["tag"]}"'
@@ -129,7 +173,17 @@ def main() -> int:
         return 1
     version = core_version(core_cargo)
 
-    cargo, main_rs = render(flavour, core_path, version, plugins)
+    overrides = load_dbg_overrides(flavour_json)
+    if overrides:
+        print(
+            f"gen_shell: LOCAL PLUGIN OVERRIDES ACTIVE "
+            f"({flavour_json.with_suffix('.dbg').name}) — not a release build:",
+            file=sys.stderr,
+        )
+        for name, path in overrides.items():
+            print(f"  {name} -> {path}", file=sys.stderr)
+
+    cargo, main_rs = render(flavour, core_path, version, plugins, overrides)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "src").mkdir(parents=True, exist_ok=True)
