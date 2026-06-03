@@ -183,10 +183,25 @@ where
             srv_mut.rw.database_name = args.db_name.clone();
             srv_mut.rw.connect(&args.db_url, &args.data_path).await;
 
-            // First-run autodetect: if the target database has no collections,
-            // seed it from the file-backed store. Idempotent across restarts:
-            // once seeded, the database is non-empty and this is a no-op.
-            if srv.rw.get_collections().await.is_empty() {
+            // First-run autodetect: seed from the file-backed store when the
+            // database holds no data yet. We must check for *items*, not
+            // collections: connect() above pre-creates the declared (but empty)
+            // collections from internals.js, so get_collections() is never empty
+            // here. Idempotent across restarts: once seeded, this is a no-op.
+            let mut has_data = false;
+            for coll in srv.rw.get_collections().await {
+                if srv
+                    .rw
+                    .get_items(&coll, u64::MAX, u64::MAX, "", "", 0, 1)
+                    .await
+                    .total_count
+                    > 0
+                {
+                    has_data = true;
+                    break;
+                }
+            }
+            if !has_data {
                 info!("Flow: empty database detected, seeding from file store");
                 merge_database(&mut srv_mut.file_rw, &mut srv_mut.rw).await;
                 info!("Flow: seeding complete");
