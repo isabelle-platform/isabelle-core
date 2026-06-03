@@ -9,8 +9,9 @@ if [ "$cont" != "" ] ; then
     docker rm "$cont"
 fi
 
+mkdir -p ../${1}-data
 mkdir -p ../${1}-data/collection
-ln -s ../${1}-data data-${1}
+ln -sfn ../${1}-data data-${1}
 
 docker run -p 27017:27017 \
            --name mongo-${1} \
