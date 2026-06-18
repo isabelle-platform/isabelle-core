@@ -21,7 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use actix_web::HttpResponse;
+use actix_web::{http::header, HttpResponse};
 use isabelle_plugin_api::api::WebResponse;
 use std::path::Path;
 
@@ -43,8 +43,25 @@ pub async fn conv_response(resp: WebResponse) -> HttpResponse {
             }
             return HttpResponse::Ok().body(text);
         }
-        WebResponse::OkFile(_name, _data) => {
-            return HttpResponse::Ok().into();
+        WebResponse::OkFile(name, data) => {
+            let content_type = if name.ends_with(".png") {
+                "image/png"
+            } else if name.ends_with(".jpg") || name.ends_with(".jpeg") {
+                "image/jpeg"
+            } else if name.ends_with(".webp") {
+                "image/webp"
+            } else if name.ends_with(".svg") {
+                "image/svg+xml"
+            } else {
+                "application/octet-stream"
+            };
+            return HttpResponse::Ok()
+                .insert_header((header::CONTENT_TYPE, content_type))
+                .insert_header((
+                    header::CONTENT_DISPOSITION,
+                    format!("inline; filename=\"{}\"", name.replace('"', "")),
+                ))
+                .body(data);
         }
         WebResponse::OkFilePath(_name, p) => {
             let path = Path::new(&p);
