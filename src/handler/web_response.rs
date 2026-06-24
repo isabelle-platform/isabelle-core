@@ -43,8 +43,22 @@ pub async fn conv_response(resp: WebResponse) -> HttpResponse {
             }
             return HttpResponse::Ok().body(text);
         }
-        WebResponse::OkFile(_name, _data) => {
-            return HttpResponse::Ok().into();
+        WebResponse::OkFile(name, data) => {
+            // Serve the in-memory bytes with a content-type guessed from the name's
+            // extension (was a stub that dropped the body -> empty 200).
+            let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            let content_type = match ext.as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "webp" => "image/webp",
+                "gif" => "image/gif",
+                "svg" => "image/svg+xml",
+                "html" | "htm" => "text/html; charset=utf-8",
+                "txt" => "text/plain; charset=utf-8",
+                "json" => "application/json",
+                _ => "application/octet-stream",
+            };
+            return HttpResponse::Ok().content_type(content_type).body(data);
         }
         WebResponse::OkFilePath(_name, p) => {
             let path = Path::new(&p);
