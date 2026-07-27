@@ -319,6 +319,46 @@ fn decrypt_and_parse(cipher: &Aes256Gcm, blob: &[u8]) -> Result<(HashMap<u64, It
     Ok((entries, next_id))
 }
 
+/// Length of the session cookie signing/encryption key. `actix_web::cookie::Key`
+/// requires at least 64 bytes for a signed+encrypted (private) cookie jar.
+pub const SESSION_KEY_LEN: usize = 64;
+
+/// Load the session cookie key from `path`, generating a fresh random one on
+/// first run. The key must persist across restarts — regenerating it
+/// invalidates every live session — so it is stored beside the secret-store
+/// master key, with the same 0600 atomic-write treatment.
+///
+/// Rotating the key is intentionally a manual act: delete the file and
+/// restart, which logs everyone out.
+pub fn load_or_create_session_key(path: &Path) -> io::Result<[u8; SESSION_KEY_LEN]> {
+    if path.exists() {
+        let bytes = fs::read(path)?;
+        if bytes.len() != SESSION_KEY_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "session key file {} must contain exactly {} bytes (got {}). \
+                     Delete it to generate a new one (this logs out all users).",
+                    path.display(),
+                    SESSION_KEY_LEN,
+                    bytes.len()
+                ),
+            ));
+        }
+        let mut out = [0u8; SESSION_KEY_LEN];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    } else {
+        let mut key = [0u8; SESSION_KEY_LEN];
+        rand::thread_rng().fill_bytes(&mut key);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        atomic_write(path, &key, 0o600)?;
+        Ok(key)
+    }
+}
+
 fn load_or_create_key(path: &Path) -> io::Result<[u8; KEY_LEN]> {
     if path.exists() {
         let bytes = fs::read(path)?;
@@ -913,6 +953,50 @@ mod tests {
         let store_mode = fs::metadata(&s).unwrap().permissions().mode() & 0o777;
         assert_eq!(key_mode, 0o600);
         assert_eq!(store_mode, 0o600);
+    }
+
+    // -------- session cookie key --------
+
+    #[test]
+    fn session_key_is_generated_once_and_reused() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".session-key");
+        let first = load_or_create_session_key(&path).unwrap();
+        let second = load_or_create_session_key(&path).unwrap();
+        assert_eq!(
+            first, second,
+            "reloading must return the same key, otherwise every restart logs everyone out"
+        );
+    }
+
+    #[test]
+    fn session_key_is_random_and_not_all_zeroes() {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let a = load_or_create_session_key(&dir_a.path().join(".session-key")).unwrap();
+        let b = load_or_create_session_key(&dir_b.path().join(".session-key")).unwrap();
+        assert_ne!(a, [0u8; SESSION_KEY_LEN], "key must not be a constant");
+        assert_ne!(a, b, "two fresh installations must not share a key");
+    }
+
+    #[test]
+    fn session_key_rejects_wrong_length_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".session-key");
+        fs::write(&path, b"too short").unwrap();
+        let err = load_or_create_session_key(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_key_file_has_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".session-key");
+        load_or_create_session_key(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     // -------- masking on read & "<hidden>" preservation on write --------

@@ -82,4 +82,10 @@ pub struct Args {
     /// first run if missing.
     #[arg(long, default_value(""))]
     pub secret_key_file: String,
+
+    /// Path to the 64-byte key that signs and encrypts session cookies.
+    /// If empty, defaults to ${data_path}/.session-key. Auto-generated on
+    /// first run if missing; deleting it invalidates all live sessions.
+    #[arg(long, default_value(""))]
+    pub session_key_file: String,
 }

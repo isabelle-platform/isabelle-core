@@ -84,17 +84,23 @@ use std::thread;
 /// own `isabelle-plugin-api` dependency just for the closure signature.
 pub use isabelle_plugin_api::actor::{CoreHandle, PluginRegistry};
 
-/// Session middleware based on cookies
+/// Session middleware based on cookies.
+///
+/// `key` signs and encrypts the session cookie, so it must be a persisted
+/// random secret — see `load_or_create_session_key`. It is passed in rather
+/// than derived here because `HttpServer::new`'s factory runs once per worker
+/// and every worker must use the same key.
 fn session_middleware(
     _pub_fqdn: String,
     cookie_http_insecure: bool,
+    key: Key,
 ) -> SessionMiddleware<CookieSessionStore> {
     let same_site = if cookie_http_insecure {
         SameSite::Lax
     } else {
         SameSite::None
     };
-    SessionMiddleware::builder(CookieSessionStore::default(), Key::from(&[0; 64]))
+    SessionMiddleware::builder(CookieSessionStore::default(), key)
         .session_lifecycle(BrowserSession::default())
         .cookie_same_site(same_site)
         .cookie_path("/".into())
@@ -282,6 +288,38 @@ where
         }
     }
 
+    // Session cookie key: a persisted random secret, generated on first run.
+    // Never a constant — a fixed key lets anyone forge a session cookie for
+    // any identity, including admin.
+    let session_key = {
+        let key_file = if args.session_key_file.is_empty() {
+            std::path::PathBuf::from(&args.data_path).join(".session-key")
+        } else {
+            std::path::PathBuf::from(&args.session_key_file)
+        };
+        let existed = key_file.exists();
+        match crate::state::secrets::load_or_create_session_key(&key_file) {
+            Ok(bytes) => {
+                if existed {
+                    info!("Session key: loaded from {}", key_file.display());
+                } else {
+                    info!(
+                        "Session key: generated a new one at {} (existing sessions are invalidated)",
+                        key_file.display()
+                    );
+                }
+                Key::from(&bytes)
+            }
+            Err(e) => {
+                log::error!("Session key: failed to load/create: {}", e);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("session key init failed: {}", e),
+                ));
+            }
+        }
+    };
+
     let data = Data::new(G_STATE.clone());
     let data_clone = data.clone();
 
@@ -325,6 +363,7 @@ where
             .wrap(session_middleware(
                 args.pub_fqdn.clone(),
                 args.cookie_http_insecure,
+                session_key.clone(),
             ))
             .route("/itm/edit", web::post().to(itm_edit))
             .route("/itm/del", web::post().to(itm_del))
