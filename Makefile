@@ -26,6 +26,9 @@ ifeq ($(strip $(flavour)),)
 else
 	python3 tools/gen_shell.py $(flavour) ../.. generated/$(flavour) $(flavours_dir)/$(flavour).json
 	cargo build --manifest-path generated/$(flavour)/Cargo.toml
+	bash tools/fix_rpath.sh \
+		generated/$(flavour)/target/debug/isabelle-core-$(flavour) \
+		generated/$(flavour)/target/debug
 endif
 
 test:
