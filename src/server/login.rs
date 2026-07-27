@@ -25,6 +25,7 @@ use crate::handler::route_call::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
 use crate::state::store::Store;
+use crate::util::crypto::constant_time_eq;
 use crate::util::crypto::get_otp_code;
 use crate::util::crypto::verify_password;
 use actix_identity::Identity;
@@ -66,30 +67,35 @@ pub async fn gen_otp(
     info!("User name: {}", lu.username.clone());
     let usr = get_user(srv, lu.username.clone()).await;
 
-    if usr == None {
-        info!("No user {} found, couldn't otp", lu.username.clone());
-        return web::Json(ProcessResult {
-            succeeded: false,
-            error: "Invalid login".to_string(),
-            data: HashMap::new(),
-        });
-    } else {
-        let mut new_usr_itm = srv
-            .rw
-            .get_item("user", usr.clone().unwrap().id)
-            .await
-            .unwrap();
-        new_usr_itm.set_str("otp", &get_otp_code());
-        srv.rw.set_item("user", &new_usr_itm, false).await;
+    // Everything below is silent about its outcome: the response is identical
+    // whether or not the account exists, is active, or is being throttled.
+    // Otherwise this endpoint is a free oracle for enumerating logins.
+    if let Some(usr) = usr {
+        let now = now_ts();
+        // An inactive account — one an operator provisioned but never
+        // activated — has no OTP path at all: the code would be a credential
+        // for an account its owner has never touched. The throttle bounds both
+        // mail-bombing and repeated re-rolls of a code being brute-forced.
+        if !otp_may_be_issued(&usr, now) {
+            info!("OTP not issued for {}", lu.username);
+        } else if let Some(mut new_usr_itm) = srv.rw.get_item("user", usr.id).await {
+            new_usr_itm.set_str("otp", &get_otp_code());
+            new_usr_itm.set_u64("otp_issued_at", now);
+            new_usr_itm.set_u64("otp_expires_at", now + OTP_TTL_SECS);
+            new_usr_itm.set_u64("otp_attempts", 0);
+            srv.rw.set_item("user", &new_usr_itm, false).await;
 
-        let routes = srv
-            .rw
-            .get_internals()
-            .await
-            .safe_strstr("otp_hook", &HashMap::new());
-        for route in routes {
-            call_otp_hook(srv, &route.1, new_usr_itm.clone()).await;
+            let routes = srv
+                .rw
+                .get_internals()
+                .await
+                .safe_strstr("otp_hook", &HashMap::new());
+            for route in routes {
+                call_otp_hook(srv, &route.1, new_usr_itm.clone()).await;
+            }
         }
+    } else {
+        info!("No user {} found, couldn't otp", lu.username.clone());
     }
 
     return web::Json(ProcessResult {
@@ -130,37 +136,54 @@ pub async fn register(
 
     let srv: &crate::state::data::Data = &data.server;
     info!("User name: {}", login);
+
+    // Reject logins/emails that `get_user` cannot look up. Without this a
+    // login containing `$` or `{` reports as free (the lookup returns None),
+    // creating a record that no later lookup can ever find again.
+    if !login_is_acceptable(&login) || !login_is_acceptable(&email) {
+        return web::Json(ProcessResult {
+            succeeded: false,
+            error: "Invalid login or email".to_string(),
+            data: HashMap::new(),
+        });
+    }
+
+    if !srv
+        .rw
+        .get_internals()
+        .await
+        .safe_bool("allow_self_registration", true)
+    {
+        info!("Self-registration is disabled, rejecting {}", login);
+        return web::Json(ProcessResult {
+            succeeded: false,
+            error: "Registration is disabled".to_string(),
+            data: HashMap::new(),
+        });
+    }
+
     let usr_by_login = get_user(srv, login.clone()).await;
-
-    if let Some(ref existing) = usr_by_login {
-        if existing.safe_bool("logged_once", false) {
-            return web::Json(ProcessResult {
-                succeeded: false,
-                error: "Login is already used".to_string(),
-                data: HashMap::new(),
-            });
-        }
-    }
-
     let usr_by_email = get_user(srv, email.clone()).await;
-    if let Some(ref existing) = usr_by_email {
-        if existing.safe_bool("logged_once", false) {
-            return web::Json(ProcessResult {
-                succeeded: false,
-                error: "Email is already used".to_string(),
-                data: HashMap::new(),
-            });
-        }
+
+    let target = registration_target(&usr_by_login, &usr_by_email);
+    if target == RegistrationTarget::Taken {
+        info!("Login or email is already taken: {}", login);
+        return web::Json(ProcessResult {
+            succeeded: false,
+            error: "Login is already used".to_string(),
+            data: HashMap::new(),
+        });
     }
 
-    if dry != "true" {
-        // Reuse an existing pending record (logged_once == false) to avoid
-        // creating a duplicate user if registration was already started once.
-        let mut itm = usr_by_login.or(usr_by_email).unwrap_or_else(Item::new);
+    // Only ever create. A `Resume` is an exact re-submit of a registration
+    // that is already on disk, so there is nothing left to write.
+    if dry != "true" && target == RegistrationTarget::Create {
+        let mut itm = Item::new();
 
         itm.set_str("name", &login);
         itm.set_str("login", &login);
         itm.set_str("email", &email);
+        itm.set_bool("self_registered", true);
         itm.set_bool("role_is_active", true);
 
         srv.rw.set_item("user", &itm, false).await;
@@ -218,9 +241,6 @@ pub async fn login(
     } else {
         let itm_real = usr.unwrap();
 
-        // Clear the OTP data - it is no longer needed
-        clear_otp(srv, lu.username.clone()).await;
-
         // Don't let inactive users log in.
         if itm_real.safe_bool("role_is_active", false) == false {
             info!("User {} is inactive, couldn't log in", lu.username.clone());
@@ -234,17 +254,37 @@ pub async fn login(
         // Verify password/otp
         let pw = itm_real.safe_str("password", "");
         let otp = itm_real.safe_str("otp", "");
-        if (pw != "" && verify_password(&lu.password, &pw)) || (otp != "" && lu.password == otp) {
+        let attempts = itm_real.safe_u64("otp_attempts", 0);
+
+        // An OTP is only a credential while it is fresh and unexhausted.
+        let otp_live = otp_is_live(&itm_real, now_ts());
+        let otp_ok = otp_live && constant_time_eq(otp.as_bytes(), lu.password.as_bytes());
+        let pw_ok = pw != "" && verify_password(&lu.password, &pw);
+
+        if pw_ok || otp_ok {
             // Password matches - log in.
             Identity::login(&req.extensions(), itm_real.safe_str("email", "")).unwrap();
 
+            // Burn the OTP on any successful login, addressed by id. The old
+            // `clear_otp(login)` matched only records whose `login` and
+            // `email` were both equal to the submitted string — never true for
+            // a normal account — so codes were in practice never invalidated
+            // and stayed usable forever as a second password. It also ran
+            // before verification, which would have burned a code the
+            // legitimate user was still typing in.
             let mut logged = Item::new();
             logged.id = itm_real.id;
             logged.set_bool("logged_once", true);
+            logged.set_str("otp", "");
+            logged.set_u64("otp_expires_at", 0);
+            logged.set_u64("otp_attempts", 0);
             srv.rw.set_item("user", &logged, true).await;
             info!("Logged in as {}", lu.username);
         } else {
             // Password doesn't match - error out.
+            if otp_live {
+                bump_otp_attempts(srv, itm_real.id, attempts).await;
+            }
             error!("Invalid password for {}", lu.username);
             return web::Json(ProcessResult {
                 succeeded: false,
