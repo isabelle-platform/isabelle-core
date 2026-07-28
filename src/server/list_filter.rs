@@ -256,9 +256,15 @@ mod tests {
     /// Sort keys the UI actually passes. `itm_list` rejects the request
     /// outright when one of these fails, so a false positive here is an
     /// immediately visible breakage.
+    ///
+    /// They are stored field paths rather than bare names because that is
+    /// what the sort has to address: `get_items` hands the key straight to
+    /// Mongo, and documents keep their fields under `strs`/`u64s`/`ids`. A
+    /// bare `"name"` names a top-level field no document has, which sorts
+    /// everything equal and makes `skip`/`limit` paging undefined.
     #[test]
     fn sort_keys_used_by_the_ui_are_accepted() {
-        for key in ["name", "time", "id"] {
+        for key in ["strs.name", "u64s.time", "id"] {
             assert!(field_is_allowed(key), "{} should be allowed", key);
         }
     }
