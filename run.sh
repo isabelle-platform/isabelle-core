@@ -31,7 +31,13 @@ fi
 
 # Parse arguments
 port="8090"
-pub_url="http://localhost:8081"
+# Where the UI is served from. The CORS allowlist is derived from this, so in
+# local development it must be the address `trunk serve` actually listens on
+# (its default, 8080) — not the backend's own port, and not a stale value: an
+# origin that isn't listed gets no CORS headers and the browser drops every
+# API response. In production the UI and the API share one origin behind the
+# reverse proxy, and this is that origin.
+pub_url="http://localhost:8080"
 pub_fqdn="localhost"
 data_path="$(pwd)/data-equestrian"
 py_path=""
@@ -41,6 +47,10 @@ gh_login=""
 gh_password=""
 cookie_http_insecure=""
 db_url="mongodb://localhost:27017"
+# Extra browser origins allowed to call this API, beyond the one derived from
+# --pub-url. Repeat the flag for several; needed when the UI is served from an
+# address the backend doesn't otherwise know about.
+cors_origins=""
 
 while test -n "$1" ; do
     case "$1" in
@@ -50,6 +60,10 @@ while test -n "$1" ; do
             ;;
         --pub-url)
             pub_url="$2"
+            shift 1
+            ;;
+        --cors-origin)
+            cors_origins="${cors_origins} --cors-origin $2"
             shift 1
             ;;
         --pub-fqdn)
@@ -131,4 +145,5 @@ RUST_BACKTRACE=1 \
     --database "${database}" \
     --db-url "${db_url}" \
     --py-path "${py_path}" \
+    ${cors_origins} \
     ${cookie_http_insecure:+--cookie-http-insecure}
