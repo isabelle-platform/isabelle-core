@@ -705,7 +705,12 @@ impl Store for StoreMongo {
     }
 }
 
-#[cfg(test)]
+// These exercise `StoreMongo`'s user cache, and `StoreMongo::new()` is itself
+// compiled only when Mongo is the backing store. Under `full_file_database`
+// the store is `StoreLocal` and this module has nothing to test — without the
+// matching gate the test build simply fails to compile, which is why that
+// feature's tests had never run.
+#[cfg(all(test, not(feature = "full_file_database")))]
 mod tests {
     use super::*;
 
