@@ -63,7 +63,7 @@ pub async fn call_item_pre_edit_hook_actor(
     // `srv.plugin_registry` before we start awaiting — otherwise the
     // `oneshot::Receiver::await` below would hold the borrow across the
     // suspension, blocking the caller from `&mut srv` later.
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
 
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -117,7 +117,7 @@ pub async fn call_item_post_edit_hook_actor(
     id: u64,
     action: DataObjectAction,
 ) {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     for sender in &senders {
         let msg = PluginHookMessage::ItemPostEdit {
             hndl: hndl.to_string(),
@@ -142,7 +142,7 @@ pub async fn call_item_auth_hook_actor(
     new_item: Option<Item>,
     del: bool,
 ) -> bool {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
         let msg = PluginHookMessage::ItemAuth {
@@ -179,7 +179,7 @@ pub async fn call_item_list_filter_hook_actor(
     context: &str,
     items: &mut HashMap<u64, Item>,
 ) {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
         let msg = PluginHookMessage::ItemListFilter {
@@ -208,7 +208,7 @@ pub async fn call_item_list_db_filter_hook_actor(
     context: &str,
     filter_type: &str,
 ) -> Vec<String> {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     let mut filters = Vec::new();
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -240,7 +240,7 @@ pub async fn call_collection_read_hook_actor(
     collection: &str,
     itm: &mut Item,
 ) -> bool {
-    let senders: Vec<_> = data.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = data.plugin_registry().senders().cloned().collect();
     let mut should_save = false;
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -277,7 +277,7 @@ pub async fn call_url_route_actor(
     user: &Option<Item>,
     query: &str,
 ) -> WebResponse {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
         let msg = PluginHookMessage::RouteUrl {
@@ -305,7 +305,7 @@ pub async fn call_url_post_route_actor(
     query: &str,
     itm: &Item,
 ) -> WebResponse {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     let mut response = WebResponse::NotImplemented;
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -334,7 +334,7 @@ pub async fn call_url_unprotected_route_actor(
     user: &Option<Item>,
     query: &str,
 ) -> WebResponse {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
         let msg = PluginHookMessage::RouteUnprotectedUrl {
@@ -362,7 +362,7 @@ pub async fn call_url_unprotected_post_route_actor(
     query: &str,
     itm: &Item,
 ) -> WebResponse {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     let mut response = WebResponse::NotImplemented;
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -393,7 +393,7 @@ pub async fn call_url_rest_route_actor(
     query: &str,
     payload: &str,
 ) -> WebResponse {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     let mut response = WebResponse::NotImplemented;
     for sender in &senders {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -419,7 +419,7 @@ pub async fn call_url_rest_route_actor(
 
 /// OTP hook — fire-and-forget.
 pub async fn call_otp_hook_actor(srv: &Data, hndl: &str, itm: Item) {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     for sender in &senders {
         let msg = PluginHookMessage::Otp {
             hndl: hndl.to_string(),
@@ -437,7 +437,7 @@ pub async fn call_otp_hook_actor(srv: &Data, hndl: &str, itm: Item) {
 /// timer and wire this in.
 #[allow(dead_code)]
 pub async fn call_periodic_job_hook_actor(srv: &Data, timing: &str) {
-    let senders: Vec<_> = srv.plugin_registry.senders().cloned().collect();
+    let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     for sender in &senders {
         let msg = PluginHookMessage::PeriodicJob {
             timing: timing.to_string(),

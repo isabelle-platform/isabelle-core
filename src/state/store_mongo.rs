@@ -87,7 +87,9 @@ pub struct StoreMongo {
     pub user_cache: Mutex<HashMap<String, (Item, Instant)>>,
 }
 
-unsafe impl Send for StoreMongo {}
+// `Send` is derived, not asserted: every field is already `Send`, so the
+// compiler proves what an `unsafe impl` here would only have claimed.
+// (Verified by removing it — the crate builds under every feature.)
 
 impl std::fmt::Debug for StoreMongo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

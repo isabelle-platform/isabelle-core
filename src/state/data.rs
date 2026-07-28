@@ -32,6 +32,7 @@ use isabelle_plugin_api::actor::{CoreHandle, PluginRegistry};
 use log::info;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// Server data structure
 pub struct Data {
@@ -79,13 +80,20 @@ pub struct Data {
 
     /// Actor-model plugin registry. Holds an `mpsc::Sender<PluginHookMessage>`
     /// per registered plugin actor.
-    pub plugin_registry: PluginRegistry,
+    ///
+    /// Filled once during startup, then read-only for the process lifetime.
+    /// `OnceLock` states that directly, and is what lets startup publish it
+    /// through a shared `&Data` — the registry cannot be built any earlier,
+    /// because the plugins it holds need the `CoreHandle`, which in turn needs
+    /// the `Arc<Data>` to already exist. Reaching for `&mut` here (by casting
+    /// away the shared reference) is undefined behaviour, threading argument
+    /// or not: `&T` promises the compiler nobody writes through it.
+    plugin_registry: OnceLock<PluginRegistry>,
 
     /// Handle to the core processing task that services `CoreMessage`s from
-    /// plugin actors. Set by `main()` after the task is spawned; before
-    /// that it's `None`. Cloned out and passed to each actor plugin at
-    /// register time.
-    pub core_handle: Option<CoreHandle>,
+    /// plugin actors. Published once the task is spawned; see
+    /// `plugin_registry` for why it is a `OnceLock`.
+    core_handle: OnceLock<CoreHandle>,
 
     /// Pre-parsed routing tables derived from `internals.js`. Built once at
     /// startup via `rebuild_route_cache()` and treated as immutable from then
@@ -113,10 +121,40 @@ impl Data {
             max_payload_bytes: std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_PAYLOAD_BYTES),
             update_script: Mutex::new(String::new()),
             secrets: Mutex::new(None),
-            plugin_registry: PluginRegistry::new(),
-            core_handle: None,
+            plugin_registry: OnceLock::new(),
+            core_handle: OnceLock::new(),
             route_cache: Mutex::new(Arc::new(RouteCache::default())),
         }
+    }
+
+    /// The registered plugin actors.
+    ///
+    /// Before startup publishes the registry — and in tests that never do —
+    /// this yields an empty registry, so hook dispatch fans out to nobody
+    /// instead of panicking.
+    pub fn plugin_registry(&self) -> &PluginRegistry {
+        static EMPTY: OnceLock<PluginRegistry> = OnceLock::new();
+        self.plugin_registry
+            .get()
+            .unwrap_or_else(|| EMPTY.get_or_init(PluginRegistry::new))
+    }
+
+    /// Publish the plugin registry. Called once, during startup.
+    ///
+    /// Returns the registry back if one was already published, which can only
+    /// happen if `run()` were invoked twice against the same `Data`.
+    pub fn set_plugin_registry(&self, registry: PluginRegistry) -> Result<(), PluginRegistry> {
+        self.plugin_registry.set(registry)
+    }
+
+    /// Handle to the core task, once it has been spawned.
+    pub fn core_handle(&self) -> Option<&CoreHandle> {
+        self.core_handle.get()
+    }
+
+    /// Publish the core task handle. Called once, during startup.
+    pub fn set_core_handle(&self, handle: CoreHandle) -> Result<(), CoreHandle> {
+        self.core_handle.set(handle)
     }
 
     /// Rebuild the pre-parsed route cache from the current `internals.js`.

@@ -14,6 +14,11 @@
  * in all copies or substantial portions of the Software.
  */
 
+// No `unsafe` anywhere in this crate, enforced by the compiler rather than
+// by review: `forbid` cannot be lifted by a local `allow`, so the aliasing
+// cast this startup path used to rely on cannot come back unnoticed.
+#![forbid(unsafe_code)]
+
 //! Isabelle core library entry point.
 //!
 //! Per-deployment binaries call [`run`] with a `setup` closure that
@@ -29,9 +34,6 @@
 //!     }).await
 //! }
 //! ```
-
-#[macro_use]
-extern crate lazy_static;
 
 use crate::args::Args;
 use chrono::Timelike;
@@ -183,11 +185,6 @@ fn cors_middleware(pub_url: &str, extra_origins: &[String]) -> Cors {
     cors
 }
 
-lazy_static! {
-    /// Global state
-    pub(crate) static ref G_STATE: State = State::new();
-}
-
 /// Run the Isabelle core HTTP server. The `setup` closure is invoked once
 /// during startup, after `CoreHandle` is available but before the HTTP
 /// server starts accepting requests, so per-deployment shell binaries can
@@ -206,17 +203,25 @@ where
     let mut new_unprotected_routes: HashMap<String, String> = HashMap::new();
     let mut new_rest_routes: HashMap<String, String> = HashMap::new();
 
+    // Startup runs in two phases, and the split is what keeps this code free
+    // of aliasing tricks.
+    //
+    // Phase one builds `Data` while this function still owns it outright.
+    // Connecting the stores needs `&mut`, and here that is simply what an
+    // owned local gives you. The previous arrangement created the value inside
+    // a global `Arc` first and then cast `&Data` back to `&mut Data` to finish
+    // initialising it, which is undefined behaviour no matter how single-
+    // threaded the moment is: `&T` tells the compiler the pointee is not
+    // written through, and it optimises on that promise.
+    //
+    // Phase two publishes the value into an `Arc` and never takes `&mut`
+    // again. Only two fields cannot be filled before publication — the core
+    // task handle and the plugin registry, both of which need the `Arc` to
+    // exist first — and those are `OnceLock`s, written through `&Data`.
+    let mut data = crate::state::data::Data::new();
+
     {
-        let srv: &crate::state::data::Data = &G_STATE.server;
-        // SAFETY: this is the single-threaded startup phase. No other code
-        // observes `Data` yet — actix HTTP workers and core_task haven't
-        // started. We mutate the remaining `&mut`-only fields (`file_rw`,
-        // `rw.database_name`, `rw.connect`'s internals, `core_handle`)
-        // through a raw pointer aliasing the Arc<Data>'s payload.
-        #[allow(invalid_reference_casting)]
-        let srv_mut: &mut crate::state::data::Data = unsafe {
-            &mut *(srv as *const crate::state::data::Data as *mut crate::state::data::Data)
-        };
+        let srv: &crate::state::data::Data = &data;
 
         *srv.gc_path.lock() = args.gc_path.to_string();
         *srv.py_path.lock() = args.py_path.to_string();
@@ -252,59 +257,77 @@ where
                 ));
             }
         }
+    }
 
-        info!("Data storage: connecting");
-        // Put options to internal structures and connect to database
-        #[cfg(not(feature = "full_file_database"))]
-        {
-            srv_mut.file_rw.connect(&args.data_path, "").await;
-            srv_mut.rw.database_name = args.db_name.clone();
-            srv_mut.rw.connect(&args.db_url, &args.data_path).await;
+    info!("Data storage: connecting");
+    // Put options to internal structures and connect to database.
+    // `data` is still an owned local here, so these `&mut` borrows are the
+    // ordinary kind the compiler checks.
+    #[cfg(not(feature = "full_file_database"))]
+    {
+        data.file_rw.connect(&args.data_path, "").await;
+        data.rw.database_name = args.db_name.clone();
+        data.rw.connect(&args.db_url, &args.data_path).await;
 
-            // First-run autodetect: seed from the file-backed store when the
-            // database holds no data yet. We must check for *items*, not
-            // collections: connect() above pre-creates the declared (but empty)
-            // collections from internals.js, so get_collections() is never empty
-            // here. Idempotent across restarts: once seeded, this is a no-op.
-            let mut has_data = false;
-            for coll in srv.rw.get_collections().await {
-                if srv
-                    .rw
-                    .get_items(&coll, u64::MAX, u64::MAX, "", "", 0, 1)
-                    .await
-                    .total_count
-                    > 0
-                {
-                    has_data = true;
-                    break;
-                }
-            }
-            if !has_data {
-                info!("Flow: empty database detected, seeding from file store");
-                merge_database(&mut srv_mut.file_rw, &mut srv_mut.rw).await;
-                info!("Flow: seeding complete");
+        // First-run autodetect: seed from the file-backed store when the
+        // database holds no data yet. We must check for *items*, not
+        // collections: connect() above pre-creates the declared (but empty)
+        // collections from internals.js, so get_collections() is never empty
+        // here. Idempotent across restarts: once seeded, this is a no-op.
+        let mut has_data = false;
+        for coll in data.rw.get_collections().await {
+            if data
+                .rw
+                .get_items(&coll, u64::MAX, u64::MAX, "", "", 0, 1)
+                .await
+                .total_count
+                > 0
+            {
+                has_data = true;
+                break;
             }
         }
-
-        info!("Data storage: connected");
-
-        #[cfg(feature = "full_file_database")]
-        {
-            srv_mut.rw.connect(&args.data_path, "").await;
+        if !has_data {
+            info!("Flow: empty database detected, seeding from file store");
+            merge_database(&mut data.file_rw, &mut data.rw).await;
+            info!("Flow: seeding complete");
         }
+    }
+
+    #[cfg(feature = "full_file_database")]
+    {
+        data.rw.connect(&args.data_path, "").await;
+    }
+
+    info!("Data storage: connected");
+
+    // Phase two: publish. `data` is moved behind an `Arc` and from here on is
+    // only ever reached through `&`.
+    let state = State::from_data(data);
+
+    {
+        let srv: &crate::state::data::Data = &state.server;
 
         // Spawn the core processing task — it owns the inbox for the new
         // actor-model `CoreMessage`s and processes them against `Data`.
-        // The returned `CoreHandle` is stored on `srv` so the caller's
+        // The returned `CoreHandle` is published on `srv` so the caller's
         // setup closure (and the plugins it registers) can clone it.
-        let core_handle = crate::state::core_task::spawn_core_task(G_STATE.clone());
-        srv_mut.core_handle = Some(core_handle.clone());
+        let core_handle = crate::state::core_task::spawn_core_task(state.clone());
+        if srv.set_core_handle(core_handle.clone()).is_err() {
+            log::warn!("Core handle was already published; ignoring");
+        }
 
         // Hand control to the deployment-specific shell binary so it can
-        // register whichever plugins it links against.
+        // register whichever plugins it links against. The registry is built
+        // here, as an owned value, and published once it is complete.
         info!("Plugins: registering");
-        setup(&mut srv_mut.plugin_registry, &core_handle);
-        info!("Plugins: {} registered", srv_mut.plugin_registry.len());
+        let mut registry = PluginRegistry::new();
+        setup(&mut registry, &core_handle);
+        let plugin_count = registry.len();
+        if srv.set_plugin_registry(registry).is_err() {
+            log::warn!("Plugin registry was already published; ignoring");
+        }
+        info!("Plugins: {} registered", plugin_count);
 
         // Perform initialization checks, etc.
         info!("Flow: performing initialization checks");
@@ -392,11 +415,11 @@ where
         }
     };
 
-    let data = Data::new(G_STATE.clone());
+    let data = Data::new(state.clone());
     let data_clone = data.clone();
 
     {
-        let srv: &crate::state::data::Data = &G_STATE.server;
+        let srv: &crate::state::data::Data = &state.server;
         srv.init_data_path().await;
     }
 

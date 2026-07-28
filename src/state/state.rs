@@ -46,10 +46,22 @@ impl Clone for State {
 
 impl State {
     pub fn new() -> Self {
+        Self::from_data(Data::new())
+    }
+
+    /// Publish an already-initialised `Data`.
+    ///
+    /// Startup uses this to finish building `Data` while it still owns it —
+    /// connecting the stores needs `&mut` — and only then share it. Anything
+    /// that cannot be filled in before publication lives behind a `OnceLock`
+    /// on `Data` and is written through `&`.
+    pub fn from_data(data: Data) -> Self {
         Self {
-            server: Arc::new(Data::new()),
+            server: Arc::new(data),
         }
     }
 }
 
-unsafe impl Send for State {}
+// `Send` is derived, not asserted: every field is already `Send`, so the
+// compiler proves what an `unsafe impl` here would only have claimed.
+// (Verified by removing it — the crate builds under every feature.)

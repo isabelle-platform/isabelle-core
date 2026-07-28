@@ -52,7 +52,9 @@ pub struct StoreLocal {
     pub internals_cache: Mutex<Option<Item>>,
 }
 
-unsafe impl Send for StoreLocal {}
+// `Send` is derived, not asserted: every field is already `Send`, so the
+// compiler proves what an `unsafe impl` here would only have claimed.
+// (Verified by removing it — the crate builds under every feature.)
 
 impl std::fmt::Debug for StoreLocal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -279,7 +279,7 @@ pub async fn call_otp_hook(srv: &crate::state::data::Data, hndl: &str, itm: Item
 /// context — we use `mpsc::Sender::try_send`, which is a sync method. If a
 /// plugin's mailbox is full we drop the tick (idempotent — next tick catches up).
 pub fn call_periodic_job_hook(srv: &crate::state::data::Data, timing: &str) {
-    for sender in srv.plugin_registry.senders() {
+    for sender in srv.plugin_registry().senders() {
         let msg = isabelle_plugin_api::actor::PluginHookMessage::PeriodicJob {
             timing: timing.to_string(),
         };

@@ -170,7 +170,6 @@ mod tests {
     use crate::state::state::State;
     use isabelle_dm::data_model::data_object_action::DataObjectAction;
     use isabelle_dm::data_model::item::Item;
-    use std::ops::DerefMut;
 
     /// Drives the dispatcher → demo-plugin → reply roundtrip for a few
     /// hook variants. Validates the actor pipeline is wired end-to-end.
@@ -187,14 +186,15 @@ mod tests {
             let state = State::new();
             let handle = spawn_core_task(state.clone());
 
-            // Register the demo plugin into plugin_registry.
-            // SAFETY: single-threaded test setup before any concurrent
-            // access; same justification as main.rs init.
+            // Build the registry as an owned value, then publish it — the
+            // same shape startup uses, and for the same reason: casting a
+            // shared `&Data` to `&mut Data` is undefined behaviour whether or
+            // not anything else is running at the time.
             let stats = {
-                let s: &Data = &state.server;
-                #[allow(invalid_reference_casting)]
-                let s_mut: &mut Data = unsafe { &mut *(s as *const Data as *mut Data) };
-                register_demo(&mut s_mut.plugin_registry, handle.clone())
+                let mut registry = isabelle_plugin_api::actor::PluginRegistry::new();
+                let stats = register_demo(&mut registry, handle.clone());
+                let _ = state.server.set_plugin_registry(registry);
+                stats
             };
 
             // Fire each hook variant once.
