@@ -90,25 +90,97 @@ pub use isabelle_plugin_api::actor::{CoreHandle, PluginRegistry};
 /// random secret — see `load_or_create_session_key`. It is passed in rather
 /// than derived here because `HttpServer::new`'s factory runs once per worker
 /// and every worker must use the same key.
+///
+/// The session cookie is `SameSite=Lax`, which is what stops cross-site
+/// request forgery here: no endpoint carries a CSRF token, so if the browser
+/// attached this cookie to a cross-site POST, any page an authenticated user
+/// visited could act as them. It used to be `SameSite=None` whenever the
+/// cookie was `Secure` — i.e. in every production deployment — which made a
+/// plain `<form method=post>` on an attacker's page enough to invoke
+/// `/system/update` (running the configured update script server-side) or
+/// `/itm/edit` as a logged-in admin, no JavaScript and no CORS involved.
+///
+/// `Lax` is compatible with how this application is deployed: production
+/// serves the UI and the API from one origin (the API under `/api` behind the
+/// reverse proxy), and local development serves the UI on one port and the
+/// backend on another — a different *origin*, but the same *site*, which is
+/// what `SameSite` is about. A deployment that genuinely splits UI and API
+/// across registrable domains would need real CSRF tokens; loosening this back
+/// to `None` would only restore the hole.
 fn session_middleware(
     _pub_fqdn: String,
     cookie_http_insecure: bool,
     key: Key,
 ) -> SessionMiddleware<CookieSessionStore> {
-    let same_site = if cookie_http_insecure {
-        SameSite::Lax
-    } else {
-        SameSite::None
-    };
     SessionMiddleware::builder(CookieSessionStore::default(), key)
         .session_lifecycle(BrowserSession::default())
-        .cookie_same_site(same_site)
+        .cookie_same_site(SameSite::Lax)
         .cookie_path("/".into())
         .cookie_name(String::from("isabelle-cookie"))
         .cookie_content_security(CookieContentSecurity::Private)
         .cookie_http_only(true)
         .cookie_secure(!cookie_http_insecure)
         .build()
+}
+
+/// Reduce an origin-ish configuration value to the exact form a browser sends
+/// in the `Origin` header: scheme, host and (only when non-default) port, with
+/// no trailing slash and no path.
+///
+/// Operators write `--pub-url` as a URL, sometimes with a trailing slash or a
+/// path, but `Origin` never has either, and the allowlist is compared byte for
+/// byte.
+fn normalize_origin(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let (scheme, rest) = match trimmed.split_once("://") {
+        Some((s, r)) if !s.is_empty() => (s, r),
+        _ => return None,
+    };
+    // Cut off path, query and fragment; keep host[:port].
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.');
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{}://{}", scheme.to_lowercase(), authority))
+}
+
+/// Cross-origin policy.
+///
+/// This used to be `Cors::permissive()`, which reflects any `Origin` back and
+/// sets `Access-Control-Allow-Credentials: true` — the "reflect origin + allow
+/// credentials" combination that lets any page read authenticated responses
+/// from this API. The allowlist is built from `--pub-url` (where the UI is
+/// served from) plus any `--cors-origin` entries.
+///
+/// `block_on_origin_mismatch(false)` is deliberate: an unlisted `Origin` gets
+/// no CORS headers, and the browser refuses the read — enforcement stays where
+/// it belongs. Blocking server-side instead would reject same-origin POSTs
+/// too, because browsers send `Origin` on those as well, so a `--pub-url` that
+/// merely disagreed about a trailing slash would break the whole UI.
+fn cors_middleware(pub_url: &str, extra_origins: &[String]) -> Cors {
+    let mut cors = Cors::default()
+        .allowed_methods(vec!["GET", "POST", "HEAD", "OPTIONS"])
+        .allow_any_header()
+        .supports_credentials()
+        .block_on_origin_mismatch(false)
+        .max_age(3600);
+
+    for raw in std::iter::once(pub_url).chain(extra_origins.iter().map(|s| s.as_str())) {
+        match normalize_origin(raw) {
+            Some(origin) => {
+                info!("CORS: allowing origin {}", origin);
+                cors = cors.allowed_origin(&origin);
+            }
+            None if raw.trim().is_empty() => {}
+            None => log::warn!("CORS: ignoring malformed origin {:?}", raw),
+        }
+    }
+
+    cors
 }
 
 lazy_static! {
@@ -358,7 +430,7 @@ where
         let mut app = App::new()
             .app_data(data.clone())
             .app_data(web::PayloadConfig::new(args.max_payload_bytes))
-            .wrap(Cors::permissive())
+            .wrap(cors_middleware(&args.pub_url, &args.cors_origin))
             .wrap(IdentityMiddleware::default())
             .wrap(session_middleware(
                 args.pub_fqdn.clone(),
@@ -417,4 +489,147 @@ where
     let _ = th.await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `Origin` header carries scheme, host and port — never a path and
+    /// never a trailing slash — so configuration written as a URL has to be
+    /// reduced to that form before it can be compared.
+    #[test]
+    fn origins_are_normalized_to_header_form() {
+        assert_eq!(
+            normalize_origin("https://app.example.com/"),
+            Some("https://app.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_origin("https://app.example.com/ui/index.html"),
+            Some("https://app.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_origin("  http://localhost:8081  "),
+            Some("http://localhost:8081".to_string())
+        );
+        assert_eq!(
+            normalize_origin("HTTPS://app.example.com"),
+            Some("https://app.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_origin("https://app.example.com?a=b"),
+            Some("https://app.example.com".to_string())
+        );
+    }
+
+    /// The dev setup: UI on :8081, backend on :8090. Different origin, so the
+    /// UI's origin must survive normalization intact — including its port.
+    #[test]
+    fn dev_ui_origin_survives() {
+        assert_eq!(
+            normalize_origin("http://localhost:8081"),
+            Some("http://localhost:8081".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_origins_are_dropped() {
+        assert_eq!(normalize_origin(""), None);
+        assert_eq!(normalize_origin("localhost:8081"), None);
+        assert_eq!(normalize_origin("https://"), None);
+        assert_eq!(normalize_origin("://host"), None);
+    }
+
+    // The CORS behaviour below is what the app's availability rides on, so it
+    // is exercised against the real middleware rather than reasoned about.
+
+    type ProbeResponse =
+        actix_web::dev::ServiceResponse<actix_web::body::EitherBody<actix_web::body::BoxBody>>;
+
+    async fn probe(origin: Option<&str>) -> ProbeResponse {
+        let app = actix_web::test::init_service(
+            App::new()
+                .wrap(cors_middleware(
+                    "http://localhost:8081/",
+                    &["https://app.example.com".to_string()],
+                ))
+                .route("/probe", web::post().to(actix_web::HttpResponse::Ok)),
+        )
+        .await;
+
+        let mut req = actix_web::test::TestRequest::post().uri("/probe");
+        if let Some(origin) = origin {
+            req = req.insert_header(("Origin", origin));
+        }
+        actix_web::test::call_service(&app, req.to_request()).await
+    }
+
+    fn allow_origin(res: &ProbeResponse) -> Option<String> {
+        res.headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap().to_string())
+    }
+
+    /// A same-origin request carries no `Origin` at all, or carries the
+    /// deployment's own. Neither may be turned away — this is every request
+    /// the UI makes.
+    #[actix_web::test]
+    async fn same_origin_requests_are_served() {
+        let res = probe(None).await;
+        assert!(res.status().is_success());
+
+        let res = probe(Some("http://localhost:8081")).await;
+        assert!(res.status().is_success());
+        assert_eq!(allow_origin(&res).as_deref(), Some("http://localhost:8081"));
+    }
+
+    #[actix_web::test]
+    async fn configured_extra_origin_is_allowed() {
+        let res = probe(Some("https://app.example.com")).await;
+        assert!(res.status().is_success());
+        assert_eq!(
+            allow_origin(&res).as_deref(),
+            Some("https://app.example.com")
+        );
+    }
+
+    /// The UI fetches with `credentials: "include"`. Without this header the
+    /// browser discards the response, so the cross-origin dev setup (UI on
+    /// :8081, backend on :8090) would stop working entirely.
+    #[actix_web::test]
+    async fn allowed_origins_may_send_credentials() {
+        let res = probe(Some("http://localhost:8081")).await;
+        assert_eq!(
+            res.headers()
+                .get("access-control-allow-credentials")
+                .map(|v| v.to_str().unwrap()),
+            Some("true")
+        );
+    }
+
+    /// An attacker's page gets no `Access-Control-Allow-Origin`, so the
+    /// browser refuses to hand it the response body. The request itself is
+    /// still served: blocking it server-side would also reject same-origin
+    /// POSTs, which browsers stamp with `Origin` too.
+    #[actix_web::test]
+    async fn unknown_origin_gets_no_cors_headers() {
+        let res = probe(Some("https://evil.example.net")).await;
+        assert!(res.status().is_success());
+        assert_eq!(allow_origin(&res), None);
+    }
+
+    /// The old `Cors::permissive()` reflected whatever origin asked. If this
+    /// ever regresses, the credentialed cross-origin read comes back.
+    #[actix_web::test]
+    async fn origins_are_not_reflected_blindly() {
+        for origin in [
+            "https://evil.example.net",
+            "http://localhost:9999",
+            "null",
+            "http://app.example.com",
+        ] {
+            let res = probe(Some(origin)).await;
+            assert_eq!(allow_origin(&res), None, "{} must not be reflected", origin);
+        }
+    }
 }

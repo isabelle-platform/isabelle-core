@@ -73,6 +73,14 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub cookie_http_insecure: bool,
 
+    /// Extra origin allowed to call this API cross-origin, e.g.
+    /// `https://app.example.com`. Repeat for several. The origin derived from
+    /// `--pub-url` is always allowed; same-origin deployments need nothing
+    /// here. Anything not listed gets no CORS headers, so browsers refuse to
+    /// let a page read the response.
+    #[arg(long = "cors-origin")]
+    pub cors_origin: Vec<String>,
+
     /// Path to update script invoked by POST /system/update
     #[arg(long, default_value(""))]
     pub update_script: String,
