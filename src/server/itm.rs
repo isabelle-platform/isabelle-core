@@ -22,6 +22,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 use crate::handler::route_call::*;
+use crate::server::list_filter::{field_is_allowed, validate_client_filter};
 use crate::server::user_control::*;
 use crate::state::state::*;
 use crate::state::store::Store;
@@ -278,6 +279,20 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
 
     if !srv.has_collection(&lq.collection) {
         error!("Collection {} doesn't exist", lq.collection);
+        return HttpResponse::BadRequest().into();
+    }
+
+    // The caller's filter and sort key both reach Mongo, and both leak through
+    // `total_count`, which is counted on the raw query before any list filter
+    // hook redacts the items it returns. Constrain them to what the UI builds;
+    // see `crate::server::list_filter`. Plugin-supplied filters, added below,
+    // are server-side code and stay unrestricted.
+    if let Err(reason) = validate_client_filter(&lq.filter) {
+        error!("Rejected list filter on {}: {}", lq.collection, reason);
+        return HttpResponse::BadRequest().into();
+    }
+    if !lq.sort_key.is_empty() && !field_is_allowed(&lq.sort_key) {
+        error!("Rejected sort key {} on {}", lq.sort_key, lq.collection);
         return HttpResponse::BadRequest().into();
     }
 
