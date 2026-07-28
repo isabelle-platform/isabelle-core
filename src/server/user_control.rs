@@ -161,20 +161,49 @@ pub async fn get_user(srv: &crate::state::data::Data, login: String) -> Option<I
     }
 }
 
-/// Check user role
+/// Whether `user` currently holds `role`.
+///
+/// Deactivating an account has to revoke what it can already do, not just stop
+/// it logging in again. This check used to read the role flag alone, so a
+/// deactivated admin holding a live session cookie kept full access to
+/// `/secret/*` (unmasked credential values), `/setting/*` and `/system/update`
+/// — the only handlers guarded by it — until the cookie expired on its own.
+/// With `CookieSessionStore` there is nothing server-side to expire or delete,
+/// so short of rotating the signing key and logging everybody out, there was
+/// no way to take that access away.
+///
+/// Requiring `role_is_active` here turns deactivation into a real revocation
+/// lever: every request re-reads the user record, so clearing the flag takes
+/// effect immediately, across every session and device.
+///
+/// This cannot lock out anyone who is able to log in: `login` already refuses
+/// accounts whose `role_is_active` is not true, so any session that exists
+/// passed that same check when it was created.
+///
+/// `role_is_active` is spelled out rather than composed from
+/// `user_role_prefix`, matching how `login` and the plugin-side authorization
+/// hooks name it — the prefix applies to the role being asked about, not to
+/// the active flag.
+fn role_is_granted(user: &Item, role_prefix: &str, role: &str) -> bool {
+    if !user.safe_bool("role_is_active", false) {
+        return false;
+    }
+    user.safe_bool(&(role_prefix.to_owned() + role), false)
+}
+
+/// Check user role. See [`role_is_granted`] for why an inactive account holds
+/// no roles at all.
 pub async fn check_role(srv: &crate::state::data::Data, user: &Option<Item>, role: &str) -> bool {
+    let user = match user {
+        Some(u) => u,
+        None => return false,
+    };
     let role_is = srv
         .rw
         .get_internals()
         .await
         .safe_str("user_role_prefix", "role_is_");
-    if user.is_none() {
-        return false;
-    }
-    return user
-        .as_ref()
-        .unwrap()
-        .safe_bool(&(role_is.to_owned() + role), false);
+    role_is_granted(user, &role_is, role)
 }
 
 /// Record a failed OTP attempt so that a code can be brute-forced only a
@@ -341,6 +370,58 @@ mod tests {
             10_000 + OTP_RESEND_INTERVAL_SECS - 1
         ));
         assert!(otp_may_be_issued(&itm, 10_000 + OTP_RESEND_INTERVAL_SECS));
+    }
+
+    fn admin(active: bool) -> Item {
+        let mut itm = Item::new();
+        itm.id = 1;
+        itm.set_bool("role_is_admin", true);
+        itm.set_bool("role_is_active", active);
+        itm
+    }
+
+    #[test]
+    fn active_admin_holds_the_admin_role() {
+        assert!(role_is_granted(&admin(true), "role_is_", "admin"));
+    }
+
+    /// The revocation lever: clearing `role_is_active` has to take the role
+    /// away from a session that already exists, not merely block the next
+    /// login. `/secret/*`, `/setting/*` and `/system/update` are guarded by
+    /// this check and nothing else.
+    #[test]
+    fn deactivated_admin_holds_no_roles() {
+        assert!(!role_is_granted(&admin(false), "role_is_", "admin"));
+    }
+
+    /// A record with no `role_is_active` at all is inactive. Such a user
+    /// cannot log in either, so no live session can be affected.
+    #[test]
+    fn missing_active_flag_grants_nothing() {
+        let mut itm = Item::new();
+        itm.set_bool("role_is_admin", true);
+        assert!(!role_is_granted(&itm, "role_is_", "admin"));
+    }
+
+    /// Being active is not itself a role — it is a precondition for holding
+    /// one.
+    #[test]
+    fn active_alone_grants_no_role() {
+        let mut itm = Item::new();
+        itm.set_bool("role_is_active", true);
+        assert!(!role_is_granted(&itm, "role_is_", "admin"));
+    }
+
+    /// The prefix applies to the role being asked about; the active flag keeps
+    /// its fixed name, as `login` and the authz hooks spell it.
+    #[test]
+    fn role_prefix_is_configurable_but_active_is_not() {
+        let mut itm = Item::new();
+        itm.set_bool("role_is_active", true);
+        itm.set_bool("perm_admin", true);
+        assert!(role_is_granted(&itm, "perm_", "admin"));
+        itm.set_bool("role_is_active", false);
+        assert!(!role_is_granted(&itm, "perm_", "admin"));
     }
 
     #[test]
