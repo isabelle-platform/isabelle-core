@@ -222,3 +222,129 @@ impl BsonItem {
         Item::from(self.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mongodb::bson::doc;
+
+    /// BSON has no unsigned 64-bit integer, which is the entire reason this
+    /// module exists. The values that must survive the detour through
+    /// `Decimal128` include `u64::MAX` — `Item::new()` uses it as the "no id
+    /// assigned yet" sentinel, and `set_item` keys its insert-vs-replace
+    /// decision on it, so losing it would silently turn every new item into a
+    /// write against id 0.
+    #[test]
+    fn u64_survives_the_decimal128_round_trip() {
+        for value in [
+            0u64,
+            1,
+            42,
+            i32::MAX as u64,
+            i64::MAX as u64,
+            i64::MAX as u64 + 1,
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
+            let back = decimal128_to_u64(u64_to_decimal128(value));
+            assert_eq!(back, value, "{} did not survive the round trip", value);
+        }
+    }
+
+    /// Decimal128 must render these as plain digits. If it ever switched to
+    /// exponent notation, `parse::<u64>()` in `decimal128_to_u64` would fail
+    /// and silently yield 0.
+    #[test]
+    fn large_values_are_not_rendered_in_exponent_notation() {
+        for value in [u64::MAX, u64::MAX - 1, 1_000_000_000_000_000_000] {
+            let rendered = u64_to_decimal128(value).to_string();
+            assert!(
+                !rendered.contains('E') && !rendered.contains('e'),
+                "{} rendered as {}, which would parse back as 0",
+                value,
+                rendered
+            );
+            assert_eq!(rendered, value.to_string());
+        }
+    }
+
+    fn sample_item() -> Item {
+        let mut item = Item::new();
+        item.id = u64::MAX - 3;
+        item.set_str("name", "example");
+        item.set_bool("role_is_active", true);
+        item.set_u64("time", 1_700_000_000);
+        item.set_id("workspace", u64::MAX);
+        item.set_strid("members", &vec![1, u64::MAX, 0]);
+        let mut nested = HashMap::new();
+        nested.insert("k".to_string(), "v".to_string());
+        item.set_strstr("meta", &nested);
+        item
+    }
+
+    /// Every typed map has to come back intact, ids included. This is the
+    /// conversion every read and every write goes through.
+    #[test]
+    fn item_survives_the_bson_document_round_trip() {
+        let original = sample_item();
+        let doc = mongodb::bson::to_document(&BsonItem::from_item(&original)).unwrap();
+        let decoded: BsonItem = mongodb::bson::from_document(doc).unwrap();
+        let result = decoded.to_item();
+
+        assert_eq!(result.id, original.id);
+        assert_eq!(result.strs, original.strs);
+        assert_eq!(result.bools, original.bools);
+        assert_eq!(result.u64s, original.u64s);
+        assert_eq!(result.ids, original.ids);
+        assert_eq!(result.strids, original.strids);
+        assert_eq!(result.strstrs, original.strstrs);
+    }
+
+    /// Backward compatibility is the other half of this module's job:
+    /// documents written before the Decimal128 change store ids as Int64 or
+    /// Int32, and those must still load.
+    #[test]
+    fn ids_stored_as_int64_or_int32_still_load() {
+        let legacy = doc! {
+            "id": 7i64,
+            "strs": {},
+            "bools": {},
+            "u64s": { "time": 1700i64, "small": 5i32 },
+            "ids": { "workspace": 3i32 },
+            "strids": { "members": [1i64, 2i32] },
+        };
+        let decoded: BsonItem = mongodb::bson::from_document(legacy).unwrap();
+        assert_eq!(decoded.id, 7);
+        assert_eq!(decoded.u64s.get("time"), Some(&1700));
+        assert_eq!(decoded.u64s.get("small"), Some(&5));
+        assert_eq!(decoded.ids.get("workspace"), Some(&3));
+        assert_eq!(decoded.strids.get("members"), Some(&vec![1, 2]));
+    }
+
+    /// A missing typed map means an empty one, not a failure to load: items
+    /// are written sparsely and most documents lack most of these.
+    #[test]
+    fn absent_maps_default_to_empty() {
+        let sparse = doc! { "id": 1i64 };
+        let decoded: BsonItem = mongodb::bson::from_document(sparse).unwrap();
+        assert_eq!(decoded.id, 1);
+        assert!(decoded.strs.is_empty());
+        assert!(decoded.u64s.is_empty());
+        assert!(decoded.ids.is_empty());
+        assert!(decoded.strids.is_empty());
+        assert!(decoded.strstrs.is_empty());
+        assert!(decoded.bools.is_empty());
+    }
+
+    /// Documented deliberately, because it is a sharp edge rather than a
+    /// nicety: a numeric field holding an unexpected BSON type decodes to 0
+    /// instead of erroring. For `id` that silently aliases a record onto id 0
+    /// rather than refusing to load it.
+    #[test]
+    fn unexpected_numeric_types_decode_to_zero_rather_than_failing() {
+        let odd = doc! { "id": "not a number", "u64s": { "time": true } };
+        let decoded: BsonItem = mongodb::bson::from_document(odd).unwrap();
+        assert_eq!(decoded.id, 0);
+        assert_eq!(decoded.u64s.get("time"), Some(&0));
+    }
+}
