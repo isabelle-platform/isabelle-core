@@ -349,6 +349,34 @@ impl Store for StoreLocal {
         let s = serde_json::to_string(&itm);
         std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
     }
+
+    fn has_collection(&self, collection: &str) -> bool {
+        self.collections.contains_key(collection)
+    }
+
+    /// No index and no query language here, so this is a scan: read the
+    /// collection and match in Rust. That is the same cost the caller used to
+    /// pay inline, and the reason this backend is documented as sample/test
+    /// only — `StoreMongo` answers the same question from an index.
+    ///
+    /// Matching is case-insensitive on both `login` and `email`, which is how
+    /// people actually type their own address.
+    async fn find_user(&self, login: &str) -> Option<Item> {
+        let wanted = login.to_lowercase();
+        let users = self.get_all_items("user", "", "").await;
+        for item in users.map.values() {
+            let matches = |field: &str| {
+                item.strs
+                    .get(field)
+                    .map(|v| v.to_lowercase() == wanted)
+                    .unwrap_or(false)
+            };
+            if matches("login") || matches("email") {
+                return Some(item.clone());
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]

@@ -266,7 +266,7 @@ where
     #[cfg(not(feature = "full_file_database"))]
     {
         data.file_rw.connect(&args.data_path, "").await;
-        data.rw.database_name = args.db_name.clone();
+        data.rw.set_database_name(&args.db_name);
         data.rw.connect(&args.db_url, &args.data_path).await;
 
         // First-run autodetect: seed from the file-backed store when the
@@ -289,7 +289,7 @@ where
         }
         if !has_data {
             info!("Flow: empty database detected, seeding from file store");
-            merge_database(&mut data.file_rw, &mut data.rw).await;
+            merge_database(&mut data.file_rw, &mut *data.rw).await;
             info!("Flow: seeding complete");
         }
     }
@@ -561,6 +561,110 @@ mod tests {
         assert_eq!(normalize_origin("localhost:8081"), None);
         assert_eq!(normalize_origin("https://"), None);
         assert_eq!(normalize_origin("://host"), None);
+    }
+
+    // The session cookie's attributes are the CSRF defence — there is no
+    // token anywhere — so they are asserted against the real middleware
+    // rather than left to a doc comment. Flipping `SameSite` back to `None`
+    // must fail a test, not merely contradict a paragraph.
+
+    /// Drive a request through `session_middleware` that writes to the
+    /// session, and return the `Set-Cookie` header it emits.
+    async fn set_cookie_header(cookie_http_insecure: bool) -> String {
+        async fn touch(session: actix_session::Session) -> actix_web::HttpResponse {
+            // The cookie is only emitted once the session is non-empty.
+            session.insert("probe", "1").unwrap();
+            actix_web::HttpResponse::Ok().finish()
+        }
+
+        let app = actix_web::test::init_service(
+            App::new()
+                .wrap(session_middleware(
+                    "localhost".to_string(),
+                    cookie_http_insecure,
+                    Key::from(&[0u8; 64]),
+                ))
+                .route("/touch", web::get().to(touch)),
+        )
+        .await;
+
+        let res = actix_web::test::call_service(
+            &app,
+            actix_web::test::TestRequest::get()
+                .uri("/touch")
+                .to_request(),
+        )
+        .await;
+
+        res.headers()
+            .get("set-cookie")
+            .expect("session middleware emitted no Set-Cookie")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// `SameSite=Lax` is what stops a cross-site POST from carrying the
+    /// session. With `None` — the previous value in every production
+    /// deployment — a form on any page could invoke `/system/update` or
+    /// `/itm/edit` as a logged-in admin.
+    #[actix_web::test]
+    async fn session_cookie_is_same_site_lax() {
+        let header = set_cookie_header(false).await;
+        assert!(
+            header.contains("SameSite=Lax"),
+            "expected SameSite=Lax, got: {}",
+            header
+        );
+        assert!(
+            !header.contains("SameSite=None"),
+            "SameSite=None re-opens cross-site request forgery: {}",
+            header
+        );
+    }
+
+    /// `HttpOnly` keeps the cookie away from JavaScript, so an XSS bug cannot
+    /// be escalated into session theft.
+    #[actix_web::test]
+    async fn session_cookie_is_http_only() {
+        let header = set_cookie_header(false).await;
+        assert!(header.contains("HttpOnly"), "got: {}", header);
+    }
+
+    /// `Secure` is tied to the deployment flag: set by default, dropped only
+    /// when the operator explicitly asks for plain HTTP.
+    #[actix_web::test]
+    async fn session_cookie_is_secure_unless_explicitly_disabled() {
+        let secure = set_cookie_header(false).await;
+        assert!(secure.contains("Secure"), "got: {}", secure);
+
+        let insecure = set_cookie_header(true).await;
+        assert!(
+            !insecure.contains("Secure"),
+            "--cookie-http-insecure must drop Secure, got: {}",
+            insecure
+        );
+        // Relaxing transport security must not silently relax CSRF too.
+        assert!(insecure.contains("SameSite=Lax"), "got: {}", insecure);
+    }
+
+    /// Name and path are part of the contract with the frontend; the cookie
+    /// has to be sent for every route, not just the one that set it.
+    #[actix_web::test]
+    async fn session_cookie_keeps_its_name_and_scope() {
+        let header = set_cookie_header(false).await;
+        assert!(header.starts_with("isabelle-cookie="), "got: {}", header);
+        assert!(header.contains("Path=/"), "got: {}", header);
+    }
+
+    /// A browser session cookie carries no expiry — closing the browser ends
+    /// it. `Max-Age`/`Expires` would turn it into a persistent credential on
+    /// disk.
+    #[actix_web::test]
+    async fn session_cookie_is_not_persistent() {
+        let header = set_cookie_header(false).await;
+        assert!(!header.contains("Max-Age"), "got: {}", header);
+        assert!(!header.contains("Expires"), "got: {}", header);
     }
 
     // The CORS behaviour below is what the app's availability rides on, so it

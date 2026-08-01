@@ -89,4 +89,23 @@ pub trait Store {
 
     /// Write settings item
     async fn set_settings(&self, itm: Item);
+
+    /// Whether the store knows this collection.
+    ///
+    /// Collections are declared in `internals.js` and registered at connect
+    /// time; anything else must be refused rather than created on demand.
+    fn has_collection(&self, collection: &str) -> bool;
+
+    /// Look a user up by login *or* email.
+    ///
+    /// On the trait rather than on the concrete store because it is the one
+    /// lookup on the authenticated request path — every handler resolves the
+    /// session principal through it — and backends can serve it far better
+    /// than a generic filtered listing (the Mongo store answers from an
+    /// indexed `find_one` behind a short-lived cache).
+    async fn find_user(&self, login: &str) -> Option<Item>;
+
+    /// Name the database to connect to. Meaningful only for backends that
+    /// have one; the file-backed store ignores it.
+    fn set_database_name(&mut self, _name: &str) {}
 }

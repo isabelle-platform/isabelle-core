@@ -41,11 +41,15 @@ pub struct Data {
     #[cfg(not(feature = "full_file_database"))]
     pub file_rw: StoreLocal,
 
-    /// Read database access struct.
-    #[cfg(feature = "full_file_database")]
-    pub rw: StoreLocal,
-    #[cfg(not(feature = "full_file_database"))]
-    pub rw: StoreMongo,
+    /// Read/write database access.
+    ///
+    /// A trait object rather than the concrete backend: the choice between
+    /// Mongo and the file store is a build-time detail, and holding it behind
+    /// `Store` is what lets a test substitute an in-memory implementation and
+    /// exercise the HTTP handlers at all. Everything the handlers need is on
+    /// the trait — including `find_user` and `has_collection`, which used to
+    /// be reached by poking at the concrete type's fields.
+    pub rw: Box<dyn Store + Send + Sync>,
 
     // The fields below are set once in `main()` startup and never mutated
     // again. They live behind `Mutex` only because the outer lock has been
@@ -104,9 +108,9 @@ pub struct Data {
 impl Data {
     pub fn new() -> Self {
         #[cfg(feature = "full_file_database")]
-        let rw = StoreLocal::new();
+        let rw: Box<dyn Store + Send + Sync> = Box::new(StoreLocal::new());
         #[cfg(not(feature = "full_file_database"))]
-        let rw = StoreMongo::new();
+        let rw: Box<dyn Store + Send + Sync> = Box::new(StoreMongo::new());
         Self {
             #[cfg(not(feature = "full_file_database"))]
             file_rw: StoreLocal::new(),
@@ -178,7 +182,7 @@ impl Data {
 
     /// Check existence of collection
     pub fn has_collection(&self, collection: &str) -> bool {
-        return self.rw.collections.contains_key(collection);
+        self.rw.has_collection(collection)
     }
 
     /// Early initialization

@@ -147,7 +147,7 @@ impl StoreMongo {
     /// in `set_item`/`del_item` for the `user` collection, including
     /// writes that come through the plugin API (which also funnel through
     /// these methods).
-    pub async fn find_user(&self, login: &str) -> Option<Item> {
+    async fn find_user_cached(&self, login: &str) -> Option<Item> {
         {
             let cache = self.user_cache.lock();
             if let Some((item, expires)) = cache.get(login) {
@@ -702,6 +702,18 @@ impl Store for StoreMongo {
         let tmp_data_path = self.local_path.clone() + "/settings.js";
         let s = serde_json::to_string(&itm);
         std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
+    }
+
+    fn has_collection(&self, collection: &str) -> bool {
+        self.collections.contains_key(collection)
+    }
+
+    async fn find_user(&self, login: &str) -> Option<Item> {
+        self.find_user_cached(login).await
+    }
+
+    fn set_database_name(&mut self, name: &str) {
+        self.database_name = name.to_string();
     }
 }
 
