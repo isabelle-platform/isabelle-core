@@ -336,3 +336,232 @@ mod tests {
         assert!(validate_client_filter(&filter).is_err());
     }
 }
+
+/// Property-based coverage for the filter validator.
+///
+/// The example-based tests above check the attacks I thought of, which is
+/// exactly their limitation: they cannot fail on a shape that never occurred
+/// to me. These generate filters from a grammar that deliberately mixes safe
+/// and hostile field names and operators, then assert the invariant the
+/// validator exists to hold — stated independently, by walking the parsed
+/// tree, rather than by calling the validator again.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+    use serde_json::{json, Value};
+
+    /// Field names a filter might carry: paths the UI really sends, paths
+    /// that would leak a credential, and paths that are malformed outright.
+    /// Field names a filter might carry: paths the UI really sends, paths
+    /// that would leak a credential, and paths that are malformed outright.
+    ///
+    /// Weighted toward acceptable names on purpose. The property below is an
+    /// implication — *if* the validator accepts, *then* the filter is
+    /// harmless — and an implication whose premise is rarely true passes
+    /// without testing anything. `generator_is_not_vacuous` keeps this honest.
+    fn field_name() -> impl Strategy<Value = String> {
+        prop_oneof![
+            6 => Just("ids.user".to_string()),
+            6 => Just("ids.workspace".to_string()),
+            6 => Just("u64s.time".to_string()),
+            6 => Just("strs.name".to_string()),
+            3 => Just("bools.ssh_keyless".to_string()),
+            3 => Just("strs.engine_key_status".to_string()),
+            2 => Just("strs.password".to_string()),
+            1 => Just("strs.PassWord".to_string()),
+            1 => Just("strs.salt".to_string()),
+            2 => Just("strs.otp".to_string()),
+            1 => Just("strs.deploy_password".to_string()),
+            1 => Just("strs.ai_claude_api_key".to_string()),
+            1 => Just("strs.delta_token".to_string()),
+            1 => Just("$where".to_string()),
+            1 => Just("strs..name".to_string()),
+            1 => Just("".to_string()),
+        ]
+    }
+
+    fn scalar() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            any::<i32>().prop_map(|n| json!(n)),
+            any::<bool>().prop_map(|b| json!(b)),
+            "[a-z]{0,6}".prop_map(Value::String),
+            Just(Value::Null),
+        ]
+    }
+
+    /// Comparison operators, mixing the permitted ones with the evaluating
+    /// ones the validator must refuse.
+    /// Comparison operators, mixing the permitted ones with the evaluating
+    /// ones the validator must refuse.
+    fn leaf_op() -> impl Strategy<Value = String> {
+        prop_oneof![
+            4 => Just("$eq".to_string()),
+            4 => Just("$ne".to_string()),
+            4 => Just("$gt".to_string()),
+            4 => Just("$gte".to_string()),
+            4 => Just("$lt".to_string()),
+            4 => Just("$lte".to_string()),
+            2 => Just("$regex".to_string()),
+            2 => Just("$where".to_string()),
+            2 => Just("$in".to_string()),
+            2 => Just("$exists".to_string()),
+            2 => Just("$expr".to_string()),
+        ]
+    }
+
+    fn leaf_value() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            5 => scalar(),
+            5 => (leaf_op(), scalar()).prop_map(|(op, v)| json!({ op: v })),
+            // Arrays are never a valid leaf, but a generator that never
+            // produces them cannot show that.
+            1 => proptest::collection::vec(scalar(), 1..3).prop_map(Value::Array),
+        ]
+    }
+
+    /// A filter tree: leaves, and combinators over them. Includes `$nor`,
+    /// which is structurally harmless but outside the allowlist.
+    fn filter_json() -> impl Strategy<Value = Value> {
+        let leaf = (field_name(), leaf_value()).prop_map(|(f, v)| json!({ f: v }));
+        leaf.prop_recursive(4, 24, 3, |inner| {
+            prop_oneof![(
+                prop_oneof![
+                    4 => Just("$and".to_string()),
+                    4 => Just("$or".to_string()),
+                    1 => Just("$nor".to_string())
+                ],
+                proptest::collection::vec(inner, 1..3)
+            )
+                .prop_map(|(op, branches)| json!({ op: branches })),]
+        })
+    }
+
+    /// Independent restatement of the field rule: does any field path
+    /// anywhere in this tree name a credential?
+    fn mentions_credential(node: &Value) -> bool {
+        const MARKERS: [&str; 9] = [
+            "password",
+            "passwd",
+            "secret",
+            "token",
+            "salt",
+            "otp",
+            "api_key",
+            "apikey",
+            "credential",
+        ];
+        match node {
+            Value::Object(map) => map.iter().any(|(k, v)| {
+                let named = !k.starts_with('$')
+                    && k.to_lowercase()
+                        .split('.')
+                        .any(|seg| MARKERS.iter().any(|m| seg.contains(m)));
+                named || mentions_credential(v)
+            }),
+            Value::Array(items) => items.iter().any(mentions_credential),
+            _ => false,
+        }
+    }
+
+    /// Independent restatement of the shape rule: does any `$`-prefixed key
+    /// fall outside what the validator permits?
+    fn uses_forbidden_operator(node: &Value) -> bool {
+        const OK: [&str; 8] = ["$and", "$or", "$eq", "$ne", "$gt", "$gte", "$lt", "$lte"];
+        match node {
+            Value::Object(map) => map.iter().any(|(k, v)| {
+                (k.starts_with('$') && !OK.contains(&k.as_str())) || uses_forbidden_operator(v)
+            }),
+            Value::Array(items) => items.iter().any(uses_forbidden_operator),
+            _ => false,
+        }
+    }
+
+    /// Guard against a vacuous property.
+    ///
+    /// `accepted_filters_are_harmless` only tests anything on inputs the
+    /// validator accepts. If the generator drifted — or the validator grew
+    /// strict enough to reject nearly everything — that property would keep
+    /// passing while checking nothing at all. This asserts the premise is
+    /// actually met often enough for the implication to have content, and it
+    /// is the reason the mutation "allow $regex" is caught rather than missed.
+    #[test]
+    fn generator_is_not_vacuous() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        let mut runner = TestRunner::deterministic();
+        let strategy = filter_json();
+        let (mut accepted, mut with_operator) = (0, 0);
+        const SAMPLES: usize = 400;
+
+        for _ in 0..SAMPLES {
+            let value = strategy.new_tree(&mut runner).unwrap().current();
+            if validate_client_filter(&value.to_string()).is_ok() {
+                accepted += 1;
+                if value.to_string().contains('$') {
+                    with_operator += 1;
+                }
+            }
+        }
+
+        assert!(
+            accepted * 5 >= SAMPLES,
+            "only {}/{} generated filters were accepted — the property is \
+             nearly vacuous",
+            accepted,
+            SAMPLES
+        );
+        assert!(
+            with_operator > 0,
+            "no accepted filter used an operator, so operator handling is \
+             never exercised"
+        );
+    }
+
+    proptest! {
+        /// The whole point of the validator: nothing it accepts may reach a
+        /// credential field or an operator that can evaluate or pattern-match.
+        #[test]
+        fn accepted_filters_are_harmless(v in filter_json()) {
+            let filter = v.to_string();
+            if validate_client_filter(&filter).is_ok() {
+                prop_assert!(
+                    !mentions_credential(&v),
+                    "accepted a filter naming a credential: {}", filter
+                );
+                prop_assert!(
+                    !uses_forbidden_operator(&v),
+                    "accepted a filter using a forbidden operator: {}", filter
+                );
+            }
+        }
+
+        /// Validation must be a decision, never a panic — the input is a
+        /// query-string parameter from an unauthenticated-adjacent caller.
+        #[test]
+        fn validation_never_panics(s in ".*") {
+            let _ = validate_client_filter(&s);
+        }
+
+        #[test]
+        fn field_check_never_panics(s in ".*") {
+            let _ = field_is_allowed(&s);
+        }
+
+        /// Whatever `field_is_allowed` lets through must satisfy every part
+        /// of the rule, stated here independently.
+        #[test]
+        fn allowed_fields_satisfy_the_rule(s in "[a-zA-Z_.$]{0,24}") {
+            if field_is_allowed(&s) {
+                prop_assert!(!s.is_empty());
+                prop_assert!(!s.contains('$'));
+                prop_assert!(!s.split('.').any(|seg| seg.is_empty()));
+                prop_assert!(!s.to_lowercase().contains("password"));
+                prop_assert!(!s.to_lowercase().contains("otp"));
+                prop_assert!(!s.to_lowercase().contains("salt"));
+                prop_assert!(!s.to_lowercase().contains("token"));
+            }
+        }
+    }
+}
