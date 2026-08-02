@@ -23,10 +23,12 @@
  */
 use crate::server::user_control::*;
 use crate::state::state::*;
+use crate::util::multipart::{read_json_body, Limits};
 use actix_identity::Identity;
 use actix_web::{web, HttpRequest, HttpResponse};
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::process_result::ProcessResult;
+use log::error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -43,7 +45,7 @@ struct SecretRef {
 
 async fn ensure_admin(data: &web::Data<State>, user: &Identity) -> Result<(), HttpResponse> {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(user)).await;
     if !check_role(srv, &usr, "admin").await {
         return Err(HttpResponse::Forbidden().into());
     }
@@ -85,15 +87,35 @@ fn proc_ok() -> HttpResponse {
     )
 }
 
+/// Read this request's JSON body under the deployment's size and time limits.
+///
+/// These endpoints used the `web::Json<T>` extractor, which honours the
+/// configured maximum size but has no deadline — so a trickled body held the
+/// connection open indefinitely, the same defect the multipart handlers had.
+async fn body_json<T: serde::de::DeserializeOwned>(
+    data: &web::Data<State>,
+    payload: &mut web::Payload,
+) -> Result<T, HttpResponse> {
+    let limits = Limits::from_data(&data.server);
+    read_json_body::<T>(payload, limits).await.map_err(|e| {
+        error!("Could not read the secret request body: {}", e);
+        HttpResponse::build(e.status()).finish()
+    })
+}
+
 pub async fn secret_edit(
     user: Identity,
     data: web::Data<State>,
     _req: HttpRequest,
-    body: web::Json<Item>,
+    mut payload: web::Payload,
 ) -> HttpResponse {
     if let Err(r) = ensure_admin(&data, &user).await {
         return r;
     }
+    let body: Item = match body_json(&data, &mut payload).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let srv: &crate::state::data::Data = &data.server;
     let mut secrets = srv.secrets.lock();
     let store = match secrets.as_mut() {
@@ -114,11 +136,15 @@ pub async fn secret_get(
     user: Identity,
     data: web::Data<State>,
     _req: HttpRequest,
-    body: web::Json<SecretIdReq>,
+    mut payload: web::Payload,
 ) -> HttpResponse {
     if let Err(r) = ensure_admin(&data, &user).await {
         return r;
     }
+    let body: SecretIdReq = match body_json(&data, &mut payload).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let srv: &crate::state::data::Data = &data.server;
     let secrets = srv.secrets.lock();
     let store = match secrets.as_ref() {
@@ -135,11 +161,15 @@ pub async fn secret_del(
     user: Identity,
     data: web::Data<State>,
     _req: HttpRequest,
-    body: web::Json<SecretIdReq>,
+    mut payload: web::Payload,
 ) -> HttpResponse {
     if let Err(r) = ensure_admin(&data, &user).await {
         return r;
     }
+    let body: SecretIdReq = match body_json(&data, &mut payload).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let srv: &crate::state::data::Data = &data.server;
     let mut secrets = srv.secrets.lock();
     let store = match secrets.as_mut() {

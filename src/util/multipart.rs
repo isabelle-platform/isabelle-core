@@ -142,6 +142,37 @@ where
     }
 }
 
+/// Read a whole request body under `limits` and parse it as JSON.
+///
+/// The `web::Json<T>` extractor honours `PayloadConfig`'s size limit but has
+/// no deadline of its own, so a JSON endpoint could be held open by a trickle
+/// exactly the way the multipart ones were. This is the same bounded read,
+/// spelled for a body that is one document rather than a set of fields.
+pub async fn read_json_body<T: serde::de::DeserializeOwned>(
+    payload: &mut actix_web::web::Payload,
+    limits: Limits,
+) -> Result<T, ReadError> {
+    use futures_util::StreamExt;
+
+    let body = with_deadline(limits, async {
+        let mut body = actix_web::web::BytesMut::new();
+        while let Some(chunk) = payload.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => return Err(ReadError::Malformed(e.to_string())),
+            };
+            if body.len() + chunk.len() > limits.max_bytes {
+                return Err(ReadError::TooLarge(body.len() + chunk.len()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    })
+    .await?;
+
+    serde_json::from_slice(&body).map_err(|e| ReadError::Malformed(e.to_string()))
+}
+
 /// Convenience for the common case: one named field, as UTF-8.
 pub fn field_str(fields: &HashMap<String, Vec<u8>>, name: &str) -> String {
     fields
