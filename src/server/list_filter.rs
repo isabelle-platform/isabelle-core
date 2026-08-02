@@ -53,6 +53,7 @@
 //! field the attacker must already be able to name is a far cry from `$regex`
 //! over anything.
 
+use isabelle_dm::data_model::item::Item;
 use serde_json::Value;
 
 /// Boolean combinators a client filter may use. Both take an array of
@@ -85,6 +86,38 @@ const CREDENTIAL_MARKERS: [&str; 9] = [
 /// Nesting limit for combinators. The UI builds a single `$and` of leaves;
 /// anything deeper is a caller doing something the UI never does.
 const MAX_DEPTH: usize = 4;
+
+/// Whether a field name names a credential, by the same rule the filter guard
+/// uses to decide what a client may not filter on.
+///
+/// A name a client is not allowed to *ask about* is a name it should not be
+/// *handed* either, so both live off `CREDENTIAL_MARKERS` and cannot drift.
+fn is_credential_field(name: &str) -> bool {
+    let lowered = name.to_lowercase();
+    CREDENTIAL_MARKERS.iter().any(|m| lowered.contains(m))
+}
+
+/// Remove every credential-bearing field from an item, across all its typed
+/// maps.
+///
+/// `/itm/list` serves the `user` collection like any other, so an ordinary
+/// logged-in account could read every account in full: `strs.password` (the
+/// Argon2 hash — offline cracking material for everyone), `strs.otp` (a live
+/// second credential while it lasts), `otp_expires_at`, every role flag.
+/// Redaction was left to `itm_list_filter_hook`, which is to say to a plugin
+/// a stock deployment does not have.
+///
+/// Removing rather than masking is safe here because the caller this runs for
+/// is neither the record's owner nor an admin, so it has no write path that
+/// could round-trip the item back and blank the real value.
+pub fn redact_credentials(itm: &mut Item) {
+    itm.strs.retain(|k, _| !is_credential_field(k));
+    itm.strstrs.retain(|k, _| !is_credential_field(k));
+    itm.strids.retain(|k, _| !is_credential_field(k));
+    itm.bools.retain(|k, _| !is_credential_field(k));
+    itm.u64s.retain(|k, _| !is_credential_field(k));
+    itm.ids.retain(|k, _| !is_credential_field(k));
+}
 
 /// Whether a client may name this field in a filter or as a sort key.
 ///
@@ -195,6 +228,106 @@ fn is_scalar(value: &Value) -> bool {
         value,
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
     )
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    /// A user record as the database holds it: the hash, a live one-time
+    /// code and its bookkeeping, alongside the fields a listing legitimately
+    /// shows.
+    fn stored_user() -> Item {
+        let mut itm = Item::new();
+        itm.id = 7;
+        itm.set_str("login", "alice");
+        itm.set_str("email", "alice@example.org");
+        itm.set_str("password", "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA");
+        itm.set_str("otp", "123456789");
+        itm.set_str("salt", "c2FsdA");
+        itm.set_str("api_key", "ak_live_1");
+        itm.set_u64("otp_expires_at", 1_800_000_000);
+        itm.set_u64("otp_attempts", 0);
+        itm.set_bool("role_is_admin", true);
+        itm.set_bool("role_is_active", true);
+        itm
+    }
+
+    /// Everything an attacker wanted out of `GET /itm/list?collection=user`:
+    /// offline cracking material for every account, and a live second
+    /// credential for any account with an outstanding code.
+    #[test]
+    fn credentials_do_not_survive_redaction() {
+        let mut itm = stored_user();
+        redact_credentials(&mut itm);
+        for gone in ["password", "otp", "salt", "api_key"] {
+            assert!(
+                !itm.strs.contains_key(gone),
+                "strs.{} was still served",
+                gone
+            );
+        }
+        // The OTP bookkeeping is part of the code's state and goes with it.
+        assert!(!itm.u64s.contains_key("otp_expires_at"));
+        assert!(!itm.u64s.contains_key("otp_attempts"));
+    }
+
+    /// Redaction has to leave a usable record behind — a listing that shows
+    /// no name is not a listing.
+    #[test]
+    fn ordinary_fields_survive_redaction() {
+        let mut itm = stored_user();
+        redact_credentials(&mut itm);
+        assert_eq!(itm.id, 7);
+        assert_eq!(itm.safe_str("login", ""), "alice");
+        assert_eq!(itm.safe_str("email", ""), "alice@example.org");
+        assert!(itm.safe_bool("role_is_admin", false));
+        assert!(itm.safe_bool("role_is_active", false));
+    }
+
+    /// The two rules are driven by one list, so a name a client may not
+    /// filter on is a name it is not handed either. If they ever diverge,
+    /// the filter guard becomes the only defence again.
+    #[test]
+    fn what_cannot_be_filtered_on_cannot_be_read() {
+        for field in [
+            "password",
+            "passwd",
+            "secret_value",
+            "token",
+            "salt",
+            "otp",
+            "api_key",
+            "apikey",
+            "credential",
+        ] {
+            assert!(
+                !field_is_allowed(&format!("strs.{}", field)),
+                "{} is filterable",
+                field
+            );
+            let mut itm = Item::new();
+            itm.set_str(field, "x");
+            redact_credentials(&mut itm);
+            assert!(
+                itm.strs.is_empty(),
+                "{} is filter-guarded but still served",
+                field
+            );
+        }
+    }
+
+    /// `key` is deliberately not a marker — `engine_key_status` and friends
+    /// are ordinary status flags, and stripping them would quietly break
+    /// listings while protecting nothing.
+    #[test]
+    fn status_flags_that_merely_mention_keys_are_kept() {
+        let mut itm = Item::new();
+        itm.set_bool("engine_key_status", true);
+        itm.set_bool("ssh_keyless", true);
+        redact_credentials(&mut itm);
+        assert_eq!(itm.bools.len(), 2);
+    }
 }
 
 #[cfg(test)]

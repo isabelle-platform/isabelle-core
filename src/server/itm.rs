@@ -22,14 +22,14 @@
  * DEALINGS IN THE SOFTWARE.
  */
 use crate::handler::route_call::*;
-use crate::server::list_filter::{field_is_allowed, validate_client_filter};
+use crate::server::list_filter::{field_is_allowed, redact_credentials, validate_client_filter};
 use crate::server::user_control::*;
 use crate::state::state::*;
 use crate::state::store::Store;
+use crate::util::multipart::{read_fields, Limits};
 use actix_identity::Identity;
 use actix_multipart::Multipart;
 use actix_web::{web, HttpRequest, HttpResponse};
-use futures_util::TryStreamExt;
 use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::list_query::ListQuery;
@@ -51,24 +51,40 @@ pub async fn itm_edit(
     let srv: &crate::state::data::Data = &data.server;
     let usr = get_user(srv, user.id().unwrap()).await;
 
-    let mc = serde_qs::from_str::<MergeColl>(&req.query_string()).unwrap();
-    let mut itm = serde_qs::from_str::<Item>(&req.query_string()).unwrap();
-
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        let field_name = field.name().to_string();
-        let mut field_data: Vec<u8> = Vec::new();
-        while let Ok(Some(chunk)) = field.try_next().await {
-            field_data.extend_from_slice(&chunk);
+    // Anything the item model reads as a number — `id` above all — fails to
+    // parse when the client sends a word instead. Unwrapping panicked the
+    // handler, and a panicked handler drops the connection with no status at
+    // all, which no client can tell apart from a network failure. `itm_list`
+    // has always answered 400 here; these do now too.
+    let mc = match serde_qs::from_str::<MergeColl>(&req.query_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Malformed edit query: {}", e);
+            return HttpResponse::BadRequest().into();
         }
-
-        if field_name == "item" {
-            let strv = std::str::from_utf8(&field_data).unwrap_or("{}");
-            let new_itm: Item = serde_json::from_str(strv).unwrap_or_else(|e| {
-                log::error!("Failed to parse item JSON: {:?}", e);
-                Item::new()
-            });
-            itm.merge(&new_itm);
+    };
+    let mut itm = match serde_qs::from_str::<Item>(&req.query_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Malformed edit query: {}", e);
+            return HttpResponse::BadRequest().into();
         }
+    };
+
+    let fields = match read_fields(&mut payload, Limits::from_data(srv)).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Could not read the item body: {}", e);
+            return HttpResponse::build(e.status()).into();
+        }
+    };
+    if let Some(field_data) = fields.get("item") {
+        let strv = std::str::from_utf8(field_data).unwrap_or("{}");
+        let new_itm: Item = serde_json::from_str(strv).unwrap_or_else(|e| {
+            log::error!("Failed to parse item JSON: {:?}", e);
+            Item::new()
+        });
+        itm.merge(&new_itm);
     }
 
     // `itm_auth_hook` is a flat handler list with no ":"-split, so it's still
@@ -133,6 +149,22 @@ pub async fn itm_edit(
             }
         }
 
+        // A write that changes a password or a role must not leave the
+        // sessions opened under the old state running. The generation is
+        // raised as part of the same write, so the guard middleware refuses
+        // those cookies from the next request on.
+        if mc.collection == "user" {
+            let role_prefix = internals.safe_str("user_role_prefix", "role_is_");
+            if write_invalidates_sessions(old_itm.as_ref(), &itm_clone, mc.merge, &role_prefix) {
+                let current = old_itm.as_ref().map(session_generation).unwrap_or(0);
+                itm_clone.set_u64("session_gen", current.saturating_add(1));
+                info!(
+                    "Revoking sessions of user {}: credentials or roles changed",
+                    itm.id
+                );
+            }
+        }
+
         let r = srv.rw.set_item(&mc.collection, &itm_clone, mc.merge).await;
         info!("Collection {} element {} set", mc.collection, itm.id);
 
@@ -183,8 +215,21 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
     let srv: &crate::state::data::Data = &data.server;
     let usr = get_user(srv, user.id().unwrap()).await;
 
-    let mc = serde_qs::from_str::<MergeColl>(&req.query_string()).unwrap();
-    let itm = serde_qs::from_str::<Item>(&req.query_string()).unwrap();
+    // See `itm_edit` on why these are matched rather than unwrapped.
+    let mc = match serde_qs::from_str::<MergeColl>(&req.query_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Malformed delete query: {}", e);
+            return HttpResponse::BadRequest().into();
+        }
+    };
+    let itm = match serde_qs::from_str::<Item>(&req.query_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Malformed delete query: {}", e);
+            return HttpResponse::BadRequest().into();
+        }
+    };
 
     // See itm_edit for the cache/internals split rationale.
     let internals = srv.rw.get_internals().await;
@@ -402,6 +447,31 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
         );
     } else {
         info!("Collection {} unknown filter", lq.collection);
+    }
+
+    /* Redact credentials in the `user` collection before anything else sees
+     * the items. This is core's own guarantee rather than a convention: a
+     * stock deployment has no `itm_list_filter_hook` plugin, so without it
+     * any account that can log in can read every Argon2 hash and every live
+     * one-time code in the database.
+     *
+     * The record's owner and admins are exempt — they are the callers the
+     * profile and user-management screens act as, and those screens read an
+     * item, edit it and write it back, so handing them a stripped item would
+     * blank the very fields being protected. Running before the hooks leaves
+     * a plugin free to loosen this, rather than being the only thing that
+     * stands between a login and the whole user table. */
+    if lq.collection == "user" {
+        let viewer_id = usr.as_ref().map(|u| u.id);
+        let viewer_is_admin = check_role(srv, &usr, "admin").await;
+        if !viewer_is_admin {
+            for (_, item) in lr.map.iter_mut() {
+                if viewer_id == Some(item.id) {
+                    continue;
+                }
+                redact_credentials(item);
+            }
+        }
     }
 
     /* itm filter hooks. NOTE: these run after pagination and may mutate
