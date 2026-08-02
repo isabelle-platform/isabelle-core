@@ -62,6 +62,7 @@ use crate::handler::route::url_unprotected_post_route;
 use crate::handler::route::url_unprotected_route;
 use crate::handler::route_call::call_periodic_job_hook;
 use crate::notif::gcal::*;
+use crate::server::guards::{enforce_session_generation, reject_ambiguous_framing};
 use crate::server::itm::*;
 use crate::server::login::*;
 use std::collections::HashMap;
@@ -76,6 +77,7 @@ use actix_identity::IdentityMiddleware;
 use actix_session::config::{BrowserSession, CookieContentSecurity};
 use actix_session::storage::CookieSessionStore;
 use actix_session::SessionMiddleware;
+use actix_web::middleware::from_fn;
 use actix_web::web::Data;
 use actix_web::{cookie::Key, cookie::SameSite, rt, web, App, HttpServer};
 use clap::Parser;
@@ -231,6 +233,8 @@ where
             .store(args.bind_port, std::sync::atomic::Ordering::Relaxed);
         srv.max_payload_bytes
             .store(args.max_payload_bytes, std::sync::atomic::Ordering::Relaxed);
+        srv.body_timeout_secs
+            .store(args.body_timeout_secs, std::sync::atomic::Ordering::Relaxed);
         *srv.update_script.lock() = args.update_script.to_string();
 
         // Initialize the encrypted secret store. The master key file
@@ -450,9 +454,16 @@ where
 
     let srv = HttpServer::new(move || {
         // Set up all generic routes
+        // Wrap order is inside-out: the last `.wrap` is the outermost layer.
+        // `enforce_session_generation` therefore has to be registered first,
+        // so that it runs *after* the session and identity middleware have
+        // populated what it reads. `reject_ambiguous_framing` is a pure
+        // header check and does not care where it sits.
         let mut app = App::new()
             .app_data(data.clone())
             .app_data(web::PayloadConfig::new(args.max_payload_bytes))
+            .wrap(from_fn(enforce_session_generation))
+            .wrap(from_fn(reject_ambiguous_framing))
             .wrap(cors_middleware(&args.pub_url, &args.cors_origin))
             .wrap(IdentityMiddleware::default())
             .wrap(session_middleware(

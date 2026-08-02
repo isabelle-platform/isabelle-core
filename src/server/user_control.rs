@@ -206,6 +206,85 @@ pub async fn check_role(srv: &crate::state::data::Data, user: &Option<Item>, rol
     role_is_granted(user, &role_is, role)
 }
 
+/// The session generation currently in force for this account.
+///
+/// Sessions live entirely in the cookie (`CookieSessionStore`), so there is no
+/// server-side record to delete and `/logout` can only ask the browser to
+/// forget one. A copy of the cookie taken beforehand kept working, and a
+/// `BrowserSession` cookie carries no expiry at all, so a stolen session was
+/// good indefinitely.
+///
+/// This is the cheap half of the fix: the number is stamped into the session
+/// at login and compared on every request, so bumping it on the record makes
+/// every session that account currently holds stop being accepted — across
+/// devices, with no server-side session storage. Records written before this
+/// existed have no such field and read as generation 0, which is what their
+/// live sessions carry, so nobody is logged out by the upgrade itself.
+pub fn session_generation(usr: &Item) -> u64 {
+    usr.safe_u64("session_gen", 0)
+}
+
+/// Invalidate every session this account currently holds.
+pub async fn bump_session_generation(srv: &crate::state::data::Data, usr: &Item) {
+    let mut itm = Item::new();
+    itm.id = usr.id;
+    itm.set_u64("session_gen", session_generation(usr).saturating_add(1));
+    srv.rw.set_item("user", &itm, true).await;
+}
+
+/// Whether a write to a `user` record changes something that must not outlive
+/// its revocation: the password, the active flag, or any role.
+///
+/// A demoted admin holding a live cookie is the case that matters — the role
+/// check re-reads the record on every request, but nothing stopped the session
+/// itself from continuing, and a password change has to end the sessions
+/// opened with the old one.
+///
+/// This compares against the stored record rather than merely noticing that
+/// the incoming item *mentions* a role. The user-management screen submits the
+/// whole record on every save, so "mentions a role" is true of every ordinary
+/// profile edit, and treating those as revocations would log the account out
+/// of all its sessions every time somebody fixed a typo in a name.
+///
+/// A creation revokes nothing: there are no sessions yet.
+pub fn write_invalidates_sessions(
+    old_itm: Option<&Item>,
+    new_itm: &Item,
+    merge: bool,
+    role_prefix: &str,
+) -> bool {
+    let old = match old_itm {
+        Some(o) => o,
+        None => return false,
+    };
+
+    let is_role_key = |k: &String| k.starts_with(role_prefix) || k == "role_is_active";
+
+    if let Some(pw) = new_itm.strs.get("password") {
+        if old.strs.get("password") != Some(pw) {
+            return true;
+        }
+    }
+
+    for (k, v) in &new_itm.bools {
+        if is_role_key(k) && old.bools.get(k) != Some(v) {
+            return true;
+        }
+    }
+
+    // A replacing write drops whatever it does not mention, so a role that was
+    // held and is now absent is a revocation the loop above cannot see.
+    if !merge {
+        for (k, v) in &old.bools {
+            if *v && is_role_key(k) && !new_itm.bools.contains_key(k) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Record a failed OTP attempt so that a code can be brute-forced only a
 /// bounded number of times before it has to be re-requested.
 pub async fn bump_otp_attempts(srv: &crate::state::data::Data, id: u64, attempts: u64) {
@@ -422,6 +501,123 @@ mod tests {
         assert!(role_is_granted(&itm, "perm_", "admin"));
         itm.set_bool("role_is_active", false);
         assert!(!role_is_granted(&itm, "perm_", "admin"));
+    }
+
+    fn stored_admin() -> Item {
+        let mut itm = Item::new();
+        itm.id = 1;
+        itm.set_str("login", "admin");
+        itm.set_str("password", "$argon2id$old");
+        itm.set_bool("role_is_admin", true);
+        itm.set_bool("role_is_active", true);
+        itm
+    }
+
+    /// The whole point: a demotion or a password change has to end the
+    /// sessions opened before it.
+    #[test]
+    fn revoking_a_role_invalidates_sessions() {
+        let old = stored_admin();
+        let mut demoted = Item::new();
+        demoted.id = 1;
+        demoted.set_bool("role_is_admin", false);
+        assert!(write_invalidates_sessions(
+            Some(&old),
+            &demoted,
+            true,
+            "role_is_"
+        ));
+    }
+
+    #[test]
+    fn changing_the_password_invalidates_sessions() {
+        let old = stored_admin();
+        let mut changed = Item::new();
+        changed.id = 1;
+        changed.set_str("password", "$argon2id$new");
+        assert!(write_invalidates_sessions(
+            Some(&old),
+            &changed,
+            true,
+            "role_is_"
+        ));
+    }
+
+    #[test]
+    fn deactivating_an_account_invalidates_sessions() {
+        let old = stored_admin();
+        let mut off = Item::new();
+        off.id = 1;
+        off.set_bool("role_is_active", false);
+        assert!(write_invalidates_sessions(
+            Some(&old),
+            &off,
+            true,
+            "role_is_"
+        ));
+    }
+
+    /// The user-management screen submits the whole record on every save. If
+    /// merely mentioning a role counted, every rename would log the account
+    /// out of all its sessions.
+    #[test]
+    fn resubmitting_unchanged_roles_is_not_a_revocation() {
+        let old = stored_admin();
+        let mut renamed = old.clone();
+        renamed.set_str("name", "The Administrator");
+        assert!(!write_invalidates_sessions(
+            Some(&old),
+            &renamed,
+            true,
+            "role_is_"
+        ));
+        // Same record, written as a replacement rather than a merge.
+        assert!(!write_invalidates_sessions(
+            Some(&old),
+            &renamed,
+            false,
+            "role_is_"
+        ));
+    }
+
+    /// A replacing write drops what it does not mention, so a role that was
+    /// held and is now absent is a revocation — invisible to a comparison
+    /// that only walks the incoming item.
+    #[test]
+    fn a_replacing_write_that_drops_a_role_invalidates_sessions() {
+        let old = stored_admin();
+        let mut stripped = Item::new();
+        stripped.id = 1;
+        stripped.set_bool("role_is_active", true);
+        assert!(write_invalidates_sessions(
+            Some(&old),
+            &stripped,
+            false,
+            "role_is_"
+        ));
+        // Under merge the same item leaves the role alone, so it is not one.
+        assert!(!write_invalidates_sessions(
+            Some(&old),
+            &stripped,
+            true,
+            "role_is_"
+        ));
+    }
+
+    /// Creating an account revokes nothing — there are no sessions yet.
+    #[test]
+    fn creation_is_not_a_revocation() {
+        let mut fresh = stored_admin();
+        fresh.id = u64::MAX;
+        assert!(!write_invalidates_sessions(None, &fresh, false, "role_is_"));
+    }
+
+    /// The generation is what the guard compares, so a record that has never
+    /// been revoked and a session issued before the field existed have to
+    /// agree — otherwise the upgrade itself logs everybody out.
+    #[test]
+    fn an_untouched_record_is_at_generation_zero() {
+        assert_eq!(session_generation(&stored_admin()), 0);
     }
 
     #[test]

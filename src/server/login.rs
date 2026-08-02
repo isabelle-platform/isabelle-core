@@ -22,22 +22,41 @@
  * DEALINGS IN THE SOFTWARE.
  */
 use crate::handler::route_call::*;
+use crate::server::guards::SESSION_GEN_KEY;
 use crate::server::user_control::*;
 use crate::state::state::*;
 use crate::state::store::Store;
 use crate::util::crypto::constant_time_eq;
 use crate::util::crypto::get_otp_code;
 use crate::util::crypto::verify_password;
+use crate::util::multipart::{field_str, read_fields, Limits};
 use actix_identity::Identity;
 use actix_multipart::Multipart;
+use actix_session::SessionExt;
 use actix_web::{web, HttpMessage, HttpRequest, HttpResponse, Responder};
-use futures_util::TryStreamExt;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::process_result::ProcessResult;
 use isabelle_dm::transfer_model::detailed_login_user::DetailedLoginUser;
 use isabelle_dm::transfer_model::login_user::LoginUser;
 use log::{error, info};
 use std::collections::HashMap;
+
+/// The JSON envelope these endpoints answer with, at a chosen status.
+///
+/// A body that could not be read is the request's own fault and gets a 4xx;
+/// everything else keeps the 200-with-`succeeded:false` shape clients already
+/// parse, so a rejected login still reads the same as before.
+fn result_json(status: actix_web::http::StatusCode, succeeded: bool, error: &str) -> HttpResponse {
+    HttpResponse::build(status).json(ProcessResult {
+        succeeded,
+        error: error.to_string(),
+        data: HashMap::new(),
+    })
+}
+
+fn ok_json(succeeded: bool, error: &str) -> HttpResponse {
+    result_json(actix_web::http::StatusCode::OK, succeeded, error)
+}
 
 /// Generate one-time password for the user.
 pub async fn gen_otp(
@@ -46,24 +65,19 @@ pub async fn gen_otp(
     mut payload: Multipart,
     _req: HttpRequest,
 ) -> impl Responder {
-    let mut lu = LoginUser {
-        username: "".to_string(),
+    let srv: &crate::state::data::Data = &data.server;
+    let fields = match read_fields(&mut payload, Limits::from_data(srv)).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Could not read the gen_otp body: {}", e);
+            return result_json(e.status(), false, "Malformed request");
+        }
+    };
+    let lu = LoginUser {
+        username: field_str(&fields, "username"),
         password: "".to_string(),
     };
 
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        let field_name = field.name().to_string();
-        let mut field_data: Vec<u8> = Vec::new();
-        while let Ok(Some(chunk)) = field.try_next().await {
-            field_data.extend_from_slice(&chunk);
-        }
-
-        if field_name == "username" {
-            lu.username = std::str::from_utf8(&field_data).unwrap_or("").to_string();
-        }
-    }
-
-    let srv: &crate::state::data::Data = &data.server;
     info!("User name: {}", lu.username.clone());
     let usr = get_user(srv, lu.username.clone()).await;
 
@@ -98,11 +112,7 @@ pub async fn gen_otp(
         info!("No user {} found, couldn't otp", lu.username.clone());
     }
 
-    return web::Json(ProcessResult {
-        succeeded: true,
-        error: "".to_string(),
-        data: HashMap::new(),
-    });
+    return ok_json(true, "");
 }
 
 /// Log in into the system using username/password pair provided inside the
@@ -113,39 +123,27 @@ pub async fn register(
     mut payload: Multipart,
     _req: HttpRequest,
 ) -> impl Responder {
-    let mut login: String = "".to_string();
-    let mut email: String = "".to_string();
-    let mut dry: String = "".to_string();
-
-    // Take the username/password from POST data
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        let field_name = field.name().to_string();
-        let mut field_data: Vec<u8> = Vec::new();
-        while let Ok(Some(chunk)) = field.try_next().await {
-            field_data.extend_from_slice(&chunk);
-        }
-
-        if field_name == "login" {
-            login = std::str::from_utf8(&field_data).unwrap_or("").to_string();
-        } else if field_name == "email" {
-            email = std::str::from_utf8(&field_data).unwrap_or("").to_string();
-        } else if field_name == "dry" {
-            dry = std::str::from_utf8(&field_data).unwrap_or("").to_string();
-        }
-    }
-
     let srv: &crate::state::data::Data = &data.server;
+
+    // Take the registration details from POST data
+    let fields = match read_fields(&mut payload, Limits::from_data(srv)).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Could not read the register body: {}", e);
+            return result_json(e.status(), false, "Malformed request");
+        }
+    };
+    let login = field_str(&fields, "login");
+    let email = field_str(&fields, "email");
+    let dry = field_str(&fields, "dry");
+
     info!("User name: {}", login);
 
     // Reject logins/emails that `get_user` cannot look up. Without this a
     // login containing `$` or `{` reports as free (the lookup returns None),
     // creating a record that no later lookup can ever find again.
     if !login_is_acceptable(&login) || !login_is_acceptable(&email) {
-        return web::Json(ProcessResult {
-            succeeded: false,
-            error: "Invalid login or email".to_string(),
-            data: HashMap::new(),
-        });
+        return ok_json(false, "Invalid login or email");
     }
 
     if !srv
@@ -155,11 +153,7 @@ pub async fn register(
         .safe_bool("allow_self_registration", true)
     {
         info!("Self-registration is disabled, rejecting {}", login);
-        return web::Json(ProcessResult {
-            succeeded: false,
-            error: "Registration is disabled".to_string(),
-            data: HashMap::new(),
-        });
+        return ok_json(false, "Registration is disabled");
     }
 
     let usr_by_login = get_user(srv, login.clone()).await;
@@ -168,11 +162,7 @@ pub async fn register(
     let target = registration_target(&usr_by_login, &usr_by_email);
     if target == RegistrationTarget::Taken {
         info!("Login or email is already taken: {}", login);
-        return web::Json(ProcessResult {
-            succeeded: false,
-            error: "Login is already used".to_string(),
-            data: HashMap::new(),
-        });
+        return ok_json(false, "Login is already used");
     }
 
     // Only ever create. A `Resume` is an exact re-submit of a registration
@@ -189,11 +179,7 @@ pub async fn register(
         srv.rw.set_item("user", &itm, false).await;
     }
 
-    return web::Json(ProcessResult {
-        succeeded: true,
-        error: "".to_string(),
-        data: HashMap::new(),
-    });
+    return ok_json(true, "");
 }
 
 /// Log in into the system using username/password pair provided inside the
@@ -204,27 +190,21 @@ pub async fn login(
     mut payload: Multipart,
     req: HttpRequest,
 ) -> impl Responder {
-    let mut lu = LoginUser {
-        username: "".to_string(),
-        password: "".to_string(),
-    };
+    let srv: &crate::state::data::Data = &data.server;
 
     // Take the username/password from POST data
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        let field_name = field.name().to_string();
-        let mut field_data: Vec<u8> = Vec::new();
-        while let Ok(Some(chunk)) = field.try_next().await {
-            field_data.extend_from_slice(&chunk);
+    let fields = match read_fields(&mut payload, Limits::from_data(srv)).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Could not read the login body: {}", e);
+            return result_json(e.status(), false, "Malformed request");
         }
+    };
+    let lu = LoginUser {
+        username: field_str(&fields, "username"),
+        password: field_str(&fields, "password"),
+    };
 
-        if field_name == "username" {
-            lu.username = std::str::from_utf8(&field_data).unwrap_or("").to_string();
-        } else if field_name == "password" {
-            lu.password = std::str::from_utf8(&field_data).unwrap_or("").to_string();
-        }
-    }
-
-    let srv: &crate::state::data::Data = &data.server;
     info!("User name: {}", lu.username.clone());
 
     // Find the user in the database
@@ -233,22 +213,14 @@ pub async fn login(
     if usr == None {
         // Not found - error out.
         info!("No user {} found, couldn't log in", lu.username.clone());
-        return web::Json(ProcessResult {
-            succeeded: false,
-            error: "Invalid login/password".to_string(),
-            data: HashMap::new(),
-        });
+        return ok_json(false, "Invalid login/password");
     } else {
         let itm_real = usr.unwrap();
 
         // Don't let inactive users log in.
         if itm_real.safe_bool("role_is_active", false) == false {
             info!("User {} is inactive, couldn't log in", lu.username.clone());
-            return web::Json(ProcessResult {
-                succeeded: false,
-                error: "User is inactive".to_string(),
-                data: HashMap::new(),
-            });
+            return ok_json(false, "User is inactive");
         }
 
         // Verify password/otp
@@ -264,6 +236,18 @@ pub async fn login(
         if pw_ok || otp_ok {
             // Password matches - log in.
             Identity::login(&req.extensions(), itm_real.safe_str("email", "")).unwrap();
+
+            // Stamp the session with the generation in force right now. The
+            // guard middleware compares it on every later request, so bumping
+            // the number on the record — at logout, on a password change, on a
+            // role change — stops this cookie being accepted, which is the
+            // only revocation available when the whole session lives in it.
+            if let Err(e) = req
+                .get_session()
+                .insert(SESSION_GEN_KEY, session_generation(&itm_real))
+            {
+                error!("Could not stamp the session generation: {}", e);
+            }
 
             // Burn the OTP on any successful login, addressed by id. The old
             // `clear_otp(login)` matched only records whose `login` and
@@ -286,27 +270,31 @@ pub async fn login(
                 bump_otp_attempts(srv, itm_real.id, attempts).await;
             }
             error!("Invalid password for {}", lu.username);
-            return web::Json(ProcessResult {
-                succeeded: false,
-                error: "Invalid login/password".to_string(),
-                data: HashMap::new(),
-            });
+            return ok_json(false, "Invalid login/password");
         }
     }
 
-    return web::Json(ProcessResult {
-        succeeded: true,
-        error: "".to_string(),
-        data: HashMap::new(),
-    });
+    return ok_json(true, "");
 }
 
 /// Log the user out.
+///
+/// Dropping the cookie is only half of it: the session lives entirely inside
+/// that cookie, so a copy taken before this call would otherwise keep working
+/// forever — a `BrowserSession` cookie has no expiry to run out. Bumping the
+/// account's session generation is what actually revokes it, here and on every
+/// other device.
 pub async fn logout(
     _user: Identity,
     _data: web::Data<State>,
     _request: HttpRequest,
 ) -> impl Responder {
+    let srv: &crate::state::data::Data = &_data.server;
+    if let Ok(principal) = _user.id() {
+        if let Some(usr) = get_user(srv, principal).await {
+            bump_session_generation(srv, &usr).await;
+        }
+    }
     _user.logout();
     info!("Logged out");
 
