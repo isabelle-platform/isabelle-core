@@ -23,3 +23,4 @@
  */
 pub mod bson_wrapper;
 pub mod crypto;
+pub mod multipart;

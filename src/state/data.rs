@@ -21,7 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-use crate::args::DEFAULT_MAX_PAYLOAD_BYTES;
+use crate::args::{DEFAULT_BODY_TIMEOUT_SECS, DEFAULT_MAX_PAYLOAD_BYTES};
 use crate::handler::route_call::call_collection_read_hook;
 use crate::state::route_cache::RouteCache;
 use crate::state::store::Store;
@@ -74,6 +74,10 @@ pub struct Data {
     /// Max request payload size in bytes
     pub max_payload_bytes: std::sync::atomic::AtomicUsize,
 
+    /// Deadline for reading a request body, in seconds. See
+    /// `DEFAULT_BODY_TIMEOUT_SECS` for why a body needs one of its own.
+    pub body_timeout_secs: std::sync::atomic::AtomicU64,
+
     /// Path to script invoked by POST /system/update
     pub update_script: Mutex<String>,
 
@@ -123,6 +127,7 @@ impl Data {
             public_url: Mutex::new(String::new()),
             port: std::sync::atomic::AtomicU16::new(8090),
             max_payload_bytes: std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_PAYLOAD_BYTES),
+            body_timeout_secs: std::sync::atomic::AtomicU64::new(DEFAULT_BODY_TIMEOUT_SECS),
             update_script: Mutex::new(String::new()),
             secrets: Mutex::new(None),
             plugin_registry: OnceLock::new(),

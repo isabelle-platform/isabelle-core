@@ -23,6 +23,7 @@
  */
 use crate::handler::route_call::*;
 use crate::handler::web_response::conv_response;
+use crate::util::multipart::{with_deadline, Limits, ReadError};
 use crate::State;
 use actix_identity::Identity;
 use actix_multipart::Multipart;
@@ -124,20 +125,38 @@ pub async fn url_generic_rest_route(
     payload: &mut web::Payload,
     method: &str,
 ) -> HttpResponse {
-    let max_payload_bytes = {
+    let limits = {
         let srv: &crate::state::data::Data = &data.server;
-        srv.max_payload_bytes
-            .load(std::sync::atomic::Ordering::Relaxed)
+        Limits::from_data(srv)
     };
-    let mut body = web::BytesMut::new();
-    while let Some(chunk) = payload.next().await {
-        let chunk = chunk.unwrap();
-        // limit max size of in-memory payload
-        if (body.len() + chunk.len()) > max_payload_bytes {
-            return HttpResponse::BadRequest().into();
+    // A body with no deadline is a parked request: the headers are complete,
+    // so actix's header timeout has already passed, and nothing else was
+    // watching. `chunk` is matched rather than unwrapped for the same reason
+    // the query parses are — a panicking handler drops the connection with no
+    // status, which a client cannot tell apart from a network failure.
+    let read = with_deadline(limits, async {
+        let mut body = web::BytesMut::new();
+        while let Some(chunk) = payload.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => return Err(ReadError::Malformed(e.to_string())),
+            };
+            // limit max size of in-memory payload
+            if (body.len() + chunk.len()) > limits.max_bytes {
+                return Err(ReadError::TooLarge(body.len() + chunk.len()));
+            }
+            body.extend_from_slice(&chunk);
         }
-        body.extend_from_slice(&chunk);
-    }
+        Ok(body)
+    })
+    .await;
+    let body = match read {
+        Ok(b) => b,
+        Err(e) => {
+            trace!("Could not read the REST body: {}", e);
+            return HttpResponse::build(e.status()).into();
+        }
+    };
 
     let body = std::str::from_utf8(&body);
     if !body.is_ok() {

@@ -31,6 +31,7 @@
 use crate::handler::route_call_actor::*;
 use crate::handler::web_response::*;
 use crate::server::user_control::*;
+use crate::util::multipart::{with_deadline, Limits, ReadError};
 use actix_identity::Identity;
 use actix_multipart::Multipart;
 use actix_web::HttpResponse;
@@ -118,56 +119,101 @@ pub async fn call_url_route(
     conv_response(wr).await
 }
 
-pub async fn handle_item_files(mut payload: Multipart) -> (Item, HashMap<String, String>) {
+/// Read a plugin route's multipart body: an optional `item` JSON field plus
+/// any number of uploads, which are streamed to `./tmp`.
+///
+/// Bounded the same way core's own handlers are — see `util::multipart`. This
+/// one matters more than most: without a deadline an unfinished part parks the
+/// request forever, and without a byte cap the uploads land on disk unbounded.
+/// Any file already written is removed before the error is returned, so a
+/// refused request leaves nothing behind.
+pub async fn handle_item_files(
+    mut payload: Multipart,
+    limits: Limits,
+) -> Result<(Item, HashMap<String, String>), (ReadError, HashMap<String, String>)> {
     let mut post_itm = Item::new();
     let mut files: HashMap<String, String> = HashMap::new();
     let mut files_count = 0;
+    let mut total: usize = 0;
     let path = Path::new("./tmp");
 
     if let Err(e) = fs::create_dir_all(&path) {
         error!("Failed to create directory: {}", e);
     }
 
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        if field.name() == "item" {
-            let mut field_data: Vec<u8> = Vec::new();
-            while let Ok(Some(chunk)) = field.try_next().await {
-                field_data.extend_from_slice(&chunk);
-            }
-            let strv = std::str::from_utf8(&field_data).unwrap_or("{}");
-            let new_itm: Item = serde_json::from_str(strv).unwrap_or_else(|e| {
-                log::error!("Failed to parse item JSON: {:?}", e);
-                Item::new()
-            });
-            post_itm.id = new_itm.id;
-            post_itm.merge(&new_itm);
-        } else {
-            let cd = field.content_disposition();
-            let filename = cd
-                .get_filename()
-                .map_or_else(|| Uuid::new_v4().to_string(), sanitize_filename::sanitize);
-            let filepath = format!("./tmp/{filename}");
-            let f = std::fs::File::create(filepath.clone());
+    let outcome = with_deadline(limits, async {
+        loop {
+            let mut field = match payload.try_next().await {
+                Ok(Some(f)) => f,
+                Ok(None) => break,
+                Err(e) => return Err(ReadError::Malformed(e.to_string())),
+            };
 
-            info!("Created file {}", filepath);
-            files.insert(files_count.to_string(), filepath);
-            files_count = files_count + 1;
-
-            if let Ok(mut file) = f {
-                while let Ok(Some(chunk)) = field.try_next().await {
-                    let _ = file.write_all(&chunk);
+            if field.name() == "item" {
+                let mut field_data: Vec<u8> = Vec::new();
+                loop {
+                    match field.try_next().await {
+                        Ok(Some(chunk)) => {
+                            total = total.saturating_add(chunk.len());
+                            if total > limits.max_bytes {
+                                return Err(ReadError::TooLarge(total));
+                            }
+                            field_data.extend_from_slice(&chunk);
+                        }
+                        Ok(None) => break,
+                        Err(e) => return Err(ReadError::Malformed(e.to_string())),
+                    }
                 }
+                let strv = std::str::from_utf8(&field_data).unwrap_or("{}");
+                let new_itm: Item = serde_json::from_str(strv).unwrap_or_else(|e| {
+                    log::error!("Failed to parse item JSON: {:?}", e);
+                    Item::new()
+                });
+                post_itm.id = new_itm.id;
+                post_itm.merge(&new_itm);
             } else {
-                error!("Failed to open file");
+                let cd = field.content_disposition();
+                let filename = cd
+                    .get_filename()
+                    .map_or_else(|| Uuid::new_v4().to_string(), sanitize_filename::sanitize);
+                let filepath = format!("./tmp/{filename}");
+                let f = std::fs::File::create(filepath.clone());
+
+                info!("Created file {}", filepath);
+                files.insert(files_count.to_string(), filepath);
+                files_count = files_count + 1;
+
+                match f {
+                    Ok(mut file) => loop {
+                        match field.try_next().await {
+                            Ok(Some(chunk)) => {
+                                total = total.saturating_add(chunk.len());
+                                if total > limits.max_bytes {
+                                    return Err(ReadError::TooLarge(total));
+                                }
+                                let _ = file.write_all(&chunk);
+                            }
+                            Ok(None) => break,
+                            Err(e) => return Err(ReadError::Malformed(e.to_string())),
+                        }
+                    },
+                    Err(_) => error!("Failed to open file"),
+                }
             }
         }
+        Ok(())
+    })
+    .await;
+
+    if let Err(e) = outcome {
+        return Err((e, files));
     }
 
     if files_count > 0 {
         post_itm.set_strstr("multipart-files", &files);
     }
 
-    return (post_itm, files);
+    Ok((post_itm, files))
 }
 
 pub async fn handle_file_cleanup(files: &HashMap<String, String>) {
@@ -185,7 +231,14 @@ pub async fn call_url_post_route(
     payload: Multipart,
 ) -> HttpResponse {
     let usr = get_user(srv, user.id().unwrap()).await;
-    let (post_itm, files) = handle_item_files(payload).await;
+    let (post_itm, files) = match handle_item_files(payload, Limits::from_data(srv)).await {
+        Ok(v) => v,
+        Err((e, partial)) => {
+            error!("Could not read the request body: {}", e);
+            handle_file_cleanup(&partial).await;
+            return HttpResponse::build(e.status()).into();
+        }
+    };
 
     let wr = call_url_post_route_actor(srv, hndl, &usr, query, &post_itm).await;
     let response = if matches!(wr, WebResponse::NotImplemented) {
@@ -228,7 +281,14 @@ pub async fn call_url_unprotected_post_route(
         usr = get_user(srv, u.id().unwrap()).await;
     }
 
-    let (post_itm, files) = handle_item_files(payload).await;
+    let (post_itm, files) = match handle_item_files(payload, Limits::from_data(srv)).await {
+        Ok(v) => v,
+        Err((e, partial)) => {
+            error!("Could not read the request body: {}", e);
+            handle_file_cleanup(&partial).await;
+            return HttpResponse::build(e.status()).into();
+        }
+    };
 
     let wr = call_url_unprotected_post_route_actor(srv, hndl, &usr, query, &post_itm).await;
     let response = if matches!(wr, WebResponse::NotImplemented) {

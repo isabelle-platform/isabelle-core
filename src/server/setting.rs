@@ -25,13 +25,13 @@ use crate::notif::gcal::*;
 use crate::server::user_control::*;
 use crate::state::state::*;
 use crate::state::store::Store;
+use crate::util::multipart::{read_fields, Limits};
 use actix_identity::Identity;
 use actix_multipart::Multipart;
 use actix_web::{web, HttpRequest, HttpResponse};
-use futures_util::TryStreamExt;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::process_result::ProcessResult;
-use log::info;
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use serde_qs;
 use serde_qs::Config;
@@ -51,23 +51,30 @@ pub async fn setting_edit(
         return HttpResponse::Forbidden().into();
     }
 
-    // Merge settings from multipart data
-    let mut itm = serde_qs::from_str::<Item>(&req.query_string()).unwrap();
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        let field_name = field.name().to_string();
-        let mut field_data: Vec<u8> = Vec::new();
-        while let Ok(Some(chunk)) = field.try_next().await {
-            field_data.extend_from_slice(&chunk);
+    // Merge settings from multipart data. See `itm_edit` on why the query is
+    // matched rather than unwrapped, and `util::multipart` on why the body is
+    // read under a deadline and a size cap.
+    let mut itm = match serde_qs::from_str::<Item>(&req.query_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Malformed settings query: {}", e);
+            return HttpResponse::BadRequest().into();
         }
-
-        if field_name == "item" {
-            let strv = std::str::from_utf8(&field_data).unwrap_or("{}");
-            let new_itm: Item = serde_json::from_str(strv).unwrap_or_else(|e| {
-                log::error!("Failed to parse settings item JSON: {:?}", e);
-                Item::new()
-            });
-            itm.merge(&new_itm);
+    };
+    let fields = match read_fields(&mut payload, Limits::from_data(srv)).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Could not read the settings body: {}", e);
+            return HttpResponse::build(e.status()).into();
         }
+    };
+    if let Some(field_data) = fields.get("item") {
+        let strv = std::str::from_utf8(field_data).unwrap_or("{}");
+        let new_itm: Item = serde_json::from_str(strv).unwrap_or_else(|e| {
+            log::error!("Failed to parse settings item JSON: {:?}", e);
+            Item::new()
+        });
+        itm.merge(&new_itm);
     }
 
     info!("Settings edited");
@@ -146,7 +153,13 @@ pub async fn setting_gcal_auth_end(
     }
 
     let config = Config::new(10, false);
-    let data: AuthEndData = config.deserialize_str(&_req.query_string()).unwrap();
+    let data: AuthEndData = match config.deserialize_str(&_req.query_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Malformed gcal auth query: {}", e);
+            return HttpResponse::BadRequest().into();
+        }
+    };
 
     // Finish authentication
     let public_url = srv.public_url.lock().clone();
