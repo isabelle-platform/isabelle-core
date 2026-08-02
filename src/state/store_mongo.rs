@@ -33,10 +33,11 @@ use isabelle_dm::data_model::item::*;
 use log::{debug, info, trace, warn};
 use serde_json::Value;
 
-use mongodb::options::IndexOptions;
+use mongodb::options::{IndexOptions, ReturnDocument};
 use mongodb::{bson::doc, Client, Collection, IndexModel};
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::time::{sleep, Duration};
 
@@ -44,6 +45,11 @@ use tokio::time::{sleep, Duration};
 /// demotions / account locks propagate within seconds, long enough that
 /// chatty clients amortise the Mongo round-trip across many requests.
 const USER_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Collection holding one sequence document per data collection: `_id` is
+/// the collection name and `seq` is the last identifier handed out. It is
+/// never listed as a data collection, so `has_collection` keeps refusing it.
+const COUNTERS_COLLECTION: &str = "__id_counters";
 
 /// Mongo storage implementation.
 ///
@@ -85,6 +91,14 @@ pub struct StoreMongo {
     /// passes). TTL is `USER_CACHE_TTL`. Invalidated wholesale on any write
     /// to the `user` collection.
     pub user_cache: Mutex<HashMap<String, (Item, Instant)>>,
+
+    /// Bumped by every write to the `user` collection. A lookup records this
+    /// value when it *starts* and refuses to install its result if the value
+    /// has moved on by the time it finishes — otherwise a read that overtook
+    /// a write would reinstate the pre-write record for the whole TTL.
+    /// Written and read under `user_cache`'s lock, which is what makes the
+    /// check-then-insert atomic against the clear.
+    pub user_cache_gen: AtomicU64,
 }
 
 // `Send` is derived, not asserted: every field is already `Send`, so the
@@ -115,6 +129,7 @@ impl StoreMongo {
             database_name: "isabelle".to_string(),
             internals_cache: Mutex::new(None),
             user_cache: Mutex::new(HashMap::new()),
+            user_cache_gen: AtomicU64::new(0),
         }
     }
 
@@ -148,14 +163,17 @@ impl StoreMongo {
     /// writes that come through the plugin API (which also funnel through
     /// these methods).
     async fn find_user_cached(&self, login: &str) -> Option<Item> {
-        {
+        // Read the generation *before* the lookup, so that a write landing
+        // while we are in Mongo is detectable when we come back.
+        let gen_at_start = {
             let cache = self.user_cache.lock();
             if let Some((item, expires)) = cache.get(login) {
                 if *expires > Instant::now() {
                     return Some(item.clone());
                 }
             }
-        } // ← release the lock before awaiting Mongo
+            self.user_cache_gen.load(Ordering::Acquire)
+        }; // ← release the lock before awaiting Mongo
 
         // Caller is expected to have run `login_has_bad_symbols`; the JSON
         // here is hand-built but the input is already screened of `"\\{}[]$`.
@@ -166,13 +184,115 @@ impl StoreMongo {
         let user_opt = self.find_one("user", &filter).await;
 
         if let Some(user) = &user_opt {
-            self.user_cache.lock().insert(
-                login.to_string(),
-                (user.clone(), Instant::now() + USER_CACHE_TTL),
-            );
+            // A record read before a write we have since observed is stale by
+            // construction: caching it would keep a revoked role alive for the
+            // full TTL, which is exactly what the wholesale `clear()` on write
+            // could not prevent on its own — the clear happens while this read
+            // is still in flight. Skipping the insert costs one extra query on
+            // the next request and nothing else.
+            let mut cache = self.user_cache.lock();
+            if self.user_cache_gen.load(Ordering::Acquire) == gen_at_start {
+                cache.insert(
+                    login.to_string(),
+                    (user.clone(), Instant::now() + USER_CACHE_TTL),
+                );
+            } else {
+                trace!("Dropping user cache fill for {}: raced a write", login);
+            }
         }
 
         user_opt
+    }
+
+    /// Invalidate the user cache after a write to the `user` collection.
+    ///
+    /// Both steps happen under the cache lock so that a concurrent
+    /// `find_user_cached` cannot slip its check past the bump and its insert
+    /// past the clear.
+    fn invalidate_user_cache(&self) {
+        let mut cache = self.user_cache.lock();
+        self.user_cache_gen.fetch_add(1, Ordering::AcqRel);
+        cache.clear();
+    }
+
+    /// Raise the stored sequence for `collection` to at least `id`.
+    ///
+    /// Called at connect time with the highest identifier already on disk, and
+    /// after any write that carried a client-chosen identifier, so a later
+    /// allocation cannot hand out a number that is already taken.
+    async fn raise_counter(&self, collection: &str, id: u64) {
+        let client = match self.client.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+        // `$inc`/`$max` want an i64; identifiers this large are not reachable
+        // through allocation and clamping is better than refusing to record.
+        let seed = if id > i64::MAX as u64 {
+            i64::MAX
+        } else {
+            id as i64
+        };
+        let counters: Collection<Document> = client
+            .database(&self.database_name)
+            .collection(COUNTERS_COLLECTION);
+        if let Err(e) = counters
+            .update_one(doc! { "_id": collection }, doc! { "$max": { "seq": seed } })
+            .upsert(true)
+            .await
+        {
+            warn!("Could not raise id counter for {}: {}", collection, e);
+        }
+    }
+
+    /// Hand out a fresh identifier for `collection`.
+    ///
+    /// The counter is bumped by a single `findAndModify`, so two overlapping
+    /// creations cannot be told the same number — not even when they are
+    /// served by different processes talking to the same database. The
+    /// previous code read a counter under one lock, released it, and only then
+    /// wrote, which handed the same id to every creation that overlapped and
+    /// silently overwrote all but the last.
+    async fn alloc_id(&self, collection: &str, coll_id: u64) -> u64 {
+        if let Some(client) = self.client.as_ref() {
+            let counters: Collection<Document> = client
+                .database(&self.database_name)
+                .collection(COUNTERS_COLLECTION);
+            let res = counters
+                .find_one_and_update(doc! { "_id": collection }, doc! { "$inc": { "seq": 1i64 } })
+                .upsert(true)
+                .return_document(ReturnDocument::After)
+                .await;
+            match res {
+                Ok(Some(d)) => match d.get_i64("seq") {
+                    Ok(seq) if seq > 0 => {
+                        let id = seq as u64;
+                        let mut counts = self.items_count.lock();
+                        let high = counts.entry(coll_id).or_insert(0);
+                        if id > *high {
+                            *high = id;
+                        }
+                        return id;
+                    }
+                    other => warn!(
+                        "Id counter for {} holds an unusable seq ({:?})",
+                        collection, other
+                    ),
+                },
+                Ok(None) => warn!("Id counter for {} returned no document", collection),
+                Err(e) => warn!("Could not allocate id for {}: {}", collection, e),
+            }
+        }
+
+        // Fallback: still atomic within this process (the increment happens
+        // under the lock), just not across processes.
+        warn!(
+            "Falling back to in-process id allocation for {}",
+            collection
+        );
+        let mut counts = self.items_count.lock();
+        let next = counts.entry(coll_id).or_insert(0);
+        *next = next.saturating_add(1);
+        *next
     }
 
     /// Single-document lookup by a JSON filter string. Bypasses the
@@ -366,6 +486,10 @@ impl Store for StoreMongo {
 
                     self.items.lock().insert(coll_idx, map);
                     self.items_count.lock().insert(coll_idx, count);
+                    // Start the shared sequence above whatever is already on
+                    // disk. Idempotent across restarts and across processes:
+                    // `$max` never lowers a counter another instance raised.
+                    self.raise_counter(&coll_name.1, count).await;
                     break;
                 }
             }
@@ -388,6 +512,13 @@ impl Store for StoreMongo {
         let mut lst: Vec<String> = Vec::new();
 
         for coll in &colls {
+            // `__id_counters` is bookkeeping, not data. Callers treat this
+            // list as "the collections that hold items" — first-run seeding
+            // in `run()` decides whether the database is empty from it, and
+            // would see the counter documents as data and skip the import.
+            if coll == COUNTERS_COLLECTION {
+                continue;
+            }
             lst.push(coll.clone());
         }
 
@@ -512,6 +643,15 @@ impl Store for StoreMongo {
 
         lr.total_count = coll.count_documents(base.clone()).await.unwrap_or(0);
 
+        // Mongo reads `.limit(0)` as "no limit", so asking for a zero-sized
+        // page — the first request a paginated view makes, to learn the total
+        // — used to answer with the whole collection. An empty page is what
+        // the caller asked for; the count above is the part it wanted.
+        if limit == 0 {
+            debug!(" - result: empty page, total {}", lr.total_count);
+            return lr;
+        }
+
         let mut cursor = match coll
             .find(base)
             .sort(doc! { eff_sort_key: 1 })
@@ -554,13 +694,14 @@ impl Store for StoreMongo {
             itm.bools.remove("__security_preserve");
         }
 
+        // Whether this write chose its own identifier. A client-chosen one has
+        // to be pushed into the shared counter afterwards so a later
+        // allocation does not hand it out a second time.
+        let mut client_chosen = true;
         if itm.id == u64::MAX {
-            let coll_id = self.collections[collection];
-            let items = self.items.lock();
-            if items.contains_key(&coll_id) {
-                drop(items);
-                let counts = self.items_count.lock();
-                itm.id = counts[&coll_id] + 1;
+            if let Some(&coll_id) = self.collections.get(collection) {
+                itm.id = self.alloc_id(collection, coll_id).await;
+                client_chosen = false;
             }
         }
 
@@ -599,25 +740,27 @@ impl Store for StoreMongo {
             }
         }
 
-        let coll_id = self.collections[collection];
-        {
-            let mut items = self.items.lock();
-            if let Some(set) = items.get_mut(&coll_id) {
-                set.insert(new_itm.id, true);
+        if let Some(&coll_id) = self.collections.get(collection) {
+            {
+                let mut items = self.items.lock();
+                if let Some(set) = items.get_mut(&coll_id) {
+                    set.insert(new_itm.id, true);
+                }
+            }
+            {
+                let mut counts = self.items_count.lock();
+                let high = counts.entry(coll_id).or_insert(0);
+                if new_itm.id > *high {
+                    *high = new_itm.id;
+                }
             }
         }
-        {
-            let mut counts = self.items_count.lock();
-            match counts.get_mut(&coll_id) {
-                Some(cnt) => {
-                    if new_itm.id > *cnt {
-                        *cnt = new_itm.id;
-                    }
-                }
-                None => {
-                    counts.insert(coll_id, new_itm.id + 1);
-                }
-            }
+
+        // A client-chosen identifier must not be reachable by a later
+        // allocation. Allocated ones already came from the counter, so they
+        // cost no extra round-trip here.
+        if client_chosen && new_itm.id != u64::MAX {
+            self.raise_counter(collection, new_itm.id).await;
         }
 
         // Any write to `user` (registration, profile edit, otp clear, login
@@ -625,7 +768,7 @@ impl Store for StoreMongo {
         // drop the whole user cache. Same call site handles plugin writes
         // since `IsabellePluginApi::db_set_item` routes through here.
         if collection == "user" {
-            self.user_cache.lock().clear();
+            self.invalidate_user_cache();
         }
 
         return new_itm.id;
@@ -645,10 +788,13 @@ impl Store for StoreMongo {
         let _res = coll.delete_one(filter).await;
 
         if collection == "user" {
-            self.user_cache.lock().clear();
+            self.invalidate_user_cache();
         }
 
-        let coll_id = self.collections[collection];
+        let coll_id = match self.collections.get(collection) {
+            Some(&c) => c,
+            None => return false,
+        };
         let mut items = self.items.lock();
         if let Some(set) = items.get_mut(&coll_id) {
             if set.contains_key(&id) {
@@ -809,5 +955,41 @@ mod tests {
         // Mongo (which would panic here). We assert by checking the cache
         // map directly that no "alice" entry was inserted as a side effect.
         assert!(!store.user_cache.lock().contains_key("alice"));
+    }
+
+    /// Invalidation has to do two things, not one: empty the map *and* move
+    /// the generation on. Clearing alone loses the race it exists to win —
+    /// a lookup that started before the write finishes after the clear and
+    /// puts the pre-write record straight back, where it then lives for the
+    /// full TTL. The generation is what lets that late insert be refused.
+    #[test]
+    fn invalidating_the_user_cache_moves_the_generation_on() {
+        let store = StoreMongo::new();
+        let before = store.user_cache_gen.load(Ordering::Acquire);
+        store.user_cache.lock().insert(
+            "alice".to_string(),
+            (user_item("alice", "alice@example.com"), Instant::now()),
+        );
+
+        store.invalidate_user_cache();
+
+        assert!(store.user_cache.lock().is_empty());
+        assert_ne!(
+            store.user_cache_gen.load(Ordering::Acquire),
+            before,
+            "a lookup in flight cannot tell it raced a write"
+        );
+    }
+
+    /// A read that observed the generation before a write must not install
+    /// what it read. This is the fill path's guard, exercised directly:
+    /// `find_user_cached` cannot be driven here because a cache miss goes to
+    /// Mongo, and no client is connected.
+    #[test]
+    fn a_generation_that_moved_means_the_read_is_stale() {
+        let store = StoreMongo::new();
+        let gen_at_start = store.user_cache_gen.load(Ordering::Acquire);
+        store.invalidate_user_cache(); // the write this read overtook
+        assert_ne!(store.user_cache_gen.load(Ordering::Acquire), gen_at_start);
     }
 }
