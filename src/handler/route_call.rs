@@ -111,7 +111,7 @@ pub async fn call_url_route(
     hndl: &str,
     query: &str,
 ) -> HttpResponse {
-    let usr: Option<Item> = get_user(srv, user.id().unwrap()).await;
+    let usr: Option<Item> = get_user(srv, principal(&user)).await;
     let wr = call_url_route_actor(srv, hndl, &usr, query).await;
     if matches!(wr, WebResponse::NotImplemented) {
         return HttpResponse::NotFound().into();
@@ -120,13 +120,21 @@ pub async fn call_url_route(
 }
 
 /// Read a plugin route's multipart body: an optional `item` JSON field plus
-/// any number of uploads, which are streamed to `./tmp`.
+/// any number of uploads, which are streamed to a directory of their own
+/// under `./tmp`.
 ///
 /// Bounded the same way core's own handlers are — see `util::multipart`. This
 /// one matters more than most: without a deadline an unfinished part parks the
 /// request forever, and without a byte cap the uploads land on disk unbounded.
 /// Any file already written is removed before the error is returned, so a
 /// refused request leaves nothing behind.
+///
+/// The per-request directory is what keeps concurrent uploads apart. Files
+/// used to be written to `./tmp/{name the client chose}`, so two callers
+/// uploading `photo.jpg` at the same time wrote to one path — the second
+/// overwrote the first's content, and whichever finished first deleted the
+/// file out from under the other during cleanup. The name is still sanitised;
+/// the directory is what makes it unambiguous.
 pub async fn handle_item_files(
     mut payload: Multipart,
     limits: Limits,
@@ -135,10 +143,10 @@ pub async fn handle_item_files(
     let mut files: HashMap<String, String> = HashMap::new();
     let mut files_count = 0;
     let mut total: usize = 0;
-    let path = Path::new("./tmp");
+    let req_dir = format!("./tmp/{}", Uuid::new_v4());
 
-    if let Err(e) = fs::create_dir_all(&path) {
-        error!("Failed to create directory: {}", e);
+    if let Err(e) = fs::create_dir_all(Path::new(&req_dir)) {
+        error!("Failed to create directory {}: {}", req_dir, e);
     }
 
     let outcome = with_deadline(limits, async {
@@ -176,7 +184,7 @@ pub async fn handle_item_files(
                 let filename = cd
                     .get_filename()
                     .map_or_else(|| Uuid::new_v4().to_string(), sanitize_filename::sanitize);
-                let filepath = format!("./tmp/{filename}");
+                let filepath = format!("{req_dir}/{filename}");
                 let f = std::fs::File::create(filepath.clone());
 
                 info!("Created file {}", filepath);
@@ -217,9 +225,18 @@ pub async fn handle_item_files(
 }
 
 pub async fn handle_file_cleanup(files: &HashMap<String, String>) {
+    let mut dirs: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     for file in files {
         info!("Removed file {}", file.1);
+        if let Some(parent) = Path::new(file.1).parent() {
+            dirs.insert(parent.to_path_buf());
+        }
         let _ = std::fs::remove_file(file.1);
+    }
+    // Non-recursive on purpose: this succeeds only once the directory is
+    // empty, so it can never take out anything this request did not put there.
+    for dir in dirs {
+        let _ = std::fs::remove_dir(dir);
     }
 }
 
@@ -230,7 +247,7 @@ pub async fn call_url_post_route(
     query: &str,
     payload: Multipart,
 ) -> HttpResponse {
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(&user)).await;
     let (post_itm, files) = match handle_item_files(payload, Limits::from_data(srv)).await {
         Ok(v) => v,
         Err((e, partial)) => {
@@ -259,7 +276,7 @@ pub async fn call_url_unprotected_route(
 ) -> HttpResponse {
     let mut usr: Option<Item> = None;
     if let Some(u) = user {
-        usr = get_user(srv, u.id().unwrap()).await;
+        usr = get_user(srv, principal(&u)).await;
     }
 
     let wr = call_url_unprotected_route_actor(srv, hndl, &usr, query).await;
@@ -278,7 +295,7 @@ pub async fn call_url_unprotected_post_route(
 ) -> HttpResponse {
     let mut usr: Option<Item> = None;
     if let Some(u) = user {
-        usr = get_user(srv, u.id().unwrap()).await;
+        usr = get_user(srv, principal(&u)).await;
     }
 
     let (post_itm, files) = match handle_item_files(payload, Limits::from_data(srv)).await {
@@ -311,7 +328,7 @@ pub async fn call_url_rest_route(
 ) -> WebResponse {
     let mut usr: Option<Item> = None;
     if let Some(u) = user {
-        usr = get_user(srv, u.id().unwrap()).await;
+        usr = get_user(srv, principal(&u)).await;
     }
 
     let wr = call_url_rest_route_actor(srv, hndl, method, &usr, query, payload).await;
