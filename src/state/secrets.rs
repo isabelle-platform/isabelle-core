@@ -35,11 +35,26 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 const FORMAT_VERSION: u32 = 1;
 const NAME_FIELD: &str = "name";
-const SECRET_KEY_PREFIX: &str = "secret";
 const HIDDEN_PLACEHOLDER: &str = "<hidden>";
 
+/// The only `strs` keys this store treats as describing a secret rather than
+/// being one.
+///
+/// The rule is inverted deliberately. It used to be `k.starts_with("secret")`,
+/// so `get_masked` hid `secret_value` and handed back `password`, `api_key`
+/// and `token` in clear — to an admin over HTTP, from a store whose entire
+/// reason to exist is that its contents are encrypted at rest. Everything in
+/// here is a secret by construction; naming one of them `password` should not
+/// be what decides whether it is protected.
+///
+/// Adding a key here makes it readable over the API, so the list stays short
+/// and is the only place that decision is made.
+const METADATA_KEYS: [&str; 3] = ["name", "comment", "description"];
+
+/// Whether this key's value must be masked on the way out.
 fn is_secret_key(k: &str) -> bool {
-    k.starts_with(SECRET_KEY_PREFIX)
+    let lowered = k.to_lowercase();
+    !METADATA_KEYS.iter().any(|m| lowered == *m)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,9 +118,10 @@ impl SecretStore {
         self.entries.get(&id).cloned()
     }
 
-    /// External-facing read: same Item but every `strs[k]` whose key starts
-    /// with "secret" has its value replaced with `"<hidden>"`. Other typed
-    /// maps (bools/u64s/strstrs/ids/strids) are returned as-is.
+    /// External-facing read: same Item, but every `strs[k]` outside
+    /// `METADATA_KEYS` has its value replaced with `"<hidden>"`. Other typed
+    /// maps (bools/u64s/strstrs/ids/strids) are returned as-is — they hold
+    /// flags and counters, not credential material.
     pub fn get_masked(&self, id: u64) -> Option<Item> {
         let mut it = self.entries.get(&id)?.clone();
         for (k, v) in it.strs.iter_mut() {
@@ -135,8 +151,8 @@ impl SecretStore {
     /// * If `merge == true`, the incoming Item is merged on top of the
     ///   existing one (via `Item::merge`); fields not present in the
     ///   incoming Item are preserved.
-    /// * For any `strs[k]` in the resulting Item where `k` starts with
-    ///   "secret" and the value equals `"<hidden>"`, the existing value is
+    /// * For any masked `strs[k]` in the resulting Item (see `is_secret_key`)
+    ///   whose value equals `"<hidden>"`, the existing value is
     ///   restored (or the field dropped if there was no existing value).
     ///   This lets clients round-trip a masked Item back to /secret/edit
     ///   without overwriting secrets they cannot read.
@@ -1075,8 +1091,15 @@ mod tests {
         );
     }
 
+    /// Masking is an allowlist, not a prefix match. Everything in this store
+    /// is a secret by construction, so the question a value has to answer is
+    /// "am I metadata?", not "is my name spelled a particular way".
+    ///
+    /// This test used to assert the opposite — that `password`, `api_key` and
+    /// a capitalised `Secret_y` came back in clear — which is the behaviour
+    /// it was written to pin and the bug it was pinning.
     #[test]
-    fn masking_only_applies_to_keys_with_secret_prefix() {
+    fn everything_but_declared_metadata_is_masked() {
         let dir = tempdir().unwrap();
         let (k, s) = paths(&dir);
         let mut store = SecretStore::open(&k, &s).unwrap();
@@ -1086,31 +1109,75 @@ mod tests {
                     "svc",
                     &[
                         ("secret_x", "hidden-this"),
-                        ("Secret_y", "case-sensitive-no-mask"),
-                        ("not_secret", "visible"),
-                        ("api_secret", "visible-too"),
+                        ("Secret_y", "capitalised-is-still-a-secret"),
+                        ("password", "hunter2"),
+                        ("api_key", "ak_live_1"),
+                        ("token", "t0k3n"),
+                        ("comment", "the billing account"),
                     ],
                 ),
                 false,
             )
             .unwrap();
         let masked = store.get_masked(id).unwrap();
+
+        for hidden in ["secret_x", "Secret_y", "password", "api_key", "token"] {
+            assert_eq!(
+                masked.strs.get(hidden).map(String::as_str),
+                Some(HIDDEN_PLACEHOLDER),
+                "{} was served in clear",
+                hidden
+            );
+        }
+        // Metadata is what identifies the entry in a picker; it has to survive.
+        assert_eq!(masked.strs.get("name").cloned(), Some("svc".into()));
         assert_eq!(
-            masked.strs.get("secret_x").map(String::as_str),
-            Some(HIDDEN_PLACEHOLDER)
+            masked.strs.get("comment").cloned(),
+            Some("the billing account".into())
         );
-        // Capital S — does not match the lowercase prefix.
+    }
+
+    /// The store's own reads are unaffected — plugins and core still get the
+    /// real values. Only what leaves over HTTP is masked.
+    #[test]
+    fn masking_does_not_reach_the_internal_read() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        let id = store
+            .set(&item_named("svc", &[("password", "hunter2")]), false)
+            .unwrap();
         assert_eq!(
-            masked.strs.get("Secret_y").cloned(),
-            Some("case-sensitive-no-mask".into())
+            store.get(id).unwrap().strs.get("password").cloned(),
+            Some("hunter2".into())
         );
+    }
+
+    /// A client can only send back what it was given, so the round-trip rule
+    /// has to cover every masked key — otherwise re-submitting a masked item
+    /// writes the literal `<hidden>` over a credential.
+    #[test]
+    fn round_tripping_a_masked_item_preserves_every_secret() {
+        let dir = tempdir().unwrap();
+        let (k, s) = paths(&dir);
+        let mut store = SecretStore::open(&k, &s).unwrap();
+        let id = store
+            .set(
+                &item_named("svc", &[("password", "hunter2"), ("api_key", "ak_live_1")]),
+                false,
+            )
+            .unwrap();
+
+        let mut edited = store.get_masked(id).unwrap();
+        edited.set_str("comment", "renamed by the admin");
+        store.set(&edited, true).unwrap();
+
+        let raw = store.get(id).unwrap();
+        assert_eq!(raw.strs.get("password").cloned(), Some("hunter2".into()));
+        assert_eq!(raw.strs.get("api_key").cloned(), Some("ak_live_1".into()));
         assert_eq!(
-            masked.strs.get("not_secret").cloned(),
-            Some("visible".into())
-        );
-        assert_eq!(
-            masked.strs.get("api_secret").cloned(),
-            Some("visible-too".into())
+            raw.strs.get("comment").cloned(),
+            Some("renamed by the admin".into())
         );
     }
 

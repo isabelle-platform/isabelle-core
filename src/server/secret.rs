@@ -146,8 +146,12 @@ pub async fn secret_del(
         Some(s) => s,
         None => return proc_err("secret store is not initialized"),
     };
+    // `del` reports whether anything was actually removed. Mapping every `Ok`
+    // to success left a client unable to tell a deletion from a no-op — the
+    // one thing this call exists to confirm.
     match store.del(body.id) {
-        Ok(_) => proc_ok(),
+        Ok(true) => proc_ok(),
+        Ok(false) => HttpResponse::NotFound().into(),
         Err(e) => proc_err(format!("failed to delete secret: {}", e)),
     }
 }
