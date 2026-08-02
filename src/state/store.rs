@@ -26,6 +26,35 @@ use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::list_result::ListResult;
 use std::collections::HashMap;
 
+/// Read a configuration Item (`settings.js`, `internals.js`) from disk,
+/// falling back to an empty one.
+///
+/// Shared by both stores, and the reason it exists is the failure mode it
+/// removes. These files were parsed with `serde_json::from_str(..).unwrap()`,
+/// and `/is_logged_in` — an unauthenticated endpoint — reads settings on every
+/// call. Since the files were also written non-atomically, a single
+/// interrupted write left a truncated `settings.js` that made every such
+/// request panic, permanently, with no restart clearing it.
+///
+/// An empty Item is the right fallback for both: it is already what a missing
+/// file yields, and every reader goes through `safe_*` accessors with
+/// defaults. The loud log line is what tells an operator to go and look.
+pub fn read_config_or_empty(path: &str, what: &str) -> Item {
+    match crate::util::fs::read_json::<Item>(path) {
+        Ok(itm) => itm,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Item::new(),
+        Err(e) => {
+            log::error!(
+                "Unreadable {} at {} ({}); continuing with defaults",
+                what,
+                path,
+                e
+            );
+            Item::new()
+        }
+    }
+}
+
 /// Store implementation.
 ///
 /// All runtime operations take `&self` so the store can be shared across
@@ -87,8 +116,14 @@ pub trait Store {
     /// Read settings item
     async fn get_settings(&self) -> Item;
 
-    /// Write settings item
-    async fn set_settings(&self, itm: Item);
+    /// Write the settings item. Returns whether it reached durable storage.
+    ///
+    /// The result is not decorative: this used to be `expect("Couldn't write
+    /// item")`, so a full or read-only disk killed the handler outright, and
+    /// before that the caller reported "Settings edited" regardless. A write
+    /// that did not happen has to be something the caller can tell a client
+    /// about.
+    async fn set_settings(&self, itm: Item) -> bool;
 
     /// Whether the store knows this collection.
     ///

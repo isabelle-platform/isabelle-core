@@ -228,8 +228,9 @@ impl Store for StoreMemory {
         self.settings.lock().clone()
     }
 
-    async fn set_settings(&self, itm: Item) {
+    async fn set_settings(&self, itm: Item) -> bool {
         *self.settings.lock() = itm;
+        true
     }
 
     fn has_collection(&self, collection: &str) -> bool {

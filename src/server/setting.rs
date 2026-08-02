@@ -44,7 +44,7 @@ pub async fn setting_edit(
     mut payload: Multipart,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(&user)).await;
 
     // Settings can't be edited by non-admins.
     if !check_role(srv, &usr, "admin").await {
@@ -77,10 +77,22 @@ pub async fn setting_edit(
         itm.merge(&new_itm);
     }
 
-    info!("Settings edited");
+    // Set settings. A write that did not reach disk must not be reported as
+    // an edit — the admin would go away believing the change took, and the
+    // next read would still serve the old values.
+    if !srv.rw.set_settings(itm.clone()).await {
+        error!("Settings write failed");
+        return HttpResponse::InternalServerError().body(
+            serde_json::to_string(&ProcessResult {
+                succeeded: false,
+                error: "Could not store the settings".to_string(),
+                data: HashMap::new(),
+            })
+            .unwrap(),
+        );
+    }
 
-    // Set settings
-    srv.rw.set_settings(itm.clone()).await;
+    info!("Settings edited");
 
     return HttpResponse::Ok().body(
         serde_json::to_string(&ProcessResult {
@@ -98,7 +110,7 @@ pub async fn setting_list(
     _req: HttpRequest,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(&user)).await;
 
     // Non-admins can't list settings
     if !check_role(srv, &usr, "admin").await {
@@ -119,7 +131,7 @@ pub async fn setting_gcal_auth(
     _req: HttpRequest,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(&user)).await;
 
     // Non-admins can't authenticate with Google Calendar
     if !check_role(srv, &usr, "admin").await {
@@ -136,7 +148,7 @@ pub async fn setting_gcal_auth_end(
     _req: HttpRequest,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(&user)).await;
 
     // Non-admins can't finish Google Authentication
     if !check_role(srv, &usr, "admin").await {

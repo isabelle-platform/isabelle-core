@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use crate::util::fs::atomic_write;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use isabelle_dm::data_model::item::Item;
@@ -416,39 +417,9 @@ fn encrypt_blob(cipher: &Aes256Gcm, plaintext: &[u8]) -> Result<Vec<u8>, String>
     Ok(out)
 }
 
-#[cfg(unix)]
-fn atomic_write(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&tmp)?;
-        use std::io::Write;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)
-}
-
-#[cfg(not(unix))]
-fn atomic_write(path: &Path, data: &[u8], _mode: u32) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        use std::io::Write;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)
-}
+// `atomic_write` used to live here, as the only durable write in the tree.
+// It is now `crate::util::fs::atomic_write`, so the settings, internals and
+// item files get the same guarantee this store always had.
 
 #[cfg(test)]
 mod tests {

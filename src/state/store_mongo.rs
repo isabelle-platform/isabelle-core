@@ -728,15 +728,19 @@ impl Store for StoreMongo {
 
         let bson_new_itm = BsonItem::from_item(&new_itm);
 
+        // A write that Mongo refused is reported as `u64::MAX` rather than
+        // answered with the id it would have had. The caller used to be handed
+        // that id regardless, so a client could be told it had created an item
+        // that does not exist.
         if old_itm.as_ref().is_none() {
-            let res = coll.insert_one(bson_new_itm.clone()).await;
-            if let Err(e) = res {
+            if let Err(e) = coll.insert_one(bson_new_itm.clone()).await {
                 log::error!("Error inserting item id={}: {:?}", new_itm.id, e);
+                return u64::MAX;
             }
         } else {
-            let res = coll.replace_one(filter, bson_new_itm.clone()).await;
-            if let Err(e) = res {
+            if let Err(e) = coll.replace_one(filter, bson_new_itm.clone()).await {
                 log::error!("Error replacing item id={}: {:?}", new_itm.id, e);
+                return u64::MAX;
             }
         }
 
@@ -822,10 +826,7 @@ impl Store for StoreMongo {
         }
         // Cache miss: read+parse outside the lock (sync I/O, no await).
         let tmp_data_path = self.local_path.clone() + "/internals.js";
-        let itm = match std::fs::read_to_string(&tmp_data_path) {
-            Ok(text) => serde_json::from_str(&text).unwrap(),
-            Err(_) => Item::new(),
-        };
+        let itm = crate::state::store::read_config_or_empty(&tmp_data_path, "internals.js");
         // Populate cache. Race-tolerant: if another caller filled it
         // concurrently we just overwrite with an equivalent value.
         let mut cache = self.internals_cache.lock();
@@ -835,19 +836,18 @@ impl Store for StoreMongo {
 
     async fn get_settings(&self) -> Item {
         let tmp_data_path = self.local_path.clone() + "/settings.js";
-        let read_data = std::fs::read_to_string(tmp_data_path);
-        if let Err(_e) = read_data {
-            return Item::new();
-        }
-        let text = read_data.unwrap();
-        let itm: Item = serde_json::from_str(&text).unwrap();
-        return itm;
+        crate::state::store::read_config_or_empty(&tmp_data_path, "settings.js")
     }
 
-    async fn set_settings(&self, itm: Item) {
+    async fn set_settings(&self, itm: Item) -> bool {
         let tmp_data_path = self.local_path.clone() + "/settings.js";
-        let s = serde_json::to_string(&itm);
-        std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
+        match crate::util::fs::write_json(&tmp_data_path, &itm) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("Failed to write settings: {}", e);
+                false
+            }
+        }
     }
 
     fn has_collection(&self, collection: &str) -> bool {

@@ -24,7 +24,7 @@
 use isabelle_dm::data_model::list_result::ListResult;
 use std::path::Path;
 
-use crate::state::store::Store;
+use crate::state::store::{read_config_or_empty, Store};
 use async_trait::async_trait;
 use isabelle_dm::data_model::item::*;
 use log::{debug, error, trace};
@@ -163,9 +163,16 @@ impl Store for StoreLocal {
             + &id.to_string()
             + "/data.js";
         if Path::new(&tmp_path).is_file() {
-            let text = std::fs::read_to_string(tmp_path).unwrap();
-            let itm: Item = serde_json::from_str(&text).unwrap();
-            return Some(itm);
+            // A file that exists but does not parse is a torn write, not a
+            // reason to kill the request: unwrapping here meant one bad
+            // `data.js` panicked every read of that item, for good.
+            match crate::util::fs::read_json::<Item>(&tmp_path) {
+                Ok(itm) => return Some(itm),
+                Err(e) => {
+                    error!("Unreadable item {} of {}: {}", id, collection, e);
+                    return None;
+                }
+            }
         }
         return None;
     }
@@ -236,11 +243,18 @@ impl Store for StoreLocal {
             itm.bools.remove("__security_preserve");
         }
 
+        // The identifier is allocated with the counter lock held across the
+        // read and the increment. It used to read under one lock, release it,
+        // and write afterwards, so two creations that overlapped were told the
+        // same number and one file quietly overwrote the other. There is only
+        // ever one process behind this store, but there are many request
+        // threads, which is enough for the race.
         if itm.id == u64::MAX {
-            let coll_id = self.collections[collection];
-            let has = self.items.lock().contains_key(&coll_id);
-            if has {
-                itm.id = self.items_count.lock()[&coll_id] + 1;
+            if let Some(&coll_id) = self.collections.get(collection) {
+                let mut counts = self.items_count.lock();
+                let next = counts.entry(coll_id).or_insert(0);
+                *next = next.saturating_add(1);
+                itm.id = *next;
             }
         }
 
@@ -255,35 +269,37 @@ impl Store for StoreLocal {
 
         let _dir_create_err = std::fs::create_dir(&tmp_path);
 
+        // Written atomically, and a failure is reported rather than fatal.
+        // `expect()` here dropped the client's connection with no status on a
+        // full or read-only disk, and the plain write left a truncated
+        // `data.js` behind that every later read then failed to parse.
         let tmp_data_path = tmp_path.clone() + "/data.js";
-        let s = serde_json::to_string(&new_itm);
-        std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
+        if let Err(e) = crate::util::fs::write_json(&tmp_data_path, &new_itm) {
+            error!(
+                "Failed to write item {} of {}: {}",
+                new_itm.id, collection, e
+            );
+            return u64::MAX;
+        }
 
-        let coll_id = self.collections[collection];
-        let has = self.items.lock().contains_key(&coll_id);
-        if has {
+        if let Some(&coll_id) = self.collections.get(collection) {
             {
                 let mut items = self.items.lock();
-                let coll = items.get_mut(&coll_id).unwrap();
-                coll.insert(new_itm.id, true);
+                if let Some(coll) = items.get_mut(&coll_id) {
+                    coll.insert(new_itm.id, true);
+                }
             }
             let mut counts = self.items_count.lock();
-            match counts.get_mut(&coll_id) {
-                Some(cnt) => {
-                    if new_itm.id > *cnt {
-                        *cnt = new_itm.id;
-                        let _res = std::fs::write(
-                            self.path.to_string() + "/collection/" + collection + "/cnt",
-                            (new_itm.id + 1).to_string(),
-                        );
-                    }
-                }
-                None => {
-                    counts.insert(coll_id, new_itm.id + 1);
-                    let _res = std::fs::write(
-                        self.path.to_string() + "/collection/" + collection + "/cnt",
-                        (new_itm.id + 1).to_string(),
-                    );
+            let high = counts.entry(coll_id).or_insert(0);
+            if new_itm.id >= *high {
+                *high = new_itm.id;
+                let cnt_path = self.path.to_string() + "/collection/" + collection + "/cnt";
+                if let Err(e) = crate::util::fs::atomic_write(
+                    std::path::Path::new(&cnt_path),
+                    new_itm.id.to_string().as_bytes(),
+                    crate::util::fs::DEFAULT_MODE,
+                ) {
+                    error!("Failed to persist the counter of {}: {}", collection, e);
                 }
             }
         }
@@ -324,30 +340,25 @@ impl Store for StoreLocal {
             }
         }
         let tmp_data_path = self.path.clone() + "/internals.js";
-        let itm = match std::fs::read_to_string(&tmp_data_path) {
-            Ok(text) => serde_json::from_str(&text).unwrap(),
-            Err(_) => Item::new(),
-        };
+        let itm = read_config_or_empty(&tmp_data_path, "internals.js");
         let mut cache = self.internals_cache.lock();
         *cache = Some(itm.clone());
         itm
     }
 
     async fn get_settings(&self) -> Item {
-        let tmp_data_path = self.path.clone() + "/settings.js";
-        let read_data = std::fs::read_to_string(tmp_data_path);
-        if let Err(_e) = read_data {
-            return Item::new();
-        }
-        let text = read_data.unwrap();
-        let itm: Item = serde_json::from_str(&text).unwrap();
-        return itm;
+        read_config_or_empty(&(self.path.clone() + "/settings.js"), "settings.js")
     }
 
-    async fn set_settings(&self, itm: Item) {
+    async fn set_settings(&self, itm: Item) -> bool {
         let tmp_data_path = self.path.clone() + "/settings.js";
-        let s = serde_json::to_string(&itm);
-        std::fs::write(tmp_data_path, s.unwrap()).expect("Couldn't write item");
+        match crate::util::fs::write_json(&tmp_data_path, &itm) {
+            Ok(()) => true,
+            Err(e) => {
+                error!("Failed to write settings: {}", e);
+                false
+            }
+        }
     }
 
     fn has_collection(&self, collection: &str) -> bool {
@@ -437,6 +448,70 @@ mod tests {
         let mut v: Vec<u64> = lr.map.keys().copied().collect();
         v.sort_unstable();
         v
+    }
+
+    // ---- identifier allocation ----
+
+    /// Every creation must get its own identifier. The old code read the
+    /// counter under one lock, released it, and wrote afterwards, so two
+    /// creations that overlapped were told the same number and one item's
+    /// file was silently overwritten by the other's.
+    ///
+    /// A unit test cannot interleave the two halves of that window, so what
+    /// it pins is the invariant the fix establishes: allocation is a single
+    /// increment, ids never repeat, and they continue above what is already
+    /// on disk.
+    #[test]
+    fn consecutive_creations_get_distinct_ids() {
+        let (_dir, store) = make_store_with_items(&[1, 2, 3]);
+        let rt = rt();
+
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            let mut itm = Item::new();
+            itm.strs.insert("name".into(), "new".into());
+            ids.push(rt.block_on(store.set_item("test", &itm, false)));
+        }
+
+        assert_eq!(ids, vec![4, 5, 6, 7, 8], "ids repeated or skipped");
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "an id was handed out twice");
+        // And nothing was written over: three seeded plus five created.
+        assert_eq!(store.items.lock()[&0].len(), 8);
+    }
+
+    /// A creation must not land on an identifier that already exists, which
+    /// is what "read the counter, then write" produced whenever the counter
+    /// lagged the data.
+    #[test]
+    fn a_new_id_never_lands_on_an_existing_item() {
+        let (_dir, store) = make_store_with_items(&[1, 2, 3]);
+        let rt = rt();
+        let mut itm = Item::new();
+        itm.strs.insert("name".into(), "new".into());
+        let id = rt.block_on(store.set_item("test", &itm, false));
+        assert!(id > 3, "new id {} collides with a seeded item", id);
+        assert_eq!(
+            rt.block_on(store.get_item("test", 1))
+                .unwrap()
+                .safe_str("name", ""),
+            "item1",
+            "the creation overwrote an existing item"
+        );
+    }
+
+    /// An item file that exists but does not parse — a write torn by a crash
+    /// or a full disk — must be reported as absent, not panic every read of
+    /// that item from then on.
+    #[test]
+    fn a_torn_item_file_reads_as_absent() {
+        let (dir, store) = make_store_with_items(&[1]);
+        std::fs::write(
+            dir.path().join("collection/test/1/data.js"),
+            "{\"strs\":{\"name\"",
+        )
+        .unwrap();
+        assert!(rt().block_on(store.get_item("test", 1)).is_none());
     }
 
     // ---- get_items pagination ----
