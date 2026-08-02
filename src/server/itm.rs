@@ -49,7 +49,7 @@ pub async fn itm_edit(
     mut payload: Multipart,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(&user)).await;
 
     // Anything the item model reads as a number — `id` above all — fails to
     // parse when the client sends a word instead. Unwrapping panicked the
@@ -153,19 +153,32 @@ pub async fn itm_edit(
         // sessions opened under the old state running. The generation is
         // raised as part of the same write, so the guard middleware refuses
         // those cookies from the next request on.
-        if mc.collection == "user" {
-            let role_prefix = internals.safe_str("user_role_prefix", "role_is_");
-            if write_invalidates_sessions(old_itm.as_ref(), &itm_clone, mc.merge, &role_prefix) {
-                let current = old_itm.as_ref().map(session_generation).unwrap_or(0);
-                itm_clone.set_u64("session_gen", current.saturating_add(1));
-                info!(
-                    "Revoking sessions of user {}: credentials or roles changed",
-                    itm.id
-                );
-            }
-        }
+        apply_session_revocation(
+            srv,
+            &mc.collection,
+            old_itm.as_ref(),
+            &mut itm_clone,
+            mc.merge,
+        )
+        .await;
 
         let r = srv.rw.set_item(&mc.collection, &itm_clone, mc.merge).await;
+        if r == u64::MAX {
+            // The store could not write. Answering with an id would tell the
+            // client it owns a record that does not exist.
+            error!(
+                "Collection {} element {} was not stored",
+                mc.collection, itm.id
+            );
+            return HttpResponse::InternalServerError().body(
+                serde_json::to_string(&ProcessResult {
+                    succeeded: false,
+                    error: "Could not store the item".to_string(),
+                    data: HashMap::new(),
+                })
+                .unwrap(),
+            );
+        }
         info!("Collection {} element {} set", mc.collection, itm.id);
 
         /* call post edit hooks */
@@ -213,7 +226,7 @@ pub async fn itm_edit(
 /// all necessary hooks and actually performs removal.
 pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(&user)).await;
 
     // See `itm_edit` on why these are matched rather than unwrapped.
     let mc = match serde_qs::from_str::<MergeColl>(&req.query_string()) {
@@ -312,7 +325,7 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
 /// in form of json array.
 pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(&user)).await;
 
     let mut lq = match serde_qs::from_str::<ListQuery>(&req.query_string()) {
         Ok(v) => v,

@@ -173,7 +173,14 @@ pub async fn url_generic_rest_route(
         let resp = call_url_rest_route(srv, user, handler, method, req.query_string(), body).await;
         match &resp {
             WebResponse::Login(email) => {
-                Identity::login(&req.extensions(), email.to_string()).unwrap();
+                // A plugin route asked for a session. If one cannot be
+                // attached, say so rather than panicking — the caller would
+                // otherwise see the connection drop with no status and no way
+                // to tell it apart from a network fault.
+                if let Err(e) = Identity::login(&req.extensions(), email.to_string()) {
+                    trace!("Could not establish a session from a plugin route: {}", e);
+                    return HttpResponse::InternalServerError().into();
+                }
             }
             WebResponse::Logout => { /* FIXME */ }
             _ => {}

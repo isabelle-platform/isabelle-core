@@ -129,6 +129,25 @@ async fn handle_message(state: &State, msg: CoreMessage) {
             merge,
             reply,
         } => {
+            // Plugins write through here, so this is where a plugin-driven
+            // role or password change has to end the account's sessions —
+            // the same rule `/itm/edit` applies. Without it, an actor that
+            // demotes a user leaves that user's live cookies working.
+            let mut item = item;
+            let old_itm = if collection == "user" && item.id != u64::MAX {
+                srv.rw.get_item(&collection, item.id).await
+            } else {
+                None
+            };
+            crate::server::user_control::apply_session_revocation(
+                srv,
+                &collection,
+                old_itm.as_ref(),
+                &mut item,
+                merge,
+            )
+            .await;
+
             let id = srv.rw.set_item(&collection, &item, merge).await;
             let _ = reply.send(id);
         }
@@ -153,7 +172,11 @@ async fn handle_message(state: &State, msg: CoreMessage) {
             let _ = reply.send(s);
         }
         CoreMessage::GlobalsSetSettings { item } => {
-            srv.rw.set_settings(item).await;
+            // Fire-and-forget on the plugin side (the message carries no reply
+            // channel), so a failed write can only be surfaced in the log.
+            if !srv.rw.set_settings(item).await {
+                log::error!("Plugin settings write failed");
+            }
         }
 
         // -------- Auth --------

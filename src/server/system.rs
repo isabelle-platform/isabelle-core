@@ -36,7 +36,7 @@ pub async fn system_update(
     _req: HttpRequest,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, user.id().unwrap()).await;
+    let usr = get_user(srv, principal(&user)).await;
 
     if !check_role(srv, &usr, "admin").await {
         return HttpResponse::Forbidden().into();

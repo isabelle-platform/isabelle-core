@@ -234,8 +234,18 @@ pub async fn login(
         let pw_ok = pw != "" && verify_password(&lu.password, &pw);
 
         if pw_ok || otp_ok {
-            // Password matches - log in.
-            Identity::login(&req.extensions(), itm_real.safe_str("email", "")).unwrap();
+            // Password matches - log in. A failure to attach the identity
+            // means no session was created, so reporting success would leave
+            // the caller believing it is logged in when the next request is
+            // anonymous.
+            if let Err(e) = Identity::login(&req.extensions(), itm_real.safe_str("email", "")) {
+                error!("Could not establish a session for {}: {}", lu.username, e);
+                return result_json(
+                    actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    false,
+                    "Could not establish a session",
+                );
+            }
 
             // Stamp the session with the generation in force right now. The
             // guard middleware compares it on every later request, so bumping

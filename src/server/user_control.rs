@@ -120,6 +120,20 @@ pub fn otp_may_be_issued(itm: &Item, now: u64) -> bool {
         && now >= itm.safe_u64("otp_issued_at", 0) + OTP_RESEND_INTERVAL_SECS
 }
 
+/// The principal a session names, or an empty string if it cannot be read.
+///
+/// `Identity::id()` returns a `Result` — the session can be gone by the time a
+/// handler asks, which is exactly what the revocation guard does to it — and
+/// `unwrap()` there panics the handler. A panicked handler drops the
+/// connection with no status, the same failure mode as the malformed-query
+/// unwraps: indistinguishable from a network fault at the client.
+///
+/// An empty principal resolves to no user, so the request is treated as
+/// unauthenticated, which every caller already handles correctly.
+pub fn principal(user: &actix_identity::Identity) -> String {
+    user.id().unwrap_or_default()
+}
+
 /// Get user by given login
 pub async fn get_user(srv: &crate::state::data::Data, login: String) -> Option<Item> {
     if login_has_bad_symbols(&login) {
@@ -283,6 +297,39 @@ pub fn write_invalidates_sessions(
     }
 
     false
+}
+
+/// Stamp a raised session generation onto a write that revokes something.
+///
+/// Called from both write paths into the `user` collection — the `/itm/edit`
+/// handler and the plugin actor's `DbSetItem` — because a revocation that only
+/// one of them honours is not a revocation. A plugin that clears
+/// `role_is_admin` has to end that account's sessions exactly as the UI does.
+///
+/// Does nothing for other collections, and nothing for a creation.
+pub async fn apply_session_revocation(
+    srv: &crate::state::data::Data,
+    collection: &str,
+    old_itm: Option<&Item>,
+    itm: &mut Item,
+    merge: bool,
+) {
+    if collection != "user" {
+        return;
+    }
+    let role_prefix = srv
+        .rw
+        .get_internals()
+        .await
+        .safe_str("user_role_prefix", "role_is_");
+    if write_invalidates_sessions(old_itm, itm, merge, &role_prefix) {
+        let current = old_itm.map(session_generation).unwrap_or(0);
+        itm.set_u64("session_gen", current.saturating_add(1));
+        log::info!(
+            "Revoking sessions of user {}: credentials or roles changed",
+            itm.id
+        );
+    }
 }
 
 /// Record a failed OTP attempt so that a code can be brute-forced only a

@@ -89,10 +89,12 @@ pub async fn reject_ambiguous_framing(
 /// blanket 401 from this layer would also hit `/login`, so a browser holding a
 /// cookie that had just been revoked could not log in again to replace it.
 ///
-/// A session naming an account that no longer resolves is left alone: that is
-/// the handlers' existing behaviour (`is_logged_in` answers with an empty
-/// user, protected routes refuse on their own), and second-guessing it here
-/// would change what an unauthenticated probe returns.
+/// A session naming an account that no longer exists is dropped too, but only
+/// when it carries a stamp. A stamped session was issued by this build, so its
+/// account resolving to nothing means the account is gone. An unstamped one
+/// predates the check and is left alone, which is what keeps the upgrade from
+/// logging out everybody whose account merely fails to resolve for some other
+/// reason.
 pub async fn enforce_session_generation(
     req: ServiceRequest,
     next: Next<impl MessageBody + 'static>,
@@ -104,32 +106,32 @@ pub async fn enforce_session_generation(
         req.app_data::<actix_web::web::Data<State>>().cloned(),
     ) {
         let srv: &crate::state::data::Data = &state.server;
-        if let Some(usr) = get_user(srv, principal.clone()).await {
-            // A session issued before this check existed carries no stamp and
-            // reads as generation 0 — the same value a record that has never
-            // been revoked holds, so the upgrade logs nobody out.
-            let presented = req
-                .get_session()
-                .get::<u64>(SESSION_GEN_KEY)
-                .ok()
-                .flatten()
-                .unwrap_or(0);
-            let current = session_generation(&usr);
-            if presented != current {
-                info!(
-                    "Dropping revoked session for {} (presented {}, current {})",
-                    principal, presented, current
-                );
-                // `clear`, not `purge`: both empty the session so the
-                // `Identity` extractor in the handler finds nothing and the
-                // request is served as if no cookie had been sent, but `purge`
-                // is terminal for the request — anything the handler writes to
-                // the session afterwards is discarded. That would break the
-                // one request this design exists to keep working, `/login`:
-                // the caller would be told it logged in and get no usable
-                // session back.
-                req.get_session().clear();
+        // `None` here means the session predates this check — it carries no
+        // stamp, and reads as generation 0, which is what a record that has
+        // never been revoked holds. So the upgrade logs nobody out.
+        let presented = req.get_session().get::<u64>(SESSION_GEN_KEY).ok().flatten();
+        let stale = match get_user(srv, principal.clone()).await {
+            Some(usr) => {
+                let current = session_generation(&usr);
+                presented.unwrap_or(0) != current
             }
+            // The account is gone. Its sessions should go with it.
+            None => presented.is_some(),
+        };
+
+        if stale {
+            info!(
+                "Dropping revoked session for {} (presented {:?})",
+                principal, presented
+            );
+            // `clear`, not `purge`: both empty the session so the `Identity`
+            // extractor in the handler finds nothing and the request is served
+            // as if no cookie had been sent, but `purge` is terminal for the
+            // request — anything the handler writes to the session afterwards
+            // is discarded. That would break the one request this design
+            // exists to keep working, `/login`: the caller would be told it
+            // logged in and get no usable session back.
+            req.get_session().clear();
         }
     }
 
@@ -415,6 +417,54 @@ mod revocation_tests {
         )
         .await;
         assert!(res.status().is_success(), "the new session was refused too");
+    }
+
+    /// Deleting an account has to take its sessions with it. The record is
+    /// gone, so there is no generation left to compare against — the fact
+    /// that the session carries a stamp at all is what says it was issued by
+    /// a build that would have kept one.
+    #[actix_web::test]
+    async fn deleting_an_account_ends_its_session() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_password("hunter2"));
+        let mut data = Data::new();
+        data.rw = Box::new(store.clone());
+        let state = web::Data::new(State::from_data(data));
+        let app = app_with!(state);
+
+        let res = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/login")
+                .insert_header((
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", BOUNDARY),
+                ))
+                .set_payload(multipart_body(&[
+                    ("username", "alice"),
+                    ("password", "hunter2"),
+                ]))
+                .to_request(),
+        )
+        .await;
+        let raw = res.response().cookies().find(|c| c.name() == "id").unwrap();
+        let cookie = Cookie::new(raw.name().to_string(), raw.value().to_string());
+
+        crate::state::store::Store::del_item(&store, "user", 1).await;
+
+        let res = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/probe")
+                .cookie(cookie)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            actix_web::http::StatusCode::UNAUTHORIZED,
+            "a deleted account kept a working session"
+        );
     }
 
     /// Revocation is per account, not per cookie: raising the generation on
