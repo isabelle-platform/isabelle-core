@@ -135,6 +135,14 @@ pub async fn call_url_route(
 /// overwrote the first's content, and whichever finished first deleted the
 /// file out from under the other during cleanup. The name is still sanitised;
 /// the directory is what makes it unambiguous.
+///
+/// It is created only once a file field actually turns up. Creating it up
+/// front leaked one empty directory per request for every caller that sent no
+/// uploads — which is most of them, and `call_url_unprotected_post_route`
+/// reaches this without authenticating, so the leak was an anonymous client's
+/// to drive until the filesystem ran out of inodes. `handle_file_cleanup`
+/// removes the directory along with the files, and it can only find it
+/// through them.
 pub async fn handle_item_files(
     mut payload: Multipart,
     limits: Limits,
@@ -143,11 +151,8 @@ pub async fn handle_item_files(
     let mut files: HashMap<String, String> = HashMap::new();
     let mut files_count = 0;
     let mut total: usize = 0;
-    let req_dir = format!("./tmp/{}", Uuid::new_v4());
-
-    if let Err(e) = fs::create_dir_all(Path::new(&req_dir)) {
-        error!("Failed to create directory {}: {}", req_dir, e);
-    }
+    let req_dir = format!("{}/{}", upload_root(), Uuid::new_v4());
+    let mut dir_ready = false;
 
     let outcome = with_deadline(limits, async {
         loop {
@@ -180,6 +185,15 @@ pub async fn handle_item_files(
                 post_itm.id = new_itm.id;
                 post_itm.merge(&new_itm);
             } else {
+                // First upload of this request: now the directory is worth
+                // creating.
+                if !dir_ready {
+                    if let Err(e) = fs::create_dir_all(Path::new(&req_dir)) {
+                        error!("Failed to create directory {}: {}", req_dir, e);
+                    }
+                    dir_ready = true;
+                }
+
                 let cd = field.content_disposition();
                 let filename = cd
                     .get_filename()
@@ -222,6 +236,20 @@ pub async fn handle_item_files(
     }
 
     Ok((post_itm, files))
+}
+
+/// Directory the per-request upload directories are created under.
+#[cfg(not(test))]
+fn upload_root() -> String {
+    "./tmp".to_string()
+}
+
+/// Under test the root is redirected into a temporary directory, so that
+/// asserting on what was and was not created does not depend on — or litter —
+/// the working tree.
+#[cfg(test)]
+fn upload_root() -> String {
+    tests::upload_root()
 }
 
 pub async fn handle_file_cleanup(files: &HashMap<String, String>) {
@@ -364,5 +392,235 @@ pub fn call_periodic_job_hook(srv: &crate::state::data::Data, timing: &str) {
             log::trace!(target: "core::periodic",
                 "actor periodic tick dropped ({}): {}", timing, e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{web, App, HttpResponse};
+    use parking_lot::Mutex;
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    const BOUNDARY: &str = "----isabelletestboundary";
+
+    /// The redirected upload root. `handle_item_files` writes into whatever
+    /// this holds, so a test that wants to look at the directory tree points
+    /// it at a `tempdir` first.
+    fn root_cell() -> &'static Mutex<String> {
+        static ROOT: OnceLock<Mutex<String>> = OnceLock::new();
+        ROOT.get_or_init(|| Mutex::new("./tmp".to_string()))
+    }
+
+    /// Serialises the tests that redirect the root, since it is global.
+    fn root_guard() -> &'static Mutex<()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    pub(super) fn upload_root() -> String {
+        root_cell().lock().clone()
+    }
+
+    /// A multipart body with an `item` field and zero or more file parts.
+    fn body(item: Option<&str>, files: &[(&str, &str)]) -> String {
+        let mut out = String::new();
+        if let Some(json) = item {
+            out.push_str(&format!("--{}\r\n", BOUNDARY));
+            out.push_str("Content-Disposition: form-data; name=\"item\"\r\n\r\n");
+            out.push_str(json);
+            out.push_str("\r\n");
+        }
+        for (name, content) in files {
+            out.push_str(&format!("--{}\r\n", BOUNDARY));
+            out.push_str(&format!(
+                "Content-Disposition: form-data; name=\"upload\"; filename=\"{}\"\r\n\r\n",
+                name
+            ));
+            out.push_str(content);
+            out.push_str("\r\n");
+        }
+        out.push_str(&format!("--{}--\r\n", BOUNDARY));
+        out
+    }
+
+    type Outcome = Result<(Item, HashMap<String, String>), (ReadError, HashMap<String, String>)>;
+
+    /// Drive a real multipart body through the real extractor into
+    /// `handle_item_files`, and hand back what it made of it.
+    async fn run(payload: String, limits: Limits) -> Outcome {
+        let sink: std::sync::Arc<Mutex<Option<Outcome>>> = std::sync::Arc::new(Mutex::new(None));
+        let into = sink.clone();
+
+        let app = actix_web::test::init_service(App::new().route(
+            "/probe",
+            web::post().to(move |mp: Multipart| {
+                let into = into.clone();
+                async move {
+                    *into.lock() = Some(handle_item_files(mp, limits).await);
+                    HttpResponse::Ok().finish()
+                }
+            }),
+        ))
+        .await;
+
+        let req = actix_web::test::TestRequest::post()
+            .uri("/probe")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={}", BOUNDARY),
+            ))
+            .set_payload(payload)
+            .to_request();
+        let _ = actix_web::test::call_service(&app, req).await;
+
+        let taken = sink.lock().take();
+        taken.expect("handler did not run")
+    }
+
+    fn generous() -> Limits {
+        Limits {
+            deadline: Duration::from_secs(5),
+            max_bytes: 1024 * 1024,
+        }
+    }
+
+    fn entries(root: &Path) -> Vec<String> {
+        match std::fs::read_dir(root) {
+            Ok(rd) => rd
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Point the upload root at a fresh temporary directory for the duration
+    /// of one test.
+    fn with_root<T>(f: impl FnOnce(&Path) -> T) -> T {
+        let _serialised = root_guard().lock();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("tmp");
+        std::fs::create_dir_all(&root).unwrap();
+        *root_cell().lock() = root.to_string_lossy().into_owned();
+        let out = f(dir.path());
+        *root_cell().lock() = "./tmp".to_string();
+        out
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// A request that uploads nothing must leave nothing behind. The
+    /// directory used to be created before the body was even looked at, so
+    /// every plugin POST that carried only an `item` field — and every
+    /// anonymous call to an unprotected POST route — leaked one empty
+    /// directory that no cleanup path could ever find again.
+    #[test]
+    fn a_request_without_uploads_creates_no_directory() {
+        with_root(|base| {
+            let root = base.join("tmp");
+            let (itm, files) = rt()
+                .block_on(run(body(Some("{\"id\":7}"), &[]), generous()))
+                .expect("a well-formed body was rejected");
+
+            assert_eq!(itm.id, 7, "the item field was not read");
+            assert!(files.is_empty());
+            assert!(
+                entries(&root).is_empty(),
+                "left behind {:?}",
+                entries(&root)
+            );
+        });
+    }
+
+    /// A body that is refused before any upload arrives must not leak one
+    /// either — this is the same path, reached by the client that costs the
+    /// least to be.
+    #[test]
+    fn a_refused_body_without_uploads_creates_no_directory() {
+        with_root(|base| {
+            let root = base.join("tmp");
+            let limits = Limits {
+                deadline: Duration::from_secs(5),
+                max_bytes: 8,
+            };
+            let (err, files) = rt()
+                .block_on(run(body(Some(&"x".repeat(64)), &[]), limits))
+                .expect_err("an oversized body was accepted");
+
+            assert_eq!(err, ReadError::TooLarge(64));
+            assert!(files.is_empty());
+            assert!(
+                entries(&root).is_empty(),
+                "left behind {:?}",
+                entries(&root)
+            );
+        });
+    }
+
+    /// The directory still has to exist when there *is* something to put in
+    /// it, and cleanup still has to take it away afterwards.
+    #[test]
+    fn uploads_get_a_directory_that_cleanup_removes() {
+        with_root(|base| {
+            let root = base.join("tmp");
+            let (_itm, files) = rt()
+                .block_on(run(
+                    body(Some("{\"id\":1}"), &[("a.txt", "alpha"), ("b.txt", "beta")]),
+                    generous(),
+                ))
+                .expect("an upload was rejected");
+
+            assert_eq!(files.len(), 2);
+            assert_eq!(entries(&root).len(), 1, "uploads did not get a directory");
+            for path in files.values() {
+                assert!(Path::new(path).is_file(), "{} was not written", path);
+            }
+
+            rt().block_on(handle_file_cleanup(&files));
+            assert!(
+                entries(&root).is_empty(),
+                "cleanup left {:?}",
+                entries(&root)
+            );
+        });
+    }
+
+    /// Two requests uploading the same filename must not share a path — the
+    /// defect the per-request directory exists to fix. Asserted here so that
+    /// making the directory lazy cannot quietly undo it.
+    #[test]
+    fn concurrent_uploads_of_one_name_do_not_collide() {
+        with_root(|base| {
+            let root = base.join("tmp");
+            let rt = rt();
+            let (_, first) = rt
+                .block_on(run(body(None, &[("photo.jpg", "first")]), generous()))
+                .unwrap();
+            let (_, second) = rt
+                .block_on(run(body(None, &[("photo.jpg", "second")]), generous()))
+                .unwrap();
+
+            let a = first.values().next().unwrap();
+            let b = second.values().next().unwrap();
+            assert_ne!(a, b, "two requests shared one upload path");
+            assert_eq!(std::fs::read_to_string(a).unwrap(), "first");
+            assert_eq!(std::fs::read_to_string(b).unwrap(), "second");
+            assert_eq!(entries(&root).len(), 2);
+
+            rt.block_on(handle_file_cleanup(&first));
+            // The other request's file must survive its neighbour's cleanup.
+            assert!(
+                Path::new(b).is_file(),
+                "cleanup reached into another request"
+            );
+            rt.block_on(handle_file_cleanup(&second));
+            assert!(entries(&root).is_empty());
+        });
     }
 }
