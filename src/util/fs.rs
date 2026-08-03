@@ -49,11 +49,17 @@ pub const DEFAULT_MODE: u32 = 0o600;
 /// The temporary file is a sibling of the target so that the rename stays
 /// within one filesystem — `rename` across mount points fails, and a fallback
 /// copy would reintroduce exactly the torn write this exists to prevent.
+///
+/// Any failure after the staging file exists takes it back out again. Leaving
+/// it behind would put a half-written `settings.js.tmp` next to the file it
+/// was staging, which is the litter this function is supposed to make
+/// impossible — and on a disk that filled up, the leftovers are what keeps it
+/// full.
 #[cfg(unix)]
 pub fn atomic_write(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = tmp_sibling(path);
-    {
+    let staged = || -> io::Result<()> {
         let mut f = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -62,15 +68,15 @@ pub fn atomic_write(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
             .open(&tmp)?;
         use std::io::Write;
         f.write_all(data)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)
+        f.sync_all()
+    }();
+    finish(staged, &tmp, path)
 }
 
 #[cfg(not(unix))]
 pub fn atomic_write(path: &Path, data: &[u8], _mode: u32) -> io::Result<()> {
     let tmp = tmp_sibling(path);
-    {
+    let staged = || -> io::Result<()> {
         let mut f = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -78,9 +84,53 @@ pub fn atomic_write(path: &Path, data: &[u8], _mode: u32) -> io::Result<()> {
             .open(&tmp)?;
         use std::io::Write;
         f.write_all(data)?;
-        f.sync_all()?;
+        f.sync_all()
+    }();
+    finish(staged, &tmp, path)
+}
+
+/// Rename the staged file over the target, or clean it up if staging failed.
+fn finish(staged: io::Result<()>, tmp: &Path, path: &Path) -> io::Result<()> {
+    if let Err(e) = staged {
+        let _ = fs::remove_file(tmp);
+        return Err(e);
     }
-    fs::rename(&tmp, path)
+    if let Err(e) = fs::rename(tmp, path) {
+        let _ = fs::remove_file(tmp);
+        return Err(e);
+    }
+    sync_parent(path);
+    Ok(())
+}
+
+/// Flush the directory entry the rename just created.
+///
+/// `sync_all` on the staging file makes its *contents* durable, but the
+/// rename that publishes them is a change to the parent directory, and that
+/// is a separate write. Without this, a crash right after a successful
+/// `atomic_write` can come back up with the target still naming the old
+/// inode — the write is atomic either way, so nothing is torn, but the caller
+/// was told the new contents had landed and they had not.
+///
+/// Best-effort: a filesystem that refuses to open a directory (some network
+/// mounts) or to fsync one is not a reason to fail a write that has already
+/// been published.
+fn sync_parent(path: &Path) {
+    if let Ok(dir) = fs::File::open(parent_dir(path)) {
+        let _ = dir.sync_all();
+    }
+}
+
+/// The directory whose entry names `path`.
+///
+/// `Path::parent` answers `Some("")` for a bare relative filename, and the
+/// empty path opens nothing — so the one case where the fsync would silently
+/// never happen is the plainest one. That resolves to the current directory.
+fn parent_dir(path: &Path) -> std::path::PathBuf {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    }
 }
 
 /// `foo.js` → `foo.js.tmp`.
@@ -180,5 +230,61 @@ mod tests {
         let missing = dir.path().join("nope.js");
         let got: io::Result<serde_json::Value> = read_json(&missing.to_string_lossy());
         assert_eq!(got.unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    /// A write that cannot happen must leave the target exactly as it was.
+    /// The staging file is what makes this possible, and it is also what
+    /// gets left behind if nobody takes it away.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_leaves_neither_litter_nor_damage() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.js");
+        atomic_write(&path, b"{\"a\":1}", DEFAULT_MODE).unwrap();
+
+        // Read-only directory: the staging file cannot be created, so the
+        // write fails at the first step.
+        let mut perms = fs::metadata(dir.path()).unwrap().permissions();
+        perms.set_mode(0o500);
+        fs::set_permissions(dir.path(), perms).unwrap();
+
+        let got = atomic_write(&path, b"{\"a\":2}", DEFAULT_MODE);
+
+        let mut perms = fs::metadata(dir.path()).unwrap().permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(dir.path(), perms).unwrap();
+
+        assert!(got.is_err(), "a write into a read-only directory succeeded");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{\"a\":1}",
+            "a failed write damaged the target"
+        );
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind {:?}", leftovers);
+    }
+
+    /// The rename is published through the parent directory, so the parent is
+    /// what the post-rename fsync has to open. `Path::parent` answers with an
+    /// empty path for a bare relative filename, and an empty path opens
+    /// nothing — so without this the one case where the fsync would quietly
+    /// never happen is the plainest one.
+    #[test]
+    fn the_parent_of_a_bare_relative_name_is_the_current_directory() {
+        assert_eq!(parent_dir(Path::new("settings.js")), Path::new("."));
+        assert_eq!(
+            parent_dir(Path::new("/data/settings.js")),
+            Path::new("/data")
+        );
+        assert_eq!(
+            parent_dir(Path::new("collection/user/data.js")),
+            Path::new("collection/user")
+        );
     }
 }
