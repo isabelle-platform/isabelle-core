@@ -140,7 +140,49 @@ pub trait Store {
     /// indexed `find_one` behind a short-lived cache).
     async fn find_user(&self, login: &str) -> Option<Item>;
 
+    /// `find_user`, but able to say that it could not ask.
+    ///
+    /// `Option` flattens "there is no such account" and "the database did not
+    /// answer" into one `None`, and the session guard has to tell those apart:
+    /// treating an unreachable store as proof that an account is gone revokes
+    /// every live session in the deployment the moment the database blinks,
+    /// and since the sessions live in cookies, revoking one rewrites the
+    /// client's cookie — so the outage does not end when the database comes
+    /// back. Everyone has to log in again.
+    ///
+    /// The default is for stores that cannot be unreachable: a store held in
+    /// this process either has the record or does not.
+    async fn find_user_checked(&self, login: &str) -> UserLookup {
+        match self.find_user(login).await {
+            Some(itm) => UserLookup::Found(itm),
+            None => UserLookup::Absent,
+        }
+    }
+
     /// Name the database to connect to. Meaningful only for backends that
     /// have one; the file-backed store ignores it.
     fn set_database_name(&mut self, _name: &str) {}
+}
+
+/// What a `user` lookup could establish.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UserLookup {
+    /// The store answered, and this is the record.
+    Found(Item),
+    /// The store answered, and there is no such account.
+    Absent,
+    /// The store could not be asked, so nothing was established either way.
+    /// Callers must not read this as `Absent`.
+    Unavailable,
+}
+
+impl UserLookup {
+    /// The record, if there is one. For callers that genuinely cannot act on
+    /// the distinction and would have had an `Option` anyway.
+    pub fn into_option(self) -> Option<Item> {
+        match self {
+            UserLookup::Found(itm) => Some(itm),
+            _ => None,
+        }
+    }
 }

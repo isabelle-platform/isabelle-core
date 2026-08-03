@@ -25,12 +25,13 @@
 //! the filter string (there is no query engine here), which is fine because
 //! the filter is validated and rejected *before* the store is reached.
 
-use crate::state::store::Store;
+use crate::state::store::{Store, UserLookup};
 use async_trait::async_trait;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::list_result::ListResult;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Cheap to clone: a test hands one clone to `Data` and keeps another to
@@ -40,6 +41,11 @@ pub struct StoreMemory {
     collections: Arc<Mutex<HashMap<String, HashMap<u64, Item>>>>,
     internals: Arc<Mutex<Item>>,
     settings: Arc<Mutex<Item>>,
+    /// Makes user lookups report `Unavailable`, standing in for a database
+    /// that is not answering. A real in-memory store cannot be unreachable,
+    /// but the behaviour that depends on the distinction — the session guard —
+    /// has to be exercised against something.
+    unreachable: Arc<AtomicBool>,
 }
 
 impl Default for StoreMemory {
@@ -59,7 +65,15 @@ impl StoreMemory {
             collections: Arc::new(Mutex::new(collections)),
             internals: Arc::new(Mutex::new(Item::new())),
             settings: Arc::new(Mutex::new(Item::new())),
+            unreachable: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Simulate the database being down for user lookups. Clones share the
+    /// switch, so a test can flip it on the handle it kept while the app
+    /// holds another.
+    pub fn set_unreachable(&self, unreachable: bool) {
+        self.unreachable.store(unreachable, Ordering::Relaxed);
     }
 
     /// Seed an item, bypassing `set_item`, so a test can arrange state
@@ -252,5 +266,107 @@ impl Store for StoreMemory {
                 })
             })
             .cloned()
+    }
+
+    async fn find_user_checked(&self, login: &str) -> UserLookup {
+        if self.unreachable.load(Ordering::Relaxed) {
+            return UserLookup::Unavailable;
+        }
+        match self.find_user(login).await {
+            Some(itm) => UserLookup::Found(itm),
+            None => UserLookup::Absent,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn alice() -> Item {
+        let mut itm = Item::new();
+        itm.id = 1;
+        itm.set_str("login", "alice");
+        itm.set_str("email", "alice@example.org");
+        itm
+    }
+
+    /// The store answered and had the record.
+    #[test]
+    fn a_known_login_is_found() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", alice());
+        let got = rt().block_on(store.find_user_checked("alice"));
+        assert_eq!(got, UserLookup::Found(alice()));
+    }
+
+    /// The store answered and had nothing. This is the answer that may end a
+    /// session, so it must not be reachable by a store that simply could not
+    /// be asked.
+    #[test]
+    fn an_unknown_login_is_absent_not_unavailable() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", alice());
+        assert_eq!(
+            rt().block_on(store.find_user_checked("bob")),
+            UserLookup::Absent
+        );
+    }
+
+    /// A store that cannot answer says so, and keeps saying so until it can.
+    #[test]
+    fn an_unreachable_store_reports_unavailable() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", alice());
+        let rt = rt();
+
+        store.set_unreachable(true);
+        assert_eq!(
+            rt.block_on(store.find_user_checked("alice")),
+            UserLookup::Unavailable,
+            "an unreachable store claimed to have looked"
+        );
+        // Even for a login that does not exist: nothing was established.
+        assert_eq!(
+            rt.block_on(store.find_user_checked("bob")),
+            UserLookup::Unavailable
+        );
+
+        store.set_unreachable(false);
+        assert_eq!(
+            rt.block_on(store.find_user_checked("alice")),
+            UserLookup::Found(alice())
+        );
+    }
+
+    /// Clones share the switch — the app under test holds one clone and the
+    /// test holds another, so flipping it has to be visible through both.
+    #[test]
+    fn the_unreachable_switch_is_shared_across_clones() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", alice());
+        let other = store.clone();
+        store.set_unreachable(true);
+        assert_eq!(
+            rt().block_on(other.find_user_checked("alice")),
+            UserLookup::Unavailable
+        );
+    }
+
+    /// `into_option` is the escape hatch for callers that cannot act on the
+    /// distinction; it must not turn `Unavailable` into anything but "no
+    /// record", since that is all such a caller can do with it.
+    #[test]
+    fn into_option_keeps_only_the_record() {
+        assert_eq!(UserLookup::Found(alice()).into_option(), Some(alice()));
+        assert_eq!(UserLookup::Absent.into_option(), None);
+        assert_eq!(UserLookup::Unavailable.into_option(), None);
     }
 }

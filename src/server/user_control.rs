@@ -134,6 +134,36 @@ pub fn principal(user: &actix_identity::Identity) -> String {
     user.id().unwrap_or_default()
 }
 
+/// Resolve a session principal, keeping the difference between "no such
+/// account" and "could not ask".
+///
+/// Only the session guard needs it: every other caller has an
+/// unauthenticated path it would take for either answer, so `get_user`'s
+/// `Option` is the right shape for them. The guard is the one place where
+/// reading an outage as a deletion has a consequence — it revokes the
+/// session, and a cookie-backed session that is revoked cannot be
+/// un-revoked when the database comes back.
+/// Unlike `get_user` this does not branch on the backing store. `get_user`
+/// has a `full_file_database` fallback because it predates `find_user` being
+/// on the trait; every store now implements the lookup itself, and the file
+/// store's implementation is the same scan that fallback performs. Routing
+/// the guard through one path is also what keeps the two feature builds from
+/// enforcing different rules.
+pub async fn lookup_user(
+    srv: &crate::state::data::Data,
+    login: String,
+) -> crate::state::store::UserLookup {
+    use crate::state::store::UserLookup;
+
+    // A login the store could never match is definitively not an account,
+    // rather than a lookup that failed.
+    if login_has_bad_symbols(&login) {
+        return UserLookup::Absent;
+    }
+
+    srv.rw.find_user_checked(&login).await
+}
+
 /// Get user by given login
 pub async fn get_user(srv: &crate::state::data::Data, login: String) -> Option<Item> {
     if login_has_bad_symbols(&login) {

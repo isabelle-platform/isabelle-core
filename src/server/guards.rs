@@ -28,8 +28,9 @@
 //! runs once routing has already decided the request is well formed and the
 //! caller is who the cookie says.
 
-use crate::server::user_control::{get_user, session_generation};
+use crate::server::user_control::{lookup_user, session_generation};
 use crate::state::state::State;
+use crate::state::store::UserLookup;
 use actix_identity::IdentityExt;
 use actix_session::SessionExt;
 use actix_web::body::{EitherBody, MessageBody};
@@ -95,6 +96,17 @@ pub async fn reject_ambiguous_framing(
 /// predates the check and is left alone, which is what keeps the upgrade from
 /// logging out everybody whose account merely fails to resolve for some other
 /// reason.
+///
+/// "Resolving to nothing" has to mean the store *answered* and had no such
+/// record. A store that could not be asked establishes nothing, and the
+/// request passes untouched: a lookup that fails during a database hiccup
+/// would otherwise revoke every session in the deployment at once, and because
+/// the session lives in the cookie, revoking it rewrites what the browser
+/// holds — so the damage would outlast the hiccup by exactly as long as it
+/// takes every user to log in again. The narrow cost of passing instead is
+/// that during an outage a session already revoked out of band stays usable;
+/// the handler behind it still cannot resolve a user, so it can do no more
+/// than an anonymous caller.
 pub async fn enforce_session_generation(
     req: ServiceRequest,
     next: Next<impl MessageBody + 'static>,
@@ -110,13 +122,23 @@ pub async fn enforce_session_generation(
         // stamp, and reads as generation 0, which is what a record that has
         // never been revoked holds. So the upgrade logs nobody out.
         let presented = req.get_session().get::<u64>(SESSION_GEN_KEY).ok().flatten();
-        let stale = match get_user(srv, principal.clone()).await {
-            Some(usr) => {
+        let stale = match lookup_user(srv, principal.clone()).await {
+            UserLookup::Found(usr) => {
                 let current = session_generation(&usr);
                 presented.unwrap_or(0) != current
             }
             // The account is gone. Its sessions should go with it.
-            None => presented.is_some(),
+            UserLookup::Absent => presented.is_some(),
+            // Nothing was established, so nothing is revoked. See above.
+            UserLookup::Unavailable => {
+                warn!(
+                    "Passing {} {} unchecked: the user store did not answer for {}",
+                    req.method(),
+                    req.path(),
+                    principal
+                );
+                false
+            }
         };
 
         if stale {
@@ -464,6 +486,208 @@ mod revocation_tests {
             res.status(),
             actix_web::http::StatusCode::UNAUTHORIZED,
             "a deleted account kept a working session"
+        );
+    }
+
+    /// A database that does not answer is not a database that says the
+    /// account is gone. Conflating the two revokes every session in the
+    /// deployment during any lookup failure — and because the session lives
+    /// in the cookie, revoking it rewrites what the browser holds, so the
+    /// outage outlasts itself: everyone has to log in again once the store
+    /// recovers.
+    #[actix_web::test]
+    async fn a_store_that_cannot_answer_does_not_revoke_anything() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_password("hunter2"));
+        let mut data = Data::new();
+        data.rw = Box::new(store.clone());
+        let state = web::Data::new(State::from_data(data));
+        let app = app_with!(state);
+
+        let res = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/login")
+                .insert_header((
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", BOUNDARY),
+                ))
+                .set_payload(multipart_body(&[
+                    ("username", "alice"),
+                    ("password", "hunter2"),
+                ]))
+                .to_request(),
+        )
+        .await;
+        let raw = res.response().cookies().find(|c| c.name() == "id").unwrap();
+        let cookie = Cookie::new(raw.name().to_string(), raw.value().to_string());
+
+        store.set_unreachable(true);
+        let res = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/probe")
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert!(
+            res.status().is_success(),
+            "a database hiccup logged a live session out"
+        );
+        // The guard must not have written a cleared session back to the
+        // browser either — that is what would make the logout permanent.
+        assert!(
+            res.response().cookies().all(|c| c.name() != "id"),
+            "the session cookie was rewritten during an outage"
+        );
+
+        // And the same cookie keeps working once the store recovers.
+        store.set_unreachable(false);
+        let res = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/probe")
+                .cookie(cookie)
+                .to_request(),
+        )
+        .await;
+        assert!(
+            res.status().is_success(),
+            "the session did not survive the outage"
+        );
+    }
+
+    /// The outage exemption must not become a way to keep a revoked session:
+    /// the moment the store answers again, the generation check applies.
+    #[actix_web::test]
+    async fn recovery_re_applies_a_revocation_made_during_the_outage() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_password("hunter2"));
+        let mut data = Data::new();
+        data.rw = Box::new(store.clone());
+        let state = web::Data::new(State::from_data(data));
+        let app = app_with!(state);
+
+        let res = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/login")
+                .insert_header((
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", BOUNDARY),
+                ))
+                .set_payload(multipart_body(&[
+                    ("username", "alice"),
+                    ("password", "hunter2"),
+                ]))
+                .to_request(),
+        )
+        .await;
+        let raw = res.response().cookies().find(|c| c.name() == "id").unwrap();
+        let cookie = Cookie::new(raw.name().to_string(), raw.value().to_string());
+
+        let mut bumped = store.peek("user", 1).unwrap();
+        bumped.set_u64("session_gen", 4);
+        store.seed("user", bumped);
+
+        store.set_unreachable(true);
+        let res = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/probe")
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert!(
+            res.status().is_success(),
+            "the outage exemption did not hold"
+        );
+
+        store.set_unreachable(false);
+        let res = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/probe")
+                .cookie(cookie)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            actix_web::http::StatusCode::UNAUTHORIZED,
+            "a revocation was lost because it happened during an outage"
+        );
+    }
+
+    /// Logging out is deliberately account-wide, not device-wide.
+    ///
+    /// With `CookieSessionStore` the whole session is the cookie, so there is
+    /// nothing per-device to invalidate: the generation on the record is the
+    /// only handle the server has, and it names the account. Ending one
+    /// device's session therefore ends them all. That is the safe direction
+    /// for the case this exists for — a copied cookie — but it is a visible
+    /// product decision, so it is pinned here rather than left to be
+    /// rediscovered. Per-device logout would need server-side session state,
+    /// which this design does not have.
+    #[actix_web::test]
+    async fn logging_out_on_one_device_ends_the_session_on_the_others() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_password("hunter2"));
+        let mut data = Data::new();
+        data.rw = Box::new(store.clone());
+        let state = web::Data::new(State::from_data(data));
+        let app = app_with!(state);
+
+        let sign_in = || {
+            test::TestRequest::post()
+                .uri("/login")
+                .insert_header((
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", BOUNDARY),
+                ))
+                .set_payload(multipart_body(&[
+                    ("username", "alice"),
+                    ("password", "hunter2"),
+                ]))
+        };
+
+        let laptop = {
+            let res = test::call_service(&app, sign_in().to_request()).await;
+            let raw = res.response().cookies().find(|c| c.name() == "id").unwrap();
+            Cookie::new(raw.name().to_string(), raw.value().to_string())
+        };
+        let phone = {
+            let res = test::call_service(&app, sign_in().to_request()).await;
+            let raw = res.response().cookies().find(|c| c.name() == "id").unwrap();
+            Cookie::new(raw.name().to_string(), raw.value().to_string())
+        };
+
+        // The laptop logs out.
+        let res = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/logout")
+                .cookie(laptop)
+                .to_request(),
+        )
+        .await;
+        assert!(res.status().is_success());
+
+        // The phone's session goes with it.
+        let res = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/probe")
+                .cookie(phone)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            actix_web::http::StatusCode::UNAUTHORIZED,
+            "logout is documented as account-wide but left another device signed in"
         );
     }
 

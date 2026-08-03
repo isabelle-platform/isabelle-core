@@ -26,7 +26,7 @@ use futures_util::TryStreamExt;
 use isabelle_dm::data_model::list_result::ListResult;
 extern crate serde_json;
 
-use crate::state::store::Store;
+use crate::state::store::{Store, UserLookup};
 use crate::util::bson_wrapper::{u64_to_decimal128, BsonItem};
 use async_trait::async_trait;
 use isabelle_dm::data_model::item::*;
@@ -162,14 +162,14 @@ impl StoreMongo {
     /// in `set_item`/`del_item` for the `user` collection, including
     /// writes that come through the plugin API (which also funnel through
     /// these methods).
-    async fn find_user_cached(&self, login: &str) -> Option<Item> {
+    async fn find_user_cached(&self, login: &str) -> UserLookup {
         // Read the generation *before* the lookup, so that a write landing
         // while we are in Mongo is detectable when we come back.
         let gen_at_start = {
             let cache = self.user_cache.lock();
             if let Some((item, expires)) = cache.get(login) {
                 if *expires > Instant::now() {
-                    return Some(item.clone());
+                    return UserLookup::Found(item.clone());
                 }
             }
             self.user_cache_gen.load(Ordering::Acquire)
@@ -181,7 +181,15 @@ impl StoreMongo {
             "{{ \"$or\": [ {{ \"strs.login\": \"{}\" }}, {{ \"strs.email\": \"{}\" }} ] }}",
             login, login
         );
-        let user_opt = self.find_one("user", &filter).await;
+        let user_opt = match self.find_one_checked("user", &filter).await {
+            Ok(found) => found,
+            Err(e) => {
+                // Nothing was established. Reporting `Absent` here is what
+                // would turn a database hiccup into a fleet-wide logout.
+                warn!("Could not look up user {}: {}", login, e);
+                return UserLookup::Unavailable;
+            }
+        };
 
         if let Some(user) = &user_opt {
             // A record read before a write we have since observed is stale by
@@ -201,7 +209,10 @@ impl StoreMongo {
             }
         }
 
-        user_opt
+        match user_opt {
+            Some(user) => UserLookup::Found(user),
+            None => UserLookup::Absent,
+        }
     }
 
     /// Invalidate the user cache after a write to the `user` collection.
@@ -300,34 +311,57 @@ impl StoreMongo {
     /// so it's the right primitive for things like `get_user` where the
     /// caller only needs the first match.
     pub async fn find_one(&self, collection: &str, filter: &str) -> Option<Item> {
+        self.find_one_checked(collection, filter)
+            .await
+            .unwrap_or(None)
+    }
+
+    /// `find_one`, keeping the difference between "no such document" and
+    /// "could not ask".
+    ///
+    /// A dropped connection, an election in progress, an authentication
+    /// failure — all of them used to come back as `None`, indistinguishable
+    /// from an empty collection. That is fine for a listing and wrong for the
+    /// session guard, which decides whether an account still exists.
+    pub async fn find_one_checked(
+        &self,
+        collection: &str,
+        filter: &str,
+    ) -> Result<Option<Item>, String> {
         let bson_filter = if filter.is_empty() {
             Document::new()
         } else {
             match self.json_to_bson(filter).await {
                 Ok(d) => d,
-                Err(_) => {
+                Err(e) => {
                     trace!(
                         "find_one: failed to parse filter, returning None: {}",
                         filter
                     );
-                    return None;
+                    // A filter this store cannot parse is the caller's own
+                    // doing, not an outage: nothing matches it, definitively.
+                    let _ = e;
+                    return Ok(None);
                 }
             }
         };
 
-        let coll: Collection<BsonItem> = self
-            .client
-            .as_ref()
-            .unwrap()
-            .database(&self.database_name)
-            .collection(collection);
+        // No client means the store was never connected — which is a failure
+        // to ask, not an answer. This used to `unwrap()` and take the process
+        // with it.
+        let client = match self.client.as_ref() {
+            Some(c) => c,
+            None => return Err("store is not connected".to_string()),
+        };
+        let coll: Collection<BsonItem> =
+            client.database(&self.database_name).collection(collection);
 
         match coll.find_one(bson_filter).await {
-            Ok(Some(bson_item)) => Some(bson_item.into()),
-            Ok(None) => None,
+            Ok(Some(bson_item)) => Ok(Some(bson_item.into())),
+            Ok(None) => Ok(None),
             Err(e) => {
                 trace!("find_one error on {}: {}", collection, e);
-                None
+                Err(e.to_string())
             }
         }
     }
@@ -855,6 +889,12 @@ impl Store for StoreMongo {
     }
 
     async fn find_user(&self, login: &str) -> Option<Item> {
+        self.find_user_cached(login).await.into_option()
+    }
+
+    /// Overridden: this is the one store that can fail to answer at all, so
+    /// the default "`None` means absent" mapping is wrong here.
+    async fn find_user_checked(&self, login: &str) -> UserLookup {
         self.find_user_cached(login).await
     }
 
