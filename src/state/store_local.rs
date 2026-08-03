@@ -243,6 +243,21 @@ impl Store for StoreLocal {
             itm.bools.remove("__security_preserve");
         }
 
+        // An unregistered collection has no counter and no place on disk.
+        // Refusing here rather than further down is what keeps the write from
+        // happening at all: allocation would leave `itm.id` at `u64::MAX`, and
+        // the write below would then create
+        // `collection/<name>/18446744073709551615/data.js` before the caller
+        // was told the write had failed — a directory nothing ever reads and
+        // nothing ever cleans up.
+        let coll_id = match self.collections.get(collection) {
+            Some(&c) => c,
+            None => {
+                error!("Refusing a write to unknown collection {}", collection);
+                return u64::MAX;
+            }
+        };
+
         // The identifier is allocated with the counter lock held across the
         // read and the increment. It used to read under one lock, release it,
         // and write afterwards, so two creations that overlapped were told the
@@ -250,12 +265,10 @@ impl Store for StoreLocal {
         // ever one process behind this store, but there are many request
         // threads, which is enough for the race.
         if itm.id == u64::MAX {
-            if let Some(&coll_id) = self.collections.get(collection) {
-                let mut counts = self.items_count.lock();
-                let next = counts.entry(coll_id).or_insert(0);
-                *next = next.saturating_add(1);
-                itm.id = *next;
-            }
+            let mut counts = self.items_count.lock();
+            let next = counts.entry(coll_id).or_insert(0);
+            *next = next.saturating_add(1);
+            itm.id = *next;
         }
 
         let old_itm = self.get_item(collection, itm.id).await;
@@ -282,25 +295,23 @@ impl Store for StoreLocal {
             return u64::MAX;
         }
 
-        if let Some(&coll_id) = self.collections.get(collection) {
-            {
-                let mut items = self.items.lock();
-                if let Some(coll) = items.get_mut(&coll_id) {
-                    coll.insert(new_itm.id, true);
-                }
+        {
+            let mut items = self.items.lock();
+            if let Some(coll) = items.get_mut(&coll_id) {
+                coll.insert(new_itm.id, true);
             }
-            let mut counts = self.items_count.lock();
-            let high = counts.entry(coll_id).or_insert(0);
-            if new_itm.id >= *high {
-                *high = new_itm.id;
-                let cnt_path = self.path.to_string() + "/collection/" + collection + "/cnt";
-                if let Err(e) = crate::util::fs::atomic_write(
-                    std::path::Path::new(&cnt_path),
-                    new_itm.id.to_string().as_bytes(),
-                    crate::util::fs::DEFAULT_MODE,
-                ) {
-                    error!("Failed to persist the counter of {}: {}", collection, e);
-                }
+        }
+        let mut counts = self.items_count.lock();
+        let high = counts.entry(coll_id).or_insert(0);
+        if new_itm.id >= *high {
+            *high = new_itm.id;
+            let cnt_path = self.path.to_string() + "/collection/" + collection + "/cnt";
+            if let Err(e) = crate::util::fs::atomic_write(
+                std::path::Path::new(&cnt_path),
+                new_itm.id.to_string().as_bytes(),
+                crate::util::fs::DEFAULT_MODE,
+            ) {
+                error!("Failed to persist the counter of {}: {}", collection, e);
             }
         }
 
@@ -478,6 +489,68 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "an id was handed out twice");
         // And nothing was written over: three seeded plus five created.
         assert_eq!(store.items.lock()[&0].len(), 8);
+    }
+
+    /// A store held in this process cannot be unreachable, so it takes the
+    /// trait's default mapping: whatever `find_user` says is the whole
+    /// answer. What matters is that `Unavailable` is not reachable from here
+    /// — it is the answer that suppresses session revocation, and a store
+    /// that always knows must never produce it.
+    #[test]
+    fn the_file_store_never_reports_itself_unavailable() {
+        use crate::state::store::UserLookup;
+
+        let (dir, mut store) = make_store_with_items(&[1]);
+        let user_dir = dir.path().join("collection").join("user").join("1");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        let mut usr = Item::new();
+        usr.id = 1;
+        usr.set_str("login", "alice");
+        std::fs::write(
+            user_dir.join("data.js"),
+            serde_json::to_string(&usr).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("collection").join("user").join("cnt"), "1").unwrap();
+        store.collections.insert("user".to_string(), 1);
+        store.items.lock().insert(1, HashMap::from([(1u64, true)]));
+
+        let rt = rt();
+        assert_eq!(
+            rt.block_on(store.find_user_checked("alice")),
+            UserLookup::Found(usr)
+        );
+        assert_eq!(
+            rt.block_on(store.find_user_checked("bob")),
+            UserLookup::Absent,
+            "a store that always knows reported that it did not"
+        );
+    }
+
+    /// A collection the store does not know has no counter, so allocation
+    /// leaves the id at `u64::MAX`. Writing anyway created
+    /// `collection/<name>/18446744073709551615/data.js` — on disk, unreadable,
+    /// unreferenced — and only then told the caller the write had failed.
+    #[test]
+    fn a_write_to_an_unknown_collection_touches_no_disk() {
+        let (dir, store) = make_store_with_items(&[1, 2, 3]);
+        let mut itm = Item::new();
+        itm.strs.insert("name".into(), "new".into());
+
+        let id = rt().block_on(store.set_item("nope", &itm, false));
+
+        assert_eq!(id, u64::MAX, "an unknown collection accepted a write");
+        assert!(
+            !dir.path().join("collection/nope").exists(),
+            "a directory was created for an unknown collection"
+        );
+        let stray = dir
+            .path()
+            .join("collection/test")
+            .join(u64::MAX.to_string());
+        assert!(!stray.exists(), "an item was written at the sentinel id");
+        // The known collection is untouched.
+        assert_eq!(store.items.lock()[&0].len(), 3);
     }
 
     /// A creation must not land on an identifier that already exists, which
