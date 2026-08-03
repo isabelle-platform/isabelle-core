@@ -53,7 +53,17 @@ async fn ensure_admin(data: &web::Data<State>, user: &Identity) -> Result<(), Ht
 }
 
 fn proc_err(msg: impl Into<String>) -> HttpResponse {
-    HttpResponse::Ok().body(
+    proc_err_status(actix_web::http::StatusCode::OK, msg)
+}
+
+/// A failure envelope at a chosen status.
+///
+/// Every other answer from these endpoints is a `ProcessResult` document, and
+/// clients parse the body before they look at the status. A bare
+/// `HttpResponse::NotFound()` sends no body at all, so the one answer that
+/// carries a distinct status was also the one that made `resp.json()` throw.
+fn proc_err_status(status: actix_web::http::StatusCode, msg: impl Into<String>) -> HttpResponse {
+    HttpResponse::build(status).body(
         serde_json::to_string(&ProcessResult {
             succeeded: false,
             error: msg.into(),
@@ -153,7 +163,10 @@ pub async fn secret_get(
     };
     match store.get_masked(body.id) {
         Some(item) => HttpResponse::Ok().body(serde_json::to_string(&item).unwrap()),
-        None => HttpResponse::NotFound().into(),
+        None => proc_err_status(
+            actix_web::http::StatusCode::NOT_FOUND,
+            "no such secret".to_string(),
+        ),
     }
 }
 
@@ -181,7 +194,10 @@ pub async fn secret_del(
     // one thing this call exists to confirm.
     match store.del(body.id) {
         Ok(true) => proc_ok(),
-        Ok(false) => HttpResponse::NotFound().into(),
+        Ok(false) => proc_err_status(
+            actix_web::http::StatusCode::NOT_FOUND,
+            "no such secret".to_string(),
+        ),
         Err(e) => proc_err(format!("failed to delete secret: {}", e)),
     }
 }
@@ -205,4 +221,51 @@ pub async fn secret_list(
         None => return proc_err("secret store is not initialized"),
     };
     HttpResponse::Ok().body(serde_json::to_string(&refs).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::body::MessageBody;
+    use actix_web::http::StatusCode;
+
+    fn parse(resp: HttpResponse) -> (StatusCode, ProcessResult) {
+        let status = resp.status();
+        let bytes = resp.into_body().try_into_bytes().unwrap();
+        let parsed: ProcessResult = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("body was not a ProcessResult: {} ({:?})", e, bytes));
+        (status, parsed)
+    }
+
+    /// Every answer these endpoints give is a `ProcessResult` document, and
+    /// clients parse the body before looking at the status. Deleting a secret
+    /// that is not there answers 404, and that answer used to carry no body
+    /// at all — the one status a client would want to branch on was the one
+    /// that broke its parser.
+    #[test]
+    fn a_missing_secret_answers_404_with_a_parseable_body() {
+        let (status, result) = parse(proc_err_status(StatusCode::NOT_FOUND, "no such secret"));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!result.succeeded);
+        assert_eq!(result.error, "no such secret");
+    }
+
+    /// The ordinary failure envelope keeps its 200: clients already read
+    /// `succeeded` for those, and moving them would be a separate, breaking
+    /// change.
+    #[test]
+    fn an_ordinary_failure_still_answers_200() {
+        let (status, result) = parse(proc_err("secret store is not initialized"));
+        assert_eq!(status, StatusCode::OK);
+        assert!(!result.succeeded);
+        assert_eq!(result.error, "secret store is not initialized");
+    }
+
+    #[test]
+    fn success_is_reported_as_success() {
+        let (status, result) = parse(proc_ok());
+        assert_eq!(status, StatusCode::OK);
+        assert!(result.succeeded);
+        assert_eq!(result.error, "");
+    }
 }
