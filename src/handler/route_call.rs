@@ -144,7 +144,7 @@ pub async fn call_url_route(
 /// removes the directory along with the files, and it can only find it
 /// through them.
 pub async fn handle_item_files(
-    mut payload: Multipart,
+    payload: Option<Multipart>,
     limits: Limits,
 ) -> Result<(Item, HashMap<String, String>), (ReadError, HashMap<String, String>)> {
     let mut post_itm = Item::new();
@@ -153,6 +153,19 @@ pub async fn handle_item_files(
     let mut total: usize = 0;
     let req_dir = format!("{}/{}", upload_root(), Uuid::new_v4());
     let mut dir_ready = false;
+
+    // No multipart body at all, which is normal: plenty of action endpoints
+    // take everything in the query string and post nothing. They get an empty
+    // Item, exactly as if the body had been an empty form. Demanding a
+    // multipart envelope from them made actix fail extraction before the route
+    // ever ran, and all the caller saw was
+    //   Could not read the request body: malformed multipart body:
+    //   Multipart boundary is not found
+    // with no hint of which endpoint or why.
+    let mut payload = match payload {
+        Some(p) => p,
+        None => return Ok((post_itm, files)),
+    };
 
     let outcome = with_deadline(limits, async {
         loop {
@@ -273,7 +286,7 @@ pub async fn call_url_post_route(
     user: Identity,
     hndl: &str,
     query: &str,
-    payload: Multipart,
+    payload: Option<Multipart>,
 ) -> HttpResponse {
     let usr = get_user(srv, principal(&user)).await;
     let (post_itm, files) = match handle_item_files(payload, Limits::from_data(srv)).await {
@@ -319,7 +332,7 @@ pub async fn call_url_unprotected_post_route(
     user: Option<Identity>,
     hndl: &str,
     query: &str,
-    payload: Multipart,
+    payload: Option<Multipart>,
 ) -> HttpResponse {
     let mut usr: Option<Item> = None;
     if let Some(u) = user {
@@ -458,7 +471,7 @@ mod tests {
             web::post().to(move |mp: Multipart| {
                 let into = into.clone();
                 async move {
-                    *into.lock() = Some(handle_item_files(mp, limits).await);
+                    *into.lock() = Some(handle_item_files(Some(mp), limits).await);
                     HttpResponse::Ok().finish()
                 }
             }),
@@ -513,6 +526,29 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    /// A POST with no multipart body at all is legitimate: action routes take
+    /// their arguments in the query string and send nothing. Extraction used
+    /// to fail on them before the route ran, and the caller was told only
+    /// "Multipart boundary is not found" — which is how the portal's
+    /// channel-planning buttons failed silently for months.
+    #[test]
+    fn a_request_without_a_body_is_accepted() {
+        with_root(|base| {
+            let root = base.join("tmp");
+            let (itm, files) = rt()
+                .block_on(handle_item_files(None, generous()))
+                .expect("a body-less POST must not be refused");
+
+            assert!(itm.strs.is_empty(), "nothing was posted");
+            assert!(files.is_empty());
+            assert!(
+                entries(&root).is_empty(),
+                "left behind {:?}",
+                entries(&root)
+            );
+        });
     }
 
     /// A request that uploads nothing must leave nothing behind. The
