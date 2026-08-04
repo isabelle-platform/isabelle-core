@@ -118,11 +118,26 @@ pub async fn call_url_route(
     conv_response(wr).await
 }
 
-pub async fn handle_item_files(mut payload: Multipart) -> (Item, HashMap<String, String>) {
+/// Collect the posted item and any uploaded files from a multipart body.
+///
+/// `None` means the request carried no multipart body at all, which is normal:
+/// plenty of action endpoints take everything in the query string and post
+/// nothing. They get an empty Item, exactly as if the body had been an empty
+/// form. Demanding a multipart envelope from them used to fail extraction
+/// before the route ever ran, and all the caller saw was
+///   Could not read the request body: malformed multipart body:
+///   Multipart boundary is not found
+/// with no hint of which endpoint or why.
+pub async fn handle_item_files(payload: Option<Multipart>) -> (Item, HashMap<String, String>) {
     let mut post_itm = Item::new();
     let mut files: HashMap<String, String> = HashMap::new();
     let mut files_count = 0;
     let path = Path::new("./tmp");
+
+    let mut payload = match payload {
+        Some(p) => p,
+        None => return (post_itm, files),
+    };
 
     if let Err(e) = fs::create_dir_all(&path) {
         error!("Failed to create directory: {}", e);
@@ -182,7 +197,7 @@ pub async fn call_url_post_route(
     user: Identity,
     hndl: &str,
     query: &str,
-    payload: Multipart,
+    payload: Option<Multipart>,
 ) -> HttpResponse {
     let usr = get_user(srv, user.id().unwrap()).await;
     let (post_itm, files) = handle_item_files(payload).await;
@@ -221,7 +236,7 @@ pub async fn call_url_unprotected_post_route(
     user: Option<Identity>,
     hndl: &str,
     query: &str,
-    payload: Multipart,
+    payload: Option<Multipart>,
 ) -> HttpResponse {
     let mut usr: Option<Item> = None;
     if let Some(u) = user {
@@ -287,5 +302,36 @@ pub fn call_periodic_job_hook(srv: &crate::state::data::Data, timing: &str) {
             log::trace!(target: "core::periodic",
                 "actor periodic tick dropped ({}): {}", timing, e);
         }
+    }
+}
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+
+    /// A POST that carries no multipart body is legitimate: action endpoints
+    /// take their arguments in the query string. Before `payload` became
+    /// optional, actix rejected such a request during extraction and the route
+    /// never ran - the portal's channel-planning buttons failed this way for
+    /// months, reporting only a generic error.
+    #[actix_rt::test]
+    async fn a_missing_body_yields_an_empty_item_and_no_files() {
+        let (itm, files) = handle_item_files(None).await;
+        assert!(files.is_empty());
+        assert!(itm.strs.is_empty(), "no fields were posted");
+        assert!(
+            itm.safe_strstr("multipart-files", &HashMap::new()).is_empty(),
+            "nothing was uploaded, so no file list belongs on the item"
+        );
+    }
+
+    /// And it must not touch the filesystem: the upload directory is only
+    /// created when there is actually a body to unpack.
+    #[actix_rt::test]
+    async fn a_missing_body_creates_no_upload_dir() {
+        let _ = std::fs::remove_dir("./tmp");
+        let existed_before = Path::new("./tmp").exists();
+        let _ = handle_item_files(None).await;
+        assert_eq!(Path::new("./tmp").exists(), existed_before);
     }
 }
