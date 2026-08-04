@@ -320,7 +320,8 @@ mod payload_tests {
         assert!(files.is_empty());
         assert!(itm.strs.is_empty(), "no fields were posted");
         assert!(
-            itm.safe_strstr("multipart-files", &HashMap::new()).is_empty(),
+            itm.safe_strstr("multipart-files", &HashMap::new())
+                .is_empty(),
             "nothing was uploaded, so no file list belongs on the item"
         );
     }
