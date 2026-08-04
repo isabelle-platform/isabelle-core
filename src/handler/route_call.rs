@@ -545,10 +545,10 @@ mod tests {
             .unwrap()
     }
 
-    /// Drive a request that carries NO multipart body — no content-type, no
-    /// payload — through the real extractor, the way a POST to an action route
-    /// arrives.
-    async fn run_bodyless(limits: Limits) -> Outcome {
+    /// Drive a request that carries no multipart body through the real
+    /// extractor, the way a POST to an action route arrives. `content_type`
+    /// picks which of the "there is no body" errors the first poll produces.
+    async fn run_bodyless(content_type: Option<&str>, limits: Limits) -> Outcome {
         let sink: std::sync::Arc<Mutex<Option<Outcome>>> = std::sync::Arc::new(Mutex::new(None));
         let into = sink.clone();
 
@@ -564,8 +564,11 @@ mod tests {
         ))
         .await;
 
-        let req = actix_web::test::TestRequest::post().uri("/probe").to_request();
-        let _ = actix_web::test::call_service(&app, req).await;
+        let mut req = actix_web::test::TestRequest::post().uri("/probe");
+        if let Some(ct) = content_type {
+            req = req.insert_header(("content-type", ct));
+        }
+        let _ = actix_web::test::call_service(&app, req.to_request()).await;
 
         let taken = sink.lock().take();
         taken.expect("handler did not run")
@@ -579,22 +582,35 @@ mod tests {
     ///
     /// Note the extractor itself cannot catch this: it always yields a
     /// `Multipart` and defers the boundary error to the first poll.
+    /// Both spellings of "no body" have to pass, and they reach us as
+    /// DIFFERENT errors:
+    ///
+    ///   no Content-Type at all             -> MultipartError::NoContentType
+    ///   Content-Type without a boundary    -> MultipartError::Boundary
+    ///
+    /// The second is the one that actually happens. A browser POST with an
+    /// empty body sends `Content-Type: application/x-www-form-urlencoded`,
+    /// which parses as a perfectly valid mime and only then turns out to carry
+    /// no boundary — verified against the deployed portal, which produced
+    /// exactly this request and got back 400.
     #[test]
     fn a_request_without_a_body_is_accepted() {
-        with_root(|base| {
-            let root = base.join("tmp");
-            let (itm, files) = rt()
-                .block_on(run_bodyless(generous()))
-                .expect("a body-less POST must not be refused");
+        for ct in [None, Some("application/x-www-form-urlencoded")] {
+            with_root(|base| {
+                let root = base.join("tmp");
+                let (itm, files) = rt()
+                    .block_on(run_bodyless(ct, generous()))
+                    .unwrap_or_else(|_| panic!("body-less POST refused, content-type {:?}", ct));
 
-            assert!(itm.strs.is_empty(), "nothing was posted");
-            assert!(files.is_empty());
-            assert!(
-                entries(&root).is_empty(),
-                "left behind {:?}",
-                entries(&root)
-            );
-        });
+                assert!(itm.strs.is_empty(), "nothing was posted");
+                assert!(files.is_empty());
+                assert!(
+                    entries(&root).is_empty(),
+                    "left behind {:?}",
+                    entries(&root)
+                );
+            });
+        }
     }
 
     /// But a body that announces multipart and then breaks is still refused —
