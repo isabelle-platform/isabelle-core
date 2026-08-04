@@ -33,7 +33,7 @@ use crate::handler::web_response::*;
 use crate::server::user_control::*;
 use crate::util::multipart::{with_deadline, Limits, ReadError};
 use actix_identity::Identity;
-use actix_multipart::Multipart;
+use actix_multipart::{Multipart, MultipartError};
 use actix_web::HttpResponse;
 use futures_util::TryStreamExt;
 use isabelle_dm::data_model::data_object_action::DataObjectAction;
@@ -144,7 +144,7 @@ pub async fn call_url_route(
 /// removes the directory along with the files, and it can only find it
 /// through them.
 pub async fn handle_item_files(
-    payload: Option<Multipart>,
+    mut payload: Multipart,
     limits: Limits,
 ) -> Result<(Item, HashMap<String, String>), (ReadError, HashMap<String, String>)> {
     let mut post_itm = Item::new();
@@ -153,27 +153,44 @@ pub async fn handle_item_files(
     let mut total: usize = 0;
     let req_dir = format!("{}/{}", upload_root(), Uuid::new_v4());
     let mut dir_ready = false;
-
-    // No multipart body at all, which is normal: plenty of action endpoints
-    // take everything in the query string and post nothing. They get an empty
-    // Item, exactly as if the body had been an empty form. Demanding a
-    // multipart envelope from them made actix fail extraction before the route
-    // ever ran, and all the caller saw was
-    //   Could not read the request body: malformed multipart body:
-    //   Multipart boundary is not found
-    // with no hint of which endpoint or why.
-    let mut payload = match payload {
-        Some(p) => p,
-        None => return Ok((post_itm, files)),
-    };
+    let mut seen_any = false;
 
     let outcome = with_deadline(limits, async {
         loop {
             let mut field = match payload.try_next().await {
                 Ok(Some(f)) => f,
                 Ok(None) => break,
-                Err(e) => return Err(ReadError::Malformed(e.to_string())),
+                Err(e) => {
+                    // A request carrying no multipart body at all, as opposed
+                    // to a broken one. That is normal: plenty of action
+                    // endpoints take everything in the query string and post
+                    // nothing, and they should get an empty Item.
+                    //
+                    // It has to be caught HERE, not at extraction. `impl
+                    // FromRequest for Multipart` never fails - on a missing
+                    // boundary it stores the error and hands back a Multipart
+                    // that yields it on the first poll - so an Option<Multipart>
+                    // argument is always Some and cannot tell us anything. The
+                    // first poll is the only place the difference is visible.
+                    //
+                    // Only on the FIRST field, and only for the errors that
+                    // mean "no body": a stream that breaks after a field has
+                    // already arrived is a genuinely malformed body and must
+                    // still be refused.
+                    if !seen_any
+                        && matches!(
+                            e,
+                            MultipartError::NoContentType
+                                | MultipartError::ParseContentType
+                                | MultipartError::Boundary
+                        )
+                    {
+                        break;
+                    }
+                    return Err(ReadError::Malformed(e.to_string()));
+                }
             };
+            seen_any = true;
 
             if field.name() == "item" {
                 let mut field_data: Vec<u8> = Vec::new();
@@ -286,7 +303,7 @@ pub async fn call_url_post_route(
     user: Identity,
     hndl: &str,
     query: &str,
-    payload: Option<Multipart>,
+    payload: Multipart,
 ) -> HttpResponse {
     let usr = get_user(srv, principal(&user)).await;
     let (post_itm, files) = match handle_item_files(payload, Limits::from_data(srv)).await {
@@ -332,7 +349,7 @@ pub async fn call_url_unprotected_post_route(
     user: Option<Identity>,
     hndl: &str,
     query: &str,
-    payload: Option<Multipart>,
+    payload: Multipart,
 ) -> HttpResponse {
     let mut usr: Option<Item> = None;
     if let Some(u) = user {
@@ -471,7 +488,7 @@ mod tests {
             web::post().to(move |mp: Multipart| {
                 let into = into.clone();
                 async move {
-                    *into.lock() = Some(handle_item_files(Some(mp), limits).await);
+                    *into.lock() = Some(handle_item_files(mp, limits).await);
                     HttpResponse::Ok().finish()
                 }
             }),
@@ -528,17 +545,46 @@ mod tests {
             .unwrap()
     }
 
+    /// Drive a request that carries NO multipart body — no content-type, no
+    /// payload — through the real extractor, the way a POST to an action route
+    /// arrives.
+    async fn run_bodyless(limits: Limits) -> Outcome {
+        let sink: std::sync::Arc<Mutex<Option<Outcome>>> = std::sync::Arc::new(Mutex::new(None));
+        let into = sink.clone();
+
+        let app = actix_web::test::init_service(App::new().route(
+            "/probe",
+            web::post().to(move |mp: Multipart| {
+                let into = into.clone();
+                async move {
+                    *into.lock() = Some(handle_item_files(mp, limits).await);
+                    HttpResponse::Ok().finish()
+                }
+            }),
+        ))
+        .await;
+
+        let req = actix_web::test::TestRequest::post().uri("/probe").to_request();
+        let _ = actix_web::test::call_service(&app, req).await;
+
+        let taken = sink.lock().take();
+        taken.expect("handler did not run")
+    }
+
     /// A POST with no multipart body at all is legitimate: action routes take
-    /// their arguments in the query string and send nothing. Extraction used
-    /// to fail on them before the route ran, and the caller was told only
-    /// "Multipart boundary is not found" — which is how the portal's
-    /// channel-planning buttons failed silently for months.
+    /// their arguments in the query string and send nothing. This used to come
+    /// back as `Multipart boundary is not found`, refusing the request before
+    /// the endpoint ran — which is how the portal's channel-planning buttons
+    /// failed, reporting only a generic error.
+    ///
+    /// Note the extractor itself cannot catch this: it always yields a
+    /// `Multipart` and defers the boundary error to the first poll.
     #[test]
     fn a_request_without_a_body_is_accepted() {
         with_root(|base| {
             let root = base.join("tmp");
             let (itm, files) = rt()
-                .block_on(handle_item_files(None, generous()))
+                .block_on(run_bodyless(generous()))
                 .expect("a body-less POST must not be refused");
 
             assert!(itm.strs.is_empty(), "nothing was posted");
@@ -548,6 +594,18 @@ mod tests {
                 "left behind {:?}",
                 entries(&root)
             );
+        });
+    }
+
+    /// But a body that announces multipart and then breaks is still refused —
+    /// the escape hatch above must not swallow a genuinely malformed request.
+    #[test]
+    fn a_malformed_body_is_still_refused() {
+        with_root(|_base| {
+            let err = rt()
+                .block_on(run("not a multipart body at all".to_string(), generous()))
+                .expect_err("a broken body must not be accepted");
+            assert!(matches!(err.0, ReadError::Malformed(_)));
         });
     }
 

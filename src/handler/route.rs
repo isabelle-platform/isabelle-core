@@ -60,7 +60,7 @@ pub async fn url_post_route(
     user: Identity,
     data: actix_web::web::Data<State>,
     req: HttpRequest,
-    payload: Option<Multipart>,
+    payload: Multipart,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
     let cache = srv.route_cache.lock().clone();
@@ -101,7 +101,7 @@ pub async fn url_unprotected_post_route(
     user: Option<Identity>,
     data: actix_web::web::Data<State>,
     req: HttpRequest,
-    payload: Option<Multipart>,
+    payload: Multipart,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
     let cache = srv.route_cache.lock().clone();
