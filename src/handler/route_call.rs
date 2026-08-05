@@ -177,12 +177,22 @@ pub async fn handle_item_files(
                     // mean "no body": a stream that breaks after a field has
                     // already arrived is a genuinely malformed body and must
                     // still be refused.
+                    // Incomplete belongs here too. An empty FormData - what a
+                    // browser sends for a POST that carries no fields - is a
+                    // body consisting of nothing but the closing delimiter:
+                    //   ------WebKitFormBoundaryXXXX--\r\n
+                    // The parser reaches the end without ever producing a
+                    // field and reports the stream as incomplete. It is a
+                    // perfectly ordinary request; only a stream that breaks
+                    // AFTER a field has arrived is a truncated upload, and
+                    // seen_any is what tells the two apart.
                     if !seen_any
                         && matches!(
                             e,
                             MultipartError::NoContentType
                                 | MultipartError::ParseContentType
                                 | MultipartError::Boundary
+                                | MultipartError::Incomplete
                         )
                     {
                         break;
@@ -613,14 +623,47 @@ mod tests {
         }
     }
 
-    /// But a body that announces multipart and then breaks is still refused —
-    /// the escape hatch above must not swallow a genuinely malformed request.
+    /// An empty `new FormData()` as a browser serialises it: the closing
+    /// delimiter and nothing else. This is what the portal sends for every
+    /// action endpoint that takes its arguments in the query string, and the
+    /// parser reports it as `Incomplete` because it never yields a field.
+    ///
+    /// Body captured verbatim from Chrome hitting /network/rf_refresh.
     #[test]
-    fn a_malformed_body_is_still_refused() {
+    fn an_empty_formdata_body_is_accepted() {
+        with_root(|base| {
+            let root = base.join("tmp");
+            let (itm, files) = rt()
+                .block_on(run(format!("--{}--\r\n", BOUNDARY), generous()))
+                .expect("an empty FormData must not be refused");
+
+            assert!(itm.strs.is_empty(), "no fields were posted");
+            assert!(files.is_empty());
+            assert!(
+                entries(&root).is_empty(),
+                "left behind {:?}",
+                entries(&root)
+            );
+        });
+    }
+
+    /// A body that starts delivering a part and then dies is a truncated
+    /// upload, and must still be refused. This is the line the `seen_any` guard
+    /// draws: accepting "no field ever arrived" as an empty form is what lets
+    /// an empty FormData through, but once a field HAS arrived a broken stream
+    /// means lost data, and answering 200 to that would be a silent corruption.
+    #[test]
+    fn a_truncated_upload_is_still_refused() {
+        // Header of a file part, some content, then EOF - no closing delimiter.
+        let body = format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"upload\"; \
+             filename=\"a.bin\"\r\n\r\nhalf of the dat",
+            b = BOUNDARY
+        );
         with_root(|_base| {
             let err = rt()
-                .block_on(run("not a multipart body at all".to_string(), generous()))
-                .expect_err("a broken body must not be accepted");
+                .block_on(run(body.clone(), generous()))
+                .expect_err("a truncated upload must not be accepted");
             assert!(matches!(err.0, ReadError::Malformed(_)));
         });
     }
