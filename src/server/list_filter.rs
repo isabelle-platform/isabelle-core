@@ -40,8 +40,9 @@
 //!
 //!   * **Shape.** Only the query forms the UI actually builds: boolean
 //!     combinators over leaves, each leaf a field compared to a scalar with a
-//!     comparison operator. This rejects `$regex`, `$where`, `$expr`,
-//!     `$function`, `$text` and friends outright.
+//!     comparison operator, or to a list of scalars with a membership one.
+//!     This rejects `$regex`, `$where`, `$expr`, `$function`, `$text` and
+//!     friends outright.
 //!   * **Field.** No field whose name looks like a credential, in any
 //!     collection.
 //!
@@ -64,6 +65,16 @@ const ALLOWED_COMBINATORS: [&str; 2] = ["$and", "$or"];
 /// operator that can evaluate an expression or a pattern (`$regex`, `$where`,
 /// `$expr`, `$function`, `$jsonSchema`, `$text`, `$mod`, …).
 const ALLOWED_LEAF_OPS: [&str; 6] = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"];
+
+/// Membership operators, which take a list of scalars instead of one. They say
+/// no more than a chain of `$eq` joined by `$or` would, and the UI needs them:
+/// "these projects" is one selection, not one project.
+const ALLOWED_SET_OPS: [&str; 2] = ["$in", "$nin"];
+
+/// Cap on how many values a membership test may name. A filter is a query
+/// string; without a bound it is also an unbounded allocation, and no honest
+/// selection in this UI is anywhere near this long.
+const MAX_SET_OPERANDS: usize = 256;
 
 /// Substrings that mark a field as credential-bearing. Matched against each
 /// dot-separated segment of the field path, case-insensitively.
@@ -212,6 +223,30 @@ fn validate_leaf_value(field: &str, value: &Value) -> Result<(), String> {
     }
 
     for (op, operand) in obj {
+        if ALLOWED_SET_OPS.contains(&op.as_str()) {
+            let items = match operand.as_array() {
+                Some(a) => a,
+                None => {
+                    return Err(format!("operator {} on {} expects a list", op, field));
+                }
+            };
+            if items.len() > MAX_SET_OPERANDS {
+                return Err(format!(
+                    "operator {} on {} names {} values, more than the {} allowed",
+                    op,
+                    field,
+                    items.len(),
+                    MAX_SET_OPERANDS
+                ));
+            }
+            if !items.iter().all(is_scalar) {
+                return Err(format!(
+                    "operator {} on {} expects a list of scalars",
+                    op, field
+                ));
+            }
+            continue;
+        }
         if !ALLOWED_LEAF_OPS.contains(&op.as_str()) {
             return Err(format!("operator {} is not allowed on {}", op, field));
         }
@@ -334,12 +369,43 @@ mod redaction_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn membership_takes_a_list_of_scalars_and_nothing_else() {
+        assert!(validate_client_filter("{\"ids.workspace\":{\"$in\":[1,\"a\",true]}}").is_ok());
+        assert!(
+            validate_client_filter("{\"ids.workspace\":{\"$in\":3}}").is_err(),
+            "a bare scalar is not a list"
+        );
+        assert!(
+            validate_client_filter("{\"ids.workspace\":{\"$in\":[{\"$ne\":1}]}}").is_err(),
+            "a document inside the list would smuggle an operator back in"
+        );
+        assert!(
+            validate_client_filter("{\"ids.workspace\":{\"$in\":[[1,2]]}}").is_err(),
+            "nested arrays are not scalars either"
+        );
+    }
+
+    /// A filter arrives as a query string; the list it names must stay bounded.
+    #[test]
+    fn a_membership_list_is_capped() {
+        let ids: Vec<String> = (0..MAX_SET_OPERANDS + 1).map(|i| i.to_string()).collect();
+        let filter = format!("{{\"ids.workspace\":{{\"$in\":[{}]}}}}", ids.join(","));
+        assert!(validate_client_filter(&filter).is_err());
+    }
+
     /// The exact shapes the midair UI builds (test list and analysis list
     /// filter panels). If any of these stop validating, the UI breaks.
     #[test]
     fn filters_built_by_the_ui_are_accepted() {
         assert!(validate_client_filter("").is_ok());
         assert!(validate_client_filter("{\"ids.workspace\":3}").is_ok());
+        // The project scope in the top bar: several workspaces at once.
+        assert!(validate_client_filter("{\"ids.workspace\":{\"$in\":[1,2,3]}}").is_ok());
+        assert!(
+            validate_client_filter("{\"strids.workspaces\":{\"$in\":[4]}}").is_ok(),
+            "a device names its projects as a list"
+        );
         assert!(validate_client_filter("{\"u64s.time\":{\"$gte\":1700000000}}").is_ok());
         assert!(validate_client_filter(
             "{\"$and\":[{\"u64s.time\":{\"$gte\":1700000000}},\
@@ -425,10 +491,26 @@ mod tests {
             "{\"$expr\":{\"$eq\":[\"$strs.name\",\"a\"]}}",
             "{\"strs.name\":{\"$function\":{\"body\":\"f\"}}}",
             "{\"$text\":{\"$search\":\"a\"}}",
-            "{\"strs.name\":{\"$in\":[\"a\",\"b\"]}}",
             "{\"strs.name\":{\"$exists\":true}}",
             "{\"strs.name\":{\"$mod\":[2,0]}}",
             "{\"$nor\":[{\"ids.user\":1}]}",
+        ] {
+            assert!(
+                validate_client_filter(filter).is_err(),
+                "{} should be rejected",
+                filter
+            );
+        }
+    }
+
+    /// Membership is allowed, but it is not a way around the field rule: a
+    /// credential field stays unfilterable whatever the operator.
+    #[test]
+    fn membership_does_not_reopen_credential_fields() {
+        for filter in [
+            "{\"strs.otp\":{\"$in\":[\"1\",\"2\"]}}",
+            "{\"strs.password\":{\"$nin\":[\"a\"]}}",
+            "{\"$or\":[{\"strs.api_key\":{\"$in\":[\"k\"]}}]}",
         ] {
             assert!(
                 validate_client_filter(filter).is_err(),
