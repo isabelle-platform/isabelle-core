@@ -165,13 +165,50 @@ fn normalize_origin(raw: &str) -> Option<String> {
 /// it belongs. Blocking server-side instead would reject same-origin POSTs
 /// too, because browsers send `Origin` on those as well, so a `--pub-url` that
 /// merely disagreed about a trailing slash would break the whole UI.
-fn cors_middleware(pub_url: &str, extra_origins: &[String]) -> Cors {
+/// True for an origin that can only be a developer's own machine:
+/// `localhost`, `127.0.0.1` or `[::1]`, on any port and either scheme.
+///
+/// A loopback origin cannot be reached by a third-party page, so allowing the
+/// whole family costs nothing while removing a class of self-inflicted CORS
+/// failures — `--pub-url` names exactly one of these spellings, and a browser
+/// opened on any of the others is refused even though it is the same machine.
+fn is_loopback_origin(origin: &str) -> bool {
+    let host = match origin.split_once("://") {
+        Some((scheme, rest)) if scheme == "http" || scheme == "https" => rest,
+        _ => return false,
+    };
+    let host = host.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
+/// `dev_mode` mirrors `--cookie-http-insecure`: the flag that already says
+/// "this is a local development run".
+fn cors_middleware(pub_url: &str, extra_origins: &[String], dev_mode: bool) -> Cors {
     let mut cors = Cors::default()
         .allowed_methods(vec!["GET", "POST", "HEAD", "OPTIONS"])
         .allow_any_header()
         .supports_credentials()
         .block_on_origin_mismatch(false)
         .max_age(3600);
+
+    if dev_mode {
+        info!("CORS: development run — allowing any loopback origin");
+        cors = cors.allowed_origin_fn(|origin, _req| {
+            let ok = origin.to_str().map(is_loopback_origin).unwrap_or(false);
+            if !ok {
+                // Without this line a rejected origin is invisible server-side:
+                // the browser reports "CORS error" and the log shows a normal
+                // 200, which is a genuinely confusing pair to debug.
+                log::warn!(
+                    "CORS: origin {:?} is not allowed — pass it with --cors-origin \
+                     (or point --pub-url at it)",
+                    origin.to_str().unwrap_or("<unprintable>")
+                );
+            }
+            ok
+        });
+    }
 
     for raw in std::iter::once(pub_url).chain(extra_origins.iter().map(|s| s.as_str())) {
         match normalize_origin(raw) {
@@ -464,7 +501,11 @@ where
             .app_data(web::PayloadConfig::new(args.max_payload_bytes))
             .wrap(from_fn(enforce_session_generation))
             .wrap(from_fn(reject_ambiguous_framing))
-            .wrap(cors_middleware(&args.pub_url, &args.cors_origin))
+            .wrap(cors_middleware(
+                &args.pub_url,
+                &args.cors_origin,
+                args.cookie_http_insecure,
+            ))
             .wrap(IdentityMiddleware::default())
             .wrap(session_middleware(
                 args.pub_fqdn.clone(),
@@ -684,12 +725,42 @@ mod tests {
     type ProbeResponse =
         actix_web::dev::ServiceResponse<actix_web::body::EitherBody<actix_web::body::BoxBody>>;
 
+    #[test]
+    fn loopback_origins_are_recognised() {
+        for o in [
+            "http://localhost:8080",
+            "http://localhost",
+            "https://localhost:3000",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(is_loopback_origin(o), "{o} should be loopback");
+        }
+    }
+
+    /// A name that merely contains "localhost", or any real host, must not be
+    /// mistaken for the developer's own machine.
+    #[test]
+    fn non_loopback_origins_are_rejected() {
+        for o in [
+            "http://localhost.evil.com",
+            "http://notlocalhost:8080",
+            "http://isabelle.dev.:8080",
+            "https://app.example.com",
+            "file:///etc/passwd",
+            "",
+        ] {
+            assert!(!is_loopback_origin(o), "{o} must not be loopback");
+        }
+    }
+
     async fn probe(origin: Option<&str>) -> ProbeResponse {
         let app = actix_web::test::init_service(
             App::new()
                 .wrap(cors_middleware(
                     "http://localhost:8081/",
                     &["https://app.example.com".to_string()],
+                    false,
                 ))
                 .route("/probe", web::post().to(actix_web::HttpResponse::Ok)),
         )
