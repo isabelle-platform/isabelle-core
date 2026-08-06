@@ -686,9 +686,20 @@ impl Store for StoreMongo {
             return lr;
         }
 
+        // Sort on the requested key, then on "id". Without the tiebreak, records
+        // sharing a key — every record stamped with the same day, say — come
+        // back in an order Mongo is free to vary between queries, so a paged
+        // listing can show one item twice and drop another. "id" is unique, so
+        // the total order is fixed; it is also already indexed.
+        let sort = if eff_sort_key == "id" {
+            doc! { "id": 1 }
+        } else {
+            doc! { eff_sort_key: 1, "id": 1 }
+        };
+
         let mut cursor = match coll
             .find(base)
-            .sort(doc! { eff_sort_key: 1 })
+            .sort(sort)
             .skip(eff_skip)
             .limit(eff_limit)
             .await
