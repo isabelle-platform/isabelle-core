@@ -13,6 +13,26 @@ Isabelle is a Rust-based framework for building safe and performant servers for 
 - Google Calendar integration.
 - Login/logout functionality.
 - One-time password support.
+- Self-describing HTTP API: an OpenAPI 3.1 document generated from the running
+  deployment, plugin routes included.
+
+## API description
+
+The full HTTP surface of a *running* deployment is described by an OpenAPI
+3.1 document the server generates on request:
+
+- `GET /openapi.json` — the document itself.
+- `GET /docs` — the same thing rendered as a static page (no scripts, no
+  external assets, works offline).
+
+Both require an administrator session, because the document names every
+collection in the store and every plugin route the deployment registered.
+
+It is generated rather than committed because half of the surface only exists
+at runtime: each `extra_route` / `extra_unprotected_route` /
+`extra_rest_route` in `internals.js` becomes a real path at startup, and the
+`collection` parameter is constrained to the collections the store actually
+holds. The short list below covers the endpoints core itself always has.
 
 ## Endpoints
 

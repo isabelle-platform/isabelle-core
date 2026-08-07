@@ -25,6 +25,7 @@ pub mod guards;
 pub mod itm;
 pub mod list_filter;
 pub mod login;
+pub mod openapi;
 pub mod secret;
 pub mod setting;
 pub mod system;

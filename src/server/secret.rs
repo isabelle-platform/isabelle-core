@@ -43,7 +43,15 @@ struct SecretRef {
     name: String,
 }
 
-async fn ensure_admin(data: &web::Data<State>, user: &Identity) -> Result<(), HttpResponse> {
+/// Refuse anyone who is not an administrator.
+///
+/// Shared with `server::openapi`, which gates on exactly the same thing: the
+/// API description names every plugin route and every collection this
+/// deployment has.
+pub(crate) async fn ensure_admin(
+    data: &web::Data<State>,
+    user: &Identity,
+) -> Result<(), HttpResponse> {
     let srv: &crate::state::data::Data = &data.server;
     let usr = get_user(srv, principal(user)).await;
     if !check_role(srv, &usr, "admin").await {

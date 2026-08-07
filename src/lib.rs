@@ -65,6 +65,7 @@ use crate::notif::gcal::*;
 use crate::server::guards::{enforce_session_generation, reject_ambiguous_framing};
 use crate::server::itm::*;
 use crate::server::login::*;
+use crate::server::openapi::{openapi_docs, openapi_json, DOCS_PATH, OPENAPI_PATH};
 use std::collections::HashMap;
 
 use crate::server::secret::*;
@@ -531,7 +532,11 @@ where
             .route("/secret/edit", web::post().to(secret_edit))
             .route("/secret/del", web::post().to(secret_del))
             .route("/secret/list", web::get().to(secret_list))
-            .route("/secret/get", web::post().to(secret_get));
+            .route("/secret/get", web::post().to(secret_get))
+            // Registered before the plugin routes below, so a plugin cannot
+            // shadow the description of the very surface it is part of.
+            .route(OPENAPI_PATH, web::get().to(openapi_json))
+            .route(DOCS_PATH, web::get().to(openapi_docs));
         // Set up extra protected routes
         for route in &new_routes {
             if route.1 == "post" {
