@@ -25,8 +25,11 @@ The full HTTP surface of a *running* deployment is described by an OpenAPI
 - `GET /docs` — the same thing rendered as a static page (no scripts, no
   external assets, works offline).
 
-Both require an administrator session, because the document names every
-collection in the store and every plugin route the deployment registered.
+Both are public. A description is not a credential: every endpoint it names
+still authenticates its own callers, so publishing it opens nothing. It does
+say which plugin routes exist and which collections the store holds — a
+deployment that would rather not publish that starts core with
+`--openapi-private`, which serves both to administrators only.
 
 It is generated rather than committed because half of the surface only exists
 at runtime: each `extra_route` / `extra_unprotected_route` /

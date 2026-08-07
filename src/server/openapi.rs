@@ -30,9 +30,13 @@
 //! read out of `internals.js`, which is where `run()` reads them from, so the
 //! two cannot disagree about which paths exist.
 //!
-//! Both endpoints are admin-only. The spec names every plugin route and every
-//! collection in the deployment, which is more than an anonymous caller — or a
-//! logged-in non-admin — has any reason to enumerate.
+//! Both endpoints are public by default. A description is not a credential:
+//! every endpoint it names still authenticates its own callers, and the
+//! endpoints an anonymous caller may reach are exactly the ones that are meant
+//! to be reachable anonymously. What the document does disclose is the
+//! deployment's shape — which plugin routes exist, which collections the store
+//! holds — so `--openapi-private` closes it to anyone but an administrator for
+//! deployments that would rather not publish that.
 
 use crate::server::secret::ensure_admin;
 use crate::state::state::State;
@@ -40,6 +44,7 @@ use actix_identity::Identity;
 use actix_web::{web, HttpResponse};
 use isabelle_dm::data_model::item::Item;
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 
 /// Where the document itself is served.
 pub const OPENAPI_PATH: &str = "/openapi.json";
@@ -176,9 +181,17 @@ const UNSET: &str = "18446744073709551615 (`u64::MAX`) when omitted";
 ///
 /// `server_url` is the deployment's public URL (`--pub-url`); `collections`
 /// is what the store reports, used to constrain the `collection` parameter to
-/// the names `/itm/*` will actually accept.
-pub fn build_spec(server_url: &str, collections: &[String], routes: &[PluginRoute]) -> Value {
-    let mut paths = core_paths(collections);
+/// the names `/itm/*` will actually accept. `admin_only` is whether this
+/// deployment runs with `--openapi-private`, which the document has to state
+/// about itself — the two meta endpoints are the only ones whose reachability
+/// depends on a flag rather than on the handler.
+pub fn build_spec(
+    server_url: &str,
+    collections: &[String],
+    routes: &[PluginRoute],
+    admin_only: bool,
+) -> Value {
+    let mut paths = core_paths(collections, admin_only);
 
     for route in routes {
         let entry = paths.entry(route.path.clone()).or_insert_with(|| json!({}));
@@ -284,7 +297,7 @@ fn normalize_path(path: &str) -> String {
 }
 
 /// Core's own endpoints.
-fn core_paths(collections: &[String]) -> serde_json::Map<String, Value> {
+fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<String, Value> {
     let mut collection_schema = json!({ "type": "string" });
     if !collections.is_empty() {
         let mut sorted: Vec<&String> = collections.iter().collect();
@@ -716,33 +729,58 @@ fn core_paths(collections: &[String]) -> serde_json::Map<String, Value> {
         }}),
     );
 
-    paths.insert(
-        OPENAPI_PATH.to_string(),
-        json!({ "get": {
-            "tags": ["meta"],
-            "summary": "This document",
-            "responses": {
-                "200": json_response("The OpenAPI document for this deployment.", json!({ "type": "object" })),
-                "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
-            },
-        }}),
-    );
+    // The two below are the only endpoints whose reachability is a deployment
+    // setting rather than a property of the handler, so the document has to
+    // say which way this deployment is configured.
+    let mut meta_openapi = json!({ "get": {
+        "tags": ["meta"],
+        "summary": "This document",
+        "responses": {
+            "200": json_response("The OpenAPI document for this deployment.", json!({ "type": "object" })),
+        },
+    }});
+    let mut meta_docs = json!({ "get": {
+        "tags": ["meta"],
+        "summary": "This document, rendered",
+        "description": "Server-rendered HTML — no scripts and no external assets, so it works offline.",
+        "responses": {
+            "200": { "description": "The rendering.",
+                     "content": { "text/html": { "schema": { "type": "string" } } } },
+        },
+    }});
 
-    paths.insert(
-        DOCS_PATH.to_string(),
-        json!({ "get": {
-            "tags": ["meta"],
-            "summary": "This document, rendered",
-            "description": "Server-rendered HTML — no scripts and no external assets, so it works offline.",
-            "responses": {
-                "200": { "description": "The rendering.",
-                         "content": { "text/html": { "schema": { "type": "string" } } } },
-                "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
-            },
-        }}),
-    );
+    for (op, note) in [
+        (&mut meta_openapi, "Served without a session."),
+        (&mut meta_docs, "Served without a session."),
+    ] {
+        let get = &mut op["get"];
+        if admin_only {
+            get["description"] = json!(format!(
+                "{}This deployment runs with `--openapi-private`, so the description is \
+                 served to administrators only.",
+                get["description"]
+                    .as_str()
+                    .map(|d| format!("{} ", d))
+                    .unwrap_or_default()
+            ));
+            let responses = get["responses"].as_object_mut().unwrap();
+            responses.insert("401".to_string(), empty_response("No session."));
+            responses.insert("403".to_string(), empty_response("Not an admin."));
+        } else {
+            get["security"] = json!([{}, { "sessionCookie": [] }]);
+            get["description"] = json!(format!(
+                "{}{}",
+                get["description"]
+                    .as_str()
+                    .map(|d| format!("{} ", d))
+                    .unwrap_or_default(),
+                note
+            ));
+        }
+    }
+
+    paths.insert(OPENAPI_PATH.to_string(), meta_openapi);
+    paths.insert(DOCS_PATH.to_string(), meta_docs);
 
     paths
 }
@@ -919,20 +957,44 @@ async fn spec_for(data: &web::Data<State>) -> Value {
     let internals = srv.rw.get_internals().await;
     let collections = srv.rw.get_collections().await;
     let public_url = srv.public_url.lock().clone();
-    build_spec(&public_url, &collections, &plugin_routes(&internals))
+    build_spec(
+        &public_url,
+        &collections,
+        &plugin_routes(&internals),
+        srv.openapi_private.load(Ordering::Relaxed),
+    )
+}
+
+/// Refuse the caller when this deployment keeps its description private.
+///
+/// `--openapi-private` is off by default, so this normally lets everyone
+/// through; the `Identity` is therefore extracted as an `Option`, which is what
+/// lets an anonymous request reach the handler at all rather than being turned
+/// away by the extractor with a 401 before any of this runs.
+async fn ensure_visible(
+    data: &web::Data<State>,
+    user: &Option<Identity>,
+) -> Result<(), HttpResponse> {
+    if !data.server.openapi_private.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    match user {
+        Some(user) => ensure_admin(data, user).await,
+        None => Err(HttpResponse::Unauthorized().into()),
+    }
 }
 
 /// `GET /openapi.json`
-pub async fn openapi_json(user: Identity, data: web::Data<State>) -> HttpResponse {
-    if let Err(r) = ensure_admin(&data, &user).await {
+pub async fn openapi_json(user: Option<Identity>, data: web::Data<State>) -> HttpResponse {
+    if let Err(r) = ensure_visible(&data, &user).await {
         return r;
     }
     HttpResponse::Ok().json(spec_for(&data).await)
 }
 
 /// `GET /docs`
-pub async fn openapi_docs(user: Identity, data: web::Data<State>) -> HttpResponse {
-    if let Err(r) = ensure_admin(&data, &user).await {
+pub async fn openapi_docs(user: Option<Identity>, data: web::Data<State>) -> HttpResponse {
+    if let Err(r) = ensure_visible(&data, &user).await {
         return r;
     }
     HttpResponse::Ok()
@@ -951,10 +1013,10 @@ fn esc(s: &str) -> String {
 ///
 /// Deliberately server-rendered and asset-free rather than a Swagger UI or
 /// Redoc embed: those are a script tag pointing at a CDN, which is third-party
-/// JavaScript executing on this origin in an administrator's browser — the one
-/// browser session on the deployment that can do everything. The machine-
-/// readable document is right there at `/openapi.json` for anyone who wants
-/// the full experience locally.
+/// JavaScript running on this origin in whatever browser opens the page —
+/// including an administrator's, the one session on the deployment that can do
+/// everything. The machine-readable document is right there at
+/// `/openapi.json` for anyone who wants the full experience locally.
 fn render_html(spec: &Value) -> String {
     let mut out = String::new();
     let title = spec["info"]["title"].as_str().unwrap_or("API");
@@ -1149,16 +1211,17 @@ fn type_of(schema: &Value) -> String {
     }
 }
 
-/// The gate itself, through a real app.
+/// Who gets the document, through a real app.
 ///
-/// The unit tests above prove the document is right; these prove it is not
-/// handed to callers who should not see it. The spec names every plugin route
-/// and every collection in the deployment, which is a map of the attack
-/// surface for anyone who can read it.
+/// The unit tests above prove the document is right; these prove it reaches
+/// the callers it should. The default is everyone — a description is not a
+/// credential — and `--openapi-private` is the deployment's way to say
+/// otherwise, so both directions are pinned here.
 #[cfg(test)]
 mod handler_tests {
     use super::*;
     use crate::server::login::login;
+    use crate::server::secret::secret_list;
     use crate::state::data::Data;
     use crate::state::store_memory::StoreMemory;
     use crate::util::crypto::{get_new_salt, get_password_hash};
@@ -1195,6 +1258,9 @@ mod handler_tests {
                         .build(),
                     )
                     .route("/login", web::post().to(login))
+                    // Stands in for every endpoint the document describes: the
+                    // description being public must not make any of them so.
+                    .route("/secret/list", web::get().to(secret_list))
                     .route(OPENAPI_PATH, web::get().to(openapi_json))
                     .route(DOCS_PATH, web::get().to(openapi_docs)),
             )
@@ -1202,12 +1268,13 @@ mod handler_tests {
         };
     }
 
-    fn state() -> web::Data<State> {
+    fn state(private: bool) -> web::Data<State> {
         let store = StoreMemory::with_collections(&["user"]);
         store.seed("user", account("admin", true));
         store.seed("user", account("bob", false));
         let mut data = Data::new();
         data.rw = Box::new(store);
+        data.openapi_private.store(private, Ordering::Relaxed);
         web::Data::new(State::from_data(data))
     }
 
@@ -1250,9 +1317,61 @@ mod handler_tests {
         )
     }
 
+    /// The default: no session, and the document is served anyway. The
+    /// `Identity` extractor refuses an anonymous caller outright, so this also
+    /// pins that the handlers take an `Option` — with a bare `Identity` the
+    /// endpoint would be admin-only no matter what the flag said.
     #[actix_web::test]
-    async fn the_spec_is_refused_without_a_session() {
-        let app = app_with!(state());
+    async fn the_document_is_public_by_default() {
+        let app = app_with!(state(false));
+
+        let body = test::call_and_read_body(
+            &app,
+            test::TestRequest::get().uri(OPENAPI_PATH).to_request(),
+        )
+        .await;
+        let spec: Value = serde_json::from_slice(&body).expect("the document is not JSON");
+        assert_eq!(spec["openapi"], "3.1.0");
+        assert!(spec["paths"]["/login"]["post"].is_object());
+        assert_eq!(
+            spec["paths"]["/itm/list"]["get"]["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == "collection")
+                .unwrap()["schema"]["enum"],
+            json!(["user"])
+        );
+        // And it says of itself that it needs no session.
+        assert_eq!(spec["paths"][OPENAPI_PATH]["get"]["security"][0], json!({}));
+
+        let res =
+            test::call_service(&app, test::TestRequest::get().uri(DOCS_PATH).to_request()).await;
+        assert!(res.status().is_success());
+        assert_eq!(
+            res.headers().get("content-type").unwrap(),
+            "text/html; charset=utf-8"
+        );
+    }
+
+    /// Publishing the description must not publish anything else: the
+    /// endpoints it names still turn away callers who have no business there.
+    #[actix_web::test]
+    async fn a_public_document_does_not_open_the_endpoints_it_describes() {
+        let app = app_with!(state(false));
+        let res = test::call_service(
+            &app,
+            test::TestRequest::get().uri("/secret/list").to_request(),
+        )
+        .await;
+        assert_eq!(res.status(), actix_web::http::StatusCode::UNAUTHORIZED);
+    }
+
+    /// With `--openapi-private`, both endpoints go back to being admin-only.
+    #[actix_web::test]
+    async fn openapi_private_closes_both_endpoints() {
+        let app = app_with!(state(true));
+
         for path in [OPENAPI_PATH, DOCS_PATH] {
             let res =
                 test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
@@ -1263,11 +1382,7 @@ mod handler_tests {
                 path
             );
         }
-    }
 
-    #[actix_web::test]
-    async fn the_spec_is_refused_to_a_non_admin() {
-        let app = app_with!(state());
         let bob = sign_in!(app, "bob");
         for path in [OPENAPI_PATH, DOCS_PATH] {
             let res = test::call_service(
@@ -1285,49 +1400,21 @@ mod handler_tests {
                 path
             );
         }
-    }
 
-    /// And an admin gets a document that parses and describes this deployment
-    /// — including the collections the store actually holds.
-    #[actix_web::test]
-    async fn an_admin_gets_the_document() {
-        let app = app_with!(state());
         let admin = sign_in!(app, "admin");
-
         let body = test::call_and_read_body(
             &app,
             test::TestRequest::get()
                 .uri(OPENAPI_PATH)
-                .cookie(admin.clone())
+                .cookie(admin)
                 .to_request(),
         )
         .await;
         let spec: Value = serde_json::from_slice(&body).expect("the document is not JSON");
         assert_eq!(spec["openapi"], "3.1.0");
-        assert!(spec["paths"]["/login"]["post"].is_object());
-        assert_eq!(
-            spec["paths"]["/itm/list"]["get"]["parameters"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|p| p["name"] == "collection")
-                .unwrap()["schema"]["enum"],
-            json!(["user"])
-        );
-
-        let res = test::call_service(
-            &app,
-            test::TestRequest::get()
-                .uri(DOCS_PATH)
-                .cookie(admin)
-                .to_request(),
-        )
-        .await;
-        assert!(res.status().is_success());
-        assert_eq!(
-            res.headers().get("content-type").unwrap(),
-            "text/html; charset=utf-8"
-        );
+        // And it says so about itself, rather than still claiming to be public.
+        assert!(spec["paths"][OPENAPI_PATH]["get"]["security"].is_null());
+        assert!(spec["paths"][DOCS_PATH]["get"]["responses"]["403"].is_object());
     }
 }
 
@@ -1427,7 +1514,12 @@ mod tests {
             "extra_unprotected_route",
             &["/plugin/ping:get:ping"],
         ));
-        let spec = build_spec("https://app.example.com", &["user".to_string()], &routes);
+        let spec = build_spec(
+            "https://app.example.com",
+            &["user".to_string()],
+            &routes,
+            false,
+        );
 
         assert!(spec["paths"]["/itm/list"]["get"].is_object());
         assert_eq!(
@@ -1447,7 +1539,7 @@ mod tests {
             "extra_rest_route",
             &["/api/thing:get:read", "/api/thing:post:write"],
         ));
-        let spec = build_spec("", &[], &routes);
+        let spec = build_spec("", &[], &routes, false);
         assert!(spec["paths"]["/api/thing"]["get"].is_object());
         assert!(spec["paths"]["/api/thing"]["post"].is_object());
     }
@@ -1465,7 +1557,7 @@ mod tests {
             inner.insert("1".to_string(), spec.to_string());
             it.strstrs.insert(cat.to_string(), inner);
         }
-        let spec = build_spec("", &[], &plugin_routes(&it));
+        let spec = build_spec("", &[], &plugin_routes(&it), false);
 
         // No override means the document-wide `sessionCookie` requirement.
         assert!(spec["paths"]["/private"]["get"]["security"].is_null());
@@ -1483,7 +1575,7 @@ mod tests {
     /// holds — anything else is answered 400 by the handlers.
     #[test]
     fn collections_constrain_the_collection_parameter() {
-        let spec = build_spec("", &["user".to_string(), "node".to_string()], &[]);
+        let spec = build_spec("", &["user".to_string(), "node".to_string()], &[], false);
         let params = spec["paths"]["/itm/list"]["get"]["parameters"]
             .as_array()
             .unwrap();
@@ -1495,7 +1587,7 @@ mod tests {
         assert_eq!(collection["required"], json!(true));
 
         // With no collections known, the parameter stays an unconstrained string.
-        let empty = build_spec("", &[], &[]);
+        let empty = build_spec("", &[], &[], false);
         let params = empty["paths"]["/itm/list"]["get"]["parameters"]
             .as_array()
             .unwrap();
@@ -1513,7 +1605,7 @@ mod tests {
             // to be broken apart rather than overwriting the first.
             &["/a-b:get:h", "/a_b:get:h", "/a/b:post:h"],
         ));
-        let spec = build_spec("", &["user".to_string()], &routes);
+        let spec = build_spec("", &["user".to_string()], &routes, false);
 
         let mut ids: Vec<&str> = Vec::new();
         for (path, methods) in spec["paths"].as_object().unwrap() {
@@ -1537,7 +1629,7 @@ mod tests {
     #[test]
     fn every_ref_resolves() {
         let routes = plugin_routes(&internals_with("extra_route", &["/x:post:h"]));
-        let spec = build_spec("https://example.org", &["user".to_string()], &routes);
+        let spec = build_spec("https://example.org", &["user".to_string()], &routes, false);
         let schemas = spec["components"]["schemas"].as_object().unwrap();
 
         fn collect_refs(v: &Value, into: &mut Vec<String>) {
@@ -1580,7 +1672,7 @@ mod tests {
             "extra_unprotected_route",
             &["/x<script>alert(1)</script>:get:h"],
         ));
-        let html = render_html(&build_spec("", &[], &routes));
+        let html = render_html(&build_spec("", &[], &routes, false));
         assert!(
             !html.contains("<script>"),
             "an injected tag survived into the page"
@@ -1593,7 +1685,7 @@ mod tests {
     #[test]
     fn the_rendered_page_lists_every_operation() {
         let routes = plugin_routes(&internals_with("extra_route", &["/plugin/x:post:h"]));
-        let spec = build_spec("", &["user".to_string()], &routes);
+        let spec = build_spec("", &["user".to_string()], &routes, false);
         let html = render_html(&spec);
 
         for (path, methods) in spec["paths"].as_object().unwrap() {

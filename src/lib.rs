@@ -274,6 +274,8 @@ where
         srv.body_timeout_secs
             .store(args.body_timeout_secs, std::sync::atomic::Ordering::Relaxed);
         *srv.update_script.lock() = args.update_script.to_string();
+        srv.openapi_private
+            .store(args.openapi_private, std::sync::atomic::Ordering::Relaxed);
 
         // Initialize the encrypted secret store. The master key file
         // defaults to ${data_path}/.secret-key when not specified.

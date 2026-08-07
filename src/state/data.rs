@@ -81,6 +81,10 @@ pub struct Data {
     /// Path to script invoked by POST /system/update
     pub update_script: Mutex<String>,
 
+    /// Whether the API description is admin-only. Public unless
+    /// `--openapi-private` was given; see `Args::openapi_private`.
+    pub openapi_private: std::sync::atomic::AtomicBool,
+
     /// Encrypted user-data secret store. Populated in main() after data
     /// path is known. Wrapped in `Mutex` so the `secret_*` HTTP handlers
     /// can access it without holding the outer Data lock.
@@ -129,6 +133,7 @@ impl Data {
             max_payload_bytes: std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_PAYLOAD_BYTES),
             body_timeout_secs: std::sync::atomic::AtomicU64::new(DEFAULT_BODY_TIMEOUT_SECS),
             update_script: Mutex::new(String::new()),
+            openapi_private: std::sync::atomic::AtomicBool::new(false),
             secrets: Mutex::new(None),
             plugin_registry: OnceLock::new(),
             core_handle: OnceLock::new(),

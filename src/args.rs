@@ -107,6 +107,18 @@ pub struct Args {
     #[arg(long, default_value(""))]
     pub update_script: String,
 
+    /// Serve the API description (`/openapi.json` and `/docs`) only to
+    /// administrators.
+    ///
+    /// It is public by default. The description says which endpoints exist and
+    /// what they take — it is not a credential, and every endpoint it names
+    /// enforces its own authentication regardless of who read the document.
+    /// What it does disclose is the deployment's shape: the plugin routes
+    /// registered from `internals.js` and the collection names in the store.
+    /// A deployment that would rather not publish that closes it here.
+    #[arg(long, default_value_t = false)]
+    pub openapi_private: bool,
+
     /// Path to the master key file used to encrypt the secret store.
     /// If empty, defaults to ${data_path}/.secret-key. Auto-generated on
     /// first run if missing.
