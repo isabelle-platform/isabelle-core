@@ -22,18 +22,53 @@ if [ ! -f "$binary" ] ; then
     exit 1
 fi
 
-lib_dirs="$(grep -hs '^cargo:lib_dir=' "$profile_dir"/build/*/output \
-    | sed 's/^cargo:lib_dir=//' | sort -u)"
+# Only the current build's dirs. `target/*/build/` accumulates one directory
+# per build-script run and cargo never prunes them, so a project that has been
+# built against two versions of a native library has both on disk. Taking all
+# of them stamped the binary with an rpath to a library it was not linked
+# against — and dyld, resolving @rpath in order, loaded that one. Here that
+# meant an old libasp with a known crash being loaded into a binary built
+# against the fixed one, which is a very confusing afternoon.
+#
+# Newest output per build-script package wins.
+lib_dirs="$(
+    ls -t "$profile_dir"/build/*/output 2>/dev/null | while read -r out ; do
+        pkg="$(basename "$(dirname "$out")" | sed 's/-[0-9a-f]*$//')"
+        grep -hs '^cargo:lib_dir=' "$out" \
+            | sed "s|^cargo:lib_dir=|${pkg} |"
+    done | awk '!seen[$1]++ { print $2 }'
+)"
 [ -n "$lib_dirs" ] || exit 0
 
 case "$(uname -s)" in
     Darwin)
+        # Drop rpaths this build did not ask for. A binary is usually relinked
+        # fresh, but `install_name_tool` is also run on rebuilds, and a leftover
+        # entry pointing at another version of the same library outranks the
+        # right one if it comes first.
+        for old_rpath in $(otool -l "$binary" \
+                | awk '/cmd LC_RPATH/,/^$/' | awk '$1 == "path" { print $2 }') ; do
+            case " $lib_dirs " in
+                *" $old_rpath "*) continue ;;
+            esac
+            case "$old_rpath" in
+                *asp-cache*|*"/build/"*)
+                    install_name_tool -delete_rpath "$old_rpath" "$binary" 2>/dev/null \
+                        && echo "fix_rpath: removed stale rpath $old_rpath"
+                    ;;
+            esac
+        done
         for d in $lib_dirs ; do
             if otool -l "$binary" | grep -q " path $d " ; then
                 continue
             fi
-            install_name_tool -add_rpath "$d" "$binary" \
-                && echo "fix_rpath: added rpath $d"
+            # Loudly: a silent failure here is a binary that loads the wrong
+            # library, or none at all, with nothing said at build time.
+            if install_name_tool -add_rpath "$d" "$binary" ; then
+                echo "fix_rpath: added rpath $d"
+            else
+                echo "fix_rpath: FAILED to add rpath $d — the binary may load a stale library" >&2
+            fi
         done
         ;;
     Linux)
