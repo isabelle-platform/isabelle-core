@@ -691,10 +691,23 @@ impl Store for StoreMongo {
         // back in an order Mongo is free to vary between queries, so a paged
         // listing can show one item twice and drop another. "id" is unique, so
         // the total order is fixed; it is also already indexed.
+        // A leading `-` reverses the order: `-id` is newest-first. Written as a
+        // prefix on the key rather than a separate parameter so it travels
+        // through every layer that already carries a sort key — the query
+        // string, the task queue, the plugin API — without a signature change
+        // in each of them.
+        //
+        // The tie-break follows the same direction. Pointing it the other way
+        // would order equal keys against the page order, which is how a
+        // paginated listing shows one row twice and hides another.
+        let (eff_sort_key, dir) = match eff_sort_key.strip_prefix('-') {
+            Some(k) if !k.is_empty() => (k, -1),
+            _ => (eff_sort_key, 1),
+        };
         let sort = if eff_sort_key == "id" {
-            doc! { "id": 1 }
+            doc! { "id": dir }
         } else {
-            doc! { eff_sort_key: 1, "id": 1 }
+            doc! { eff_sort_key: dir, "id": dir }
         };
 
         let mut cursor = match coll
