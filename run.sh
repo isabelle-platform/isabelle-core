@@ -133,8 +133,9 @@ fi
 
 echo Starting Isabelle Core...
 
-# Run the binary
-RUST_LOG=info \
+# Run the binary. RUST_LOG is respected when the caller sets one, so a session
+# chasing an SSH or plugin problem can ask for more without editing this file.
+RUST_LOG="${RUST_LOG:-info}" \
 RUST_BACKTRACE=1 \
 "${binary}" \
     --port "${port}" \
