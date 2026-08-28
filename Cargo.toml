@@ -1,6 +1,6 @@
 [package]
 name = "isabelle-core"
-version = "2.2.5"
+version = "2.3.0"
 edition = "2021"
 
 # Core ships as both a library (`isabelle_core::run`) and a thin dev
