@@ -33,6 +33,7 @@ use actix_web::{HttpRequest, HttpResponse};
 use futures_util::StreamExt;
 use isabelle_plugin_api::api::WebResponse;
 use log::trace;
+use std::collections::HashMap;
 
 /// Call HTTP URL hooks. This function checks actual location from request
 /// first.
@@ -117,6 +118,36 @@ pub async fn url_unprotected_post_route(
     HttpResponse::NotFound().into()
 }
 
+/// Request headers as a plugin hook sees them: names lowercased, and the ones
+/// that carry credentials left behind.
+///
+/// A hook needs headers for one reason — a caller that signs its request, of
+/// which a payment provider's webhook is the usual example — and that never
+/// involves the session cookie or an `Authorization` header. Those are dropped
+/// here rather than trusted not to be read: the hook is already told who the
+/// user is through `user`, and a raw credential is the one thing it could do
+/// more with than that.
+///
+/// A repeated header name collapses to the last value. No signing scheme sends
+/// its signature twice, and a hook that needs every value of a repeated header
+/// wants a different shape than this one.
+fn plugin_headers(req: &HttpRequest) -> HashMap<String, String> {
+    const WITHHELD: [&str; 3] = ["cookie", "authorization", "proxy-authorization"];
+    req.headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            let name = name.as_str().to_ascii_lowercase();
+            if WITHHELD.contains(&name.as_str()) {
+                return None;
+            }
+            // A header that is not valid UTF-8 cannot be handed over as a
+            // String. Dropping it beats refusing the whole request: it is
+            // never the signature, which is hex or base64 by construction.
+            value.to_str().ok().map(|v| (name, v.to_string()))
+        })
+        .collect()
+}
+
 /// Call URL REST hook with the payload
 pub async fn url_generic_rest_route(
     user: Option<Identity>,
@@ -170,7 +201,16 @@ pub async fn url_generic_rest_route(
 
     if let Some(handler) = cache.rest_routes.get(req.path()) {
         trace!("Call custom route {}", handler);
-        let resp = call_url_rest_route(srv, user, handler, method, req.query_string(), body).await;
+        let resp = call_url_rest_route(
+            srv,
+            user,
+            handler,
+            method,
+            req.query_string(),
+            body,
+            plugin_headers(&req),
+        )
+        .await;
         match &resp {
             WebResponse::Login(email) => {
                 // A plugin route asked for a session. If one cannot be
@@ -211,4 +251,149 @@ pub async fn url_post_rest_route(
     mut payload: web::Payload,
 ) -> HttpResponse {
     return url_generic_rest_route(user, data, req, &mut payload, "POST").await;
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    use actix_web::test::TestRequest;
+
+    fn headers_of(req: TestRequest) -> HashMap<String, String> {
+        plugin_headers(&req.to_http_request())
+    }
+
+    /// What the whole change exists for: a signature travels in a header, and
+    /// it has to arrive spelled the way the hook will look it up.
+    #[test]
+    fn a_signature_survives_with_its_name_folded() {
+        let h = headers_of(TestRequest::post().insert_header(("Stripe-Signature", "t=1,v1=ab")));
+        assert_eq!(h.get("stripe-signature").map(String::as_str), Some("t=1,v1=ab"));
+    }
+
+    /// A plugin is told who the caller is through `user`. Handing it the raw
+    /// session cookie as well would let it be somebody else.
+    #[test]
+    fn credentials_are_withheld() {
+        let h = headers_of(
+            TestRequest::post()
+                .insert_header(("Cookie", "id=secret"))
+                .insert_header(("Authorization", "Bearer secret"))
+                .insert_header(("Proxy-Authorization", "Basic secret"))
+                .insert_header(("Content-Type", "application/json")),
+        );
+        assert!(!h.contains_key("cookie"), "{h:?}");
+        assert!(!h.contains_key("authorization"), "{h:?}");
+        assert!(!h.contains_key("proxy-authorization"), "{h:?}");
+        // …and the ordinary ones still come through, or the filter is a wall.
+        assert_eq!(h.get("content-type").map(String::as_str), Some("application/json"));
+    }
+}
+
+/// The webhook path, end to end: a signed JSON body posted to a REST route has
+/// to reach the plugin hook byte-for-byte, with its signature header intact.
+///
+/// This is what the multipart routes cannot do — they re-parse the body into an
+/// `Item` and never look at a header — and it is the whole reason `RouteRest`
+/// grew a `headers` field.
+#[cfg(test)]
+mod rest_delivery_tests {
+    use super::*;
+    use crate::state::data::Data;
+    use crate::state::route_cache::RouteCache;
+    use actix_web::test::TestRequest;
+    use actix_web::{test, web, App};
+    use isabelle_dm::data_model::item::Item;
+    use isabelle_plugin_api::actor::{PluginHookMessage, PluginRegistry};
+    use std::sync::Arc;
+
+    const PATH: &str = "/proteos/webhooks/stripe";
+    const HANDLER: &str = "proteos_stripe_webhook";
+    // Deliberately awkward: whitespace and a non-ASCII character, because HMAC
+    // is over the exact bytes and any re-encoding on the way in breaks it.
+    const BODY: &str = "{\n  \"id\": \"evt_1\",\n  \"note\": \"счёт\"\n}";
+    const SIG: &str = "t=1700000000,v1=deadbeef";
+
+    #[actix_web::test]
+    async fn a_signed_body_reaches_the_hook_intact() {
+        let mut internals = Item::new();
+        internals.set_strstr(
+            "extra_rest_route",
+            &[(
+                "1".to_string(),
+                format!("{PATH}:post:{HANDLER}"),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let data = Data::new();
+        *data.route_cache.lock() = Arc::new(RouteCache::from_internals(&internals));
+
+        // A plugin that does nothing but record what it was handed.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PluginHookMessage>(4);
+        let mut registry = PluginRegistry::new();
+        registry.add("recorder", tx);
+        data.set_plugin_registry(registry).ok().unwrap();
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        {
+            let seen = seen.clone();
+            actix_rt::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    if let PluginHookMessage::RouteRest {
+                        hndl,
+                        payload,
+                        headers,
+                        reply,
+                        ..
+                    } = msg
+                    {
+                        *seen.lock().unwrap() = Some((hndl, payload, headers));
+                        let _ = reply.send(isabelle_plugin_api::api::WebResponse::Ok);
+                    }
+                }
+            });
+        }
+
+        let state = web::Data::new(crate::State::from_data(data));
+        // The identity machinery has to be mounted even though the caller is
+        // anonymous: `Option<Identity>` panics without it.
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .wrap(actix_identity::IdentityMiddleware::default())
+                .wrap(
+                    actix_session::SessionMiddleware::builder(
+                        actix_session::storage::CookieSessionStore::default(),
+                        actix_web::cookie::Key::from(&[0u8; 64]),
+                    )
+                    .cookie_secure(false)
+                    .build(),
+                )
+                .route(PATH, web::post().to(url_post_rest_route)),
+        )
+        .await;
+
+        let res = test::call_service(
+            &app,
+            TestRequest::post()
+                .uri(PATH)
+                .insert_header(("Content-Type", "application/json"))
+                .insert_header(("Stripe-Signature", SIG))
+                // The credential a plugin has no business seeing.
+                .insert_header(("Cookie", "id=session-secret"))
+                .set_payload(BODY)
+                .to_request(),
+        )
+        .await;
+        assert!(res.status().is_success(), "status {}", res.status());
+
+        let seen = seen.lock().unwrap().clone();
+        let (hndl, payload, headers) = seen.expect("the hook was never called");
+        assert_eq!(hndl, HANDLER);
+        // Byte-for-byte: this is what the HMAC is computed over.
+        assert_eq!(payload, BODY);
+        assert_eq!(headers.get("stripe-signature").map(String::as_str), Some(SIG));
+        assert!(!headers.contains_key("cookie"), "{headers:?}");
+    }
 }

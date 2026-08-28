@@ -392,6 +392,7 @@ pub async fn call_url_rest_route_actor(
     user: &Option<Item>,
     query: &str,
     payload: &str,
+    headers: HashMap<String, String>,
 ) -> WebResponse {
     let senders: Vec<_> = srv.plugin_registry().senders().cloned().collect();
     let mut response = WebResponse::NotImplemented;
@@ -403,6 +404,7 @@ pub async fn call_url_rest_route_actor(
             user: user.clone(),
             query: query.to_string(),
             payload: payload.to_string(),
+            headers: headers.clone(),
             reply: reply_tx,
         };
         if sender.send(msg).await.is_err() {

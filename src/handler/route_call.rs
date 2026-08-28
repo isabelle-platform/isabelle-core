@@ -393,13 +393,14 @@ pub async fn call_url_rest_route(
     method: &str,
     query: &str,
     payload: &str,
+    headers: HashMap<String, String>,
 ) -> WebResponse {
     let mut usr: Option<Item> = None;
     if let Some(u) = user {
         usr = get_user(srv, principal(&u)).await;
     }
 
-    let wr = call_url_rest_route_actor(srv, hndl, method, &usr, query, payload).await;
+    let wr = call_url_rest_route_actor(srv, hndl, method, &usr, query, payload, headers).await;
     if matches!(wr, WebResponse::NotImplemented) {
         WebResponse::Ok
     } else {
