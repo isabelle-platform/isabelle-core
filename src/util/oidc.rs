@@ -306,6 +306,12 @@ fn id_token_validation(
     validation.set_audience(&[cfg.client_id.trim()]);
     validation.set_issuer(&[provider.issuer()]);
     validation.validate_exp = true;
+    // Naming them required is not the same as comparing them. `set_audience`
+    // checks an audience the token carries and says nothing about one that is
+    // absent, so without this a token with no `aud` at all — minted for
+    // nothing in particular — passes the comparison by having nothing to
+    // compare. The same goes for the issuer.
+    validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
     validation
 }
 
@@ -939,5 +945,219 @@ mod tests {
         // Whitespace in the middle is a different address, not a stray one.
         assert!(!redirect_uri_is_usable("https://example.test/c b"));
         assert!(!redirect_uri_is_usable("https://"));
+    }
+
+    /// Algorithm confusion: a token that names a symmetric algorithm, signed
+    /// with the provider's *public* key as if it were a shared secret. The
+    /// validation is built from the token's own header, so this is the shape
+    /// that has to be refused by the key rather than by the header.
+    #[test]
+    fn a_token_that_chooses_its_own_algorithm_is_refused() {
+        let public_key_as_secret = b"EVs_o5-uQbTjL3chynL4wXgUg2R9q9UU8I5mEovUf84";
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some("k1".to_string());
+        let forged = jsonwebtoken::encode(
+            &header,
+            &good_claims(),
+            &jsonwebtoken::EncodingKey::from_secret(public_key_as_secret),
+        )
+        .unwrap();
+
+        let cfg = test_cfg();
+        let validation = id_token_validation(Provider::Apple, &cfg, jsonwebtoken::Algorithm::HS256);
+        let outcome = check_id_token(
+            Provider::Apple,
+            &forged,
+            "the-nonce",
+            "k1",
+            &validation,
+            &test_jwks("k1"),
+        );
+        assert!(outcome.is_err(), "an HS256 token was accepted: {outcome:?}");
+    }
+
+    /// The same shape reached the way the real code reaches it — the
+    /// algorithm taken from the header — so the refusal does not depend on
+    /// the caller having guessed right.
+    #[test]
+    fn the_algorithm_in_the_header_cannot_pick_a_key_that_does_not_fit_it() {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some("k1".to_string());
+        let forged = jsonwebtoken::encode(
+            &header,
+            &good_claims(),
+            &jsonwebtoken::EncodingKey::from_secret(b"anything at all"),
+        )
+        .unwrap();
+
+        let parsed = jsonwebtoken::decode_header(&forged).unwrap();
+        assert_eq!(parsed.alg, jsonwebtoken::Algorithm::HS256);
+        let cfg = test_cfg();
+        let validation = id_token_validation(Provider::Apple, &cfg, parsed.alg);
+        assert!(check_id_token(
+            Provider::Apple,
+            &forged,
+            "the-nonce",
+            "k1",
+            &validation,
+            &test_jwks("k1")
+        )
+        .is_err());
+    }
+
+    /// An unsigned token — the other half of the same family.
+    #[test]
+    fn an_unsigned_token_is_not_a_token() {
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(good_claims().to_string());
+        let header =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"none","kid":"k1"}"#);
+        let unsigned = format!("{}.{}.", header, payload);
+        // It does not even parse as a token this crate will consider.
+        assert!(jsonwebtoken::decode_header(&unsigned).is_err());
+    }
+
+    /// A token with no `kid` cannot name a key, and must not fall through to
+    /// whichever key happens to be first.
+    #[test]
+    fn a_token_naming_no_key_is_refused() {
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        let key = jsonwebtoken::EncodingKey::from_ec_pem(TEST_KEY_PEM.as_bytes()).unwrap();
+        let token = jsonwebtoken::encode(&header, &good_claims(), &key).unwrap();
+        assert!(jsonwebtoken::decode_header(&token).unwrap().kid.is_none());
+
+        let cfg = test_cfg();
+        let validation = id_token_validation(Provider::Apple, &cfg, jsonwebtoken::Algorithm::ES256);
+        let err = check_id_token(
+            Provider::Apple,
+            &token,
+            "the-nonce",
+            "",
+            &validation,
+            &test_jwks("k1"),
+        )
+        .unwrap_err();
+        assert!(err.contains("does not publish"), "{err}");
+    }
+
+    /// A key the provider publishes but which is not the sort it says it is.
+    #[test]
+    fn a_key_of_an_unusable_kind_is_refused_rather_than_guessed_at() {
+        let jwks = Jwks {
+            keys: vec![Jwk {
+                kid: "k1".to_string(),
+                kty: "OKP".to_string(),
+                ..test_jwks("k1").keys[0].clone()
+            }],
+        };
+        let cfg = test_cfg();
+        let validation = id_token_validation(Provider::Apple, &cfg, jsonwebtoken::Algorithm::ES256);
+        let err = check_id_token(
+            Provider::Apple,
+            &mint(good_claims(), "k1"),
+            "the-nonce",
+            "k1",
+            &validation,
+            &jwks,
+        )
+        .unwrap_err();
+        assert!(err.contains("unsupported key type"), "{err}");
+    }
+
+    /// The audience may be a list, and this application being one of several
+    /// named is still this application being named.
+    #[test]
+    fn an_audience_list_containing_us_is_accepted() {
+        let mut claims = good_claims();
+        claims["aud"] = serde_json::json!(["io.example.web", "io.example.ios"]);
+        assert!(check(claims, "k1", "the-nonce").is_ok());
+    }
+
+    /// …and one that does not name us is not.
+    #[test]
+    fn an_audience_list_without_us_is_refused() {
+        let mut claims = good_claims();
+        claims["aud"] = serde_json::json!(["io.somebody.web", "io.somebody.ios"]);
+        assert!(check(claims, "k1", "the-nonce").is_err());
+    }
+
+    /// A token with no audience at all names nobody, so it names not us.
+    #[test]
+    fn a_token_with_no_audience_is_refused() {
+        let mut claims = good_claims();
+        claims.as_object_mut().unwrap().remove("aud");
+        assert!(check(claims, "k1", "the-nonce").is_err());
+    }
+
+    #[test]
+    fn a_token_with_no_expiry_is_refused() {
+        let mut claims = good_claims();
+        claims.as_object_mut().unwrap().remove("exp");
+        assert!(check(claims, "k1", "the-nonce").is_err());
+    }
+
+    /// A token that carries no nonce cannot be answering the sign-in we
+    /// started, whatever else is right about it.
+    #[test]
+    fn a_token_with_no_nonce_is_refused() {
+        let mut claims = good_claims();
+        claims.as_object_mut().unwrap().remove("nonce");
+        let err = check(claims, "k1", "the-nonce").unwrap_err();
+        assert!(err.contains("different sign-in"), "{err}");
+    }
+
+    /// Garbage in the token position is a refusal, not a panic.
+    #[test]
+    fn something_that_is_not_a_token_at_all_is_refused() {
+        let cfg = test_cfg();
+        let validation = id_token_validation(Provider::Apple, &cfg, jsonwebtoken::Algorithm::ES256);
+        for junk in ["", "....", "not.a.token", "a.b", "eyJhbGciOiJFUzI1NiJ9"] {
+            assert!(
+                check_id_token(
+                    Provider::Apple,
+                    junk,
+                    "the-nonce",
+                    "k1",
+                    &validation,
+                    &test_jwks("k1")
+                )
+                .is_err(),
+                "{junk:?}"
+            );
+        }
+    }
+
+    /// The subject is what identifies the account for good, so it must be
+    /// carried through exactly rather than trimmed or folded like the
+    /// address is.
+    #[test]
+    fn the_subject_is_carried_through_untouched() {
+        let mut claims = good_claims();
+        claims["sub"] = serde_json::json!("001122.AbCdEf.3344");
+        assert_eq!(
+            check(claims, "k1", "the-nonce").unwrap().subject,
+            "001122.AbCdEf.3344"
+        );
+    }
+
+    /// A whitespace-only subject names nobody either.
+    #[test]
+    fn a_blank_subject_names_no_account() {
+        let mut claims = good_claims();
+        claims["sub"] = serde_json::json!("   ");
+        assert!(check(claims, "k1", "the-nonce")
+            .unwrap_err()
+            .contains("names no account"));
+    }
+
+    /// An entry with no name is not an error; the address is what an account
+    /// is made from.
+    #[test]
+    fn a_token_without_a_name_still_identifies_somebody() {
+        let mut claims = good_claims();
+        claims.as_object_mut().unwrap().remove("name");
+        let id = check(claims, "k1", "the-nonce").unwrap();
+        assert_eq!(id.name, "");
+        assert_eq!(id.email, "someone@example.com");
     }
 }
