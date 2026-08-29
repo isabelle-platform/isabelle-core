@@ -62,6 +62,7 @@ use crate::handler::route::url_unprotected_post_route;
 use crate::handler::route::url_unprotected_route;
 use crate::handler::route_call::call_periodic_job_hook;
 use crate::notif::gcal::*;
+use crate::server::auth_config::*;
 use crate::server::guards::{enforce_session_generation, reject_ambiguous_framing};
 use crate::server::itm::*;
 use crate::server::login::*;

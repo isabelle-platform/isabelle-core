@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+pub mod auth_config;
 pub mod guards;
 pub mod itm;
 pub mod list_filter;
@@ -29,5 +30,6 @@ pub mod oauth;
 pub mod openapi;
 pub mod secret;
 pub mod setting;
+pub mod signin;
 pub mod system;
 pub mod user_control;

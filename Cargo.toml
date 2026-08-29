@@ -33,6 +33,11 @@ cron = "0.12.1"
 env_logger = "0.8.4"
 futures-util = "0.3.29"
 jsonwebtoken = "9"
+# Sign-in against a directory. rustls to match the rest of the TLS in this
+# crate; the synchronous and Kerberos halves of the crate are not used.
+ldap3 = { version = "0.12", default-features = false, features = [
+	"tls-rustls-ring",
+] }
 isabelle-dm = { "git" = "https://github.com/isabelle-platform/isabelle-dm", tag = "1.10.0" }
 isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.25.0" }
 lettre = { version = "0.11.11", features = [

@@ -207,84 +207,191 @@ pub async fn login(
 
     info!("User name: {}", lu.username.clone());
 
-    // Find the user in the database
-    let usr = get_user(srv, lu.username.clone()).await;
-
-    if usr == None {
-        // Not found - error out.
-        info!("No user {} found, couldn't log in", lu.username.clone());
-        return ok_json(false, "Invalid login/password");
-    } else {
-        let itm_real = usr.unwrap();
-
-        // Don't let inactive users log in.
-        if itm_real.safe_bool("role_is_active", false) == false {
-            info!("User {} is inactive, couldn't log in", lu.username.clone());
+    // The local check first, so a deployment that has always worked keeps
+    // working whatever state the directory is in — and so an administrator
+    // with a password here can still get in when the directory is the thing
+    // that is broken.
+    let itm_real = match local_login(srv, &lu).await {
+        Local::Authenticated(itm) => itm,
+        // Switched off here. A directory must not be able to overrule that:
+        // deactivating an account is this deployment's decision, and it would
+        // be worth very little if an unrelated system could undo it.
+        Local::Inactive => {
+            info!("User {} is inactive, couldn't log in", lu.username);
             return ok_json(false, "User is inactive");
         }
-
-        // Verify password/otp
-        let pw = itm_real.safe_str("password", "");
-        let otp = itm_real.safe_str("otp", "");
-        let attempts = itm_real.safe_u64("otp_attempts", 0);
-
-        // An OTP is only a credential while it is fresh and unexhausted.
-        let otp_live = otp_is_live(&itm_real, now_ts());
-        let otp_ok = otp_live && constant_time_eq(otp.as_bytes(), lu.password.as_bytes());
-        let pw_ok = pw != "" && verify_password(&lu.password, &pw);
-
-        if pw_ok || otp_ok {
-            // Password matches - log in. A failure to attach the identity
-            // means no session was created, so reporting success would leave
-            // the caller believing it is logged in when the next request is
-            // anonymous.
-            if let Err(e) = Identity::login(&req.extensions(), itm_real.safe_str("email", "")) {
-                error!("Could not establish a session for {}: {}", lu.username, e);
-                return result_json(
-                    actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    false,
-                    "Could not establish a session",
-                );
+        Local::NotAuthenticated => match directory_login(srv, &lu).await {
+            Ok(Some(itm)) => itm,
+            Ok(None) => {
+                error!("Invalid credentials for {}", lu.username);
+                return ok_json(false, "Invalid login/password");
             }
+            Err(msg) => return ok_json(false, msg),
+        },
+    };
 
-            // Stamp the session with the generation in force right now. The
-            // guard middleware compares it on every later request, so bumping
-            // the number on the record — at logout, on a password change, on a
-            // role change — stops this cookie being accepted, which is the
-            // only revocation available when the whole session lives in it.
-            if let Err(e) = req
-                .get_session()
-                .insert(SESSION_GEN_KEY, session_generation(&itm_real))
-            {
-                error!("Could not stamp the session generation: {}", e);
-            }
-
-            // Burn the OTP on any successful login, addressed by id. The old
-            // `clear_otp(login)` matched only records whose `login` and
-            // `email` were both equal to the submitted string — never true for
-            // a normal account — so codes were in practice never invalidated
-            // and stayed usable forever as a second password. It also ran
-            // before verification, which would have burned a code the
-            // legitimate user was still typing in.
-            let mut logged = Item::new();
-            logged.id = itm_real.id;
-            logged.set_bool("logged_once", true);
-            logged.set_str("otp", "");
-            logged.set_u64("otp_expires_at", 0);
-            logged.set_u64("otp_attempts", 0);
-            srv.rw.set_item("user", &logged, true).await;
-            info!("Logged in as {}", lu.username);
-        } else {
-            // Password doesn't match - error out.
-            if otp_live {
-                bump_otp_attempts(srv, itm_real.id, attempts).await;
-            }
-            error!("Invalid password for {}", lu.username);
-            return ok_json(false, "Invalid login/password");
-        }
+    // A failure to attach the identity means no session was created, so
+    // reporting success would leave the caller believing it is logged in
+    // when the next request is anonymous.
+    if let Err(e) = Identity::login(&req.extensions(), itm_real.safe_str("email", "")) {
+        error!("Could not establish a session for {}: {}", lu.username, e);
+        return result_json(
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+            "Could not establish a session",
+        );
     }
 
+    // Stamp the session with the generation in force right now. The guard
+    // middleware compares it on every later request, so bumping the number on
+    // the record — at logout, on a password change, on a role change — stops
+    // this cookie being accepted, which is the only revocation available when
+    // the whole session lives in it.
+    if let Err(e) = req
+        .get_session()
+        .insert(SESSION_GEN_KEY, session_generation(&itm_real))
+    {
+        error!("Could not stamp the session generation: {}", e);
+    }
+
+    // Burn the OTP on any successful login, addressed by id. The old
+    // `clear_otp(login)` matched only records whose `login` and `email` were
+    // both equal to the submitted string — never true for a normal account —
+    // so codes were in practice never invalidated and stayed usable forever
+    // as a second password. It also ran before verification, which would have
+    // burned a code the legitimate user was still typing in.
+    let mut logged = Item::new();
+    logged.id = itm_real.id;
+    logged.set_bool("logged_once", true);
+    logged.set_str("otp", "");
+    logged.set_u64("otp_expires_at", 0);
+    logged.set_u64("otp_attempts", 0);
+    srv.rw.set_item("user", &logged, true).await;
+    info!("Logged in as {}", lu.username);
+
     return ok_json(true, "");
+}
+
+/// What the password and one-time-code check established.
+enum Local {
+    Authenticated(Item),
+    /// The record is here and switched off.
+    Inactive,
+    /// No such record, or the credentials were not its. Deliberately one
+    /// case: which of the two it was is not the caller's business, and it is
+    /// also the point at which another way in gets its turn.
+    NotAuthenticated,
+}
+
+/// Check the credentials against the record here.
+async fn local_login(srv: &crate::state::data::Data, lu: &LoginUser) -> Local {
+    let itm_real = match get_user(srv, lu.username.clone()).await {
+        Some(u) => u,
+        None => return Local::NotAuthenticated,
+    };
+    if !itm_real.safe_bool("role_is_active", false) {
+        return Local::Inactive;
+    }
+
+    let pw = itm_real.safe_str("password", "");
+    let otp = itm_real.safe_str("otp", "");
+    let attempts = itm_real.safe_u64("otp_attempts", 0);
+
+    // An OTP is only a credential while it is fresh and unexhausted.
+    let otp_live = otp_is_live(&itm_real, now_ts());
+    let otp_ok = otp_live && constant_time_eq(otp.as_bytes(), lu.password.as_bytes());
+    let pw_ok = pw != "" && verify_password(&lu.password, &pw);
+
+    if pw_ok || otp_ok {
+        Local::Authenticated(itm_real)
+    } else {
+        if otp_live {
+            bump_otp_attempts(srv, itm_real.id, attempts).await;
+        }
+        Local::NotAuthenticated
+    }
+}
+
+/// Check the same credentials against the directory, if there is one.
+///
+/// `Ok(None)` covers every way this can decline — no directory configured,
+/// the directory said no, the directory could not be reached — because the
+/// caller answers all of them the same way, and the differences belong in the
+/// log rather than in a reply that anyone can ask for.
+async fn directory_login(
+    srv: &crate::state::data::Data,
+    lu: &LoginUser,
+) -> Result<Option<Item>, &'static str> {
+    let cfg = match crate::server::signin::ldap_config(srv) {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    let identity = match crate::util::ldap::authenticate(&cfg, &lu.username, &lu.password).await {
+        Ok(i) => i,
+        Err(crate::util::ldap::LdapError::Rejected) => return Ok(None),
+        Err(crate::util::ldap::LdapError::NoAddress) => {
+            // Authenticated, but there is nothing to make an account out of.
+            // An operator can fix this; the person typing cannot, so it is
+            // worth a line of its own in the log.
+            error!(
+                "The directory authenticated {} but its entry has no {} attribute",
+                lu.username,
+                cfg.email_attribute_or_default()
+            );
+            return Ok(None);
+        }
+        Err(crate::util::ldap::LdapError::Unavailable(e)) => {
+            error!("Could not ask the directory about {}: {}", lu.username, e);
+            return Ok(None);
+        }
+    };
+
+    let existing = get_user(srv, identity.email.clone()).await;
+    let allow_registration = srv
+        .rw
+        .get_internals()
+        .await
+        .safe_bool("allow_self_registration", true);
+    // The directory authenticated them, so the address on their entry is
+    // vouched for in the sense this asks about.
+    let resolution = crate::server::signin::resolve_identity(
+        existing.as_ref(),
+        &identity.email,
+        true,
+        &identity.dn,
+        crate::server::signin::LDAP_SUBJECT_KEY,
+        allow_registration,
+    );
+    if let crate::server::signin::Resolution::Refuse(r) = resolution {
+        info!(
+            "Refusing a directory sign-in for {}: {}",
+            identity.email,
+            r.slug()
+        );
+        return Err(match r {
+            crate::server::signin::Refusal::Inactive => "User is inactive",
+            _ => "Invalid login/password",
+        });
+    }
+    if resolution == crate::server::signin::Resolution::Create
+        && !login_is_acceptable(&identity.email)
+    {
+        return Ok(None);
+    }
+
+    let record = crate::server::signin::record_for(
+        srv,
+        &resolution,
+        existing,
+        &identity.email,
+        &identity.name,
+        &identity.dn,
+        crate::server::signin::LDAP_SUBJECT_KEY,
+    )
+    .await;
+    info!("Signed in {} through the directory", identity.email);
+    Ok(record)
 }
 
 /// Log the user out.

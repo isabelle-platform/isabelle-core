@@ -45,12 +45,11 @@
 //! vouches for that address. Roles, activity and everything else belong to
 //! the record here, so a provider cannot make anybody an administrator.
 
-use crate::server::secret::ensure_admin;
+use crate::server::signin::{resolve_identity, Refusal, Resolution};
 use crate::server::user_control::*;
 use crate::state::state::*;
-use crate::util::multipart::{read_body, read_json_body, Limits};
+use crate::util::multipart::{read_body, Limits};
 use crate::util::oidc::{self, Provider, ProviderConfig};
-use actix_identity::Identity;
 use actix_session::SessionExt;
 use actix_web::cookie::{Cookie, SameSite};
 use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
@@ -164,112 +163,31 @@ pub fn safe_next(next: &str) -> String {
     }
 }
 
-/// Why a sign-in was refused, as the browser is told.
+/// What signing in with an identity provider means for this deployment.
 ///
-/// A slug rather than a sentence: this travels in a URL the user can read and
-/// forward, and the detail behind it — which record, which provider, which
-/// mismatch — belongs in the log, not in an address bar.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Refusal {
-    /// The user said no at the provider, or the provider gave up.
-    Denied,
-    /// The provider will not vouch for the address.
-    Unverified,
-    /// No account, and this deployment does not accept new ones.
-    RegistrationClosed,
-    /// There is an account and it is switched off.
-    Inactive,
-    /// The address belongs to an account already tied to a different one at
-    /// this provider.
-    Mismatched,
-    /// Anything that went wrong on the way.
-    Failed,
-}
-
-impl Refusal {
-    pub fn slug(self) -> &'static str {
-        match self {
-            Refusal::Denied => "denied",
-            Refusal::Unverified => "unverified",
-            Refusal::RegistrationClosed => "registration_closed",
-            Refusal::Inactive => "inactive",
-            Refusal::Mismatched => "mismatched",
-            Refusal::Failed => "failed",
-        }
-    }
-}
-
-/// What signing in with this identity should do.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Resolution {
-    /// Sign in as the record with this id, recording the provider subject.
-    SignIn(u64),
-    /// There is no such account and one may be made.
-    Create,
-    Refuse(Refusal),
-}
-
-/// The `strs` key under which a provider's subject is remembered.
-pub fn subject_key(provider: Provider) -> String {
-    format!("oauth_{}_subject", provider.id())
-}
-
-/// Decide what an authenticated identity means for this deployment.
-///
-/// Kept apart from the request handling because this is the part with the
-/// security argument in it, and it is worth being able to state that argument
-/// as tests rather than as a comment.
-///
-/// The address is the key. It is what the rest of this core already treats as
-/// the principal — a session is stamped with an email — so keying a provider
-/// sign-in on anything else would create a second kind of account that could
-/// not log in the ordinary way. What guards it is that the provider must
-/// vouch for the address, and that once a record has been signed into with
-/// one provider account it will not accept another: an address that changes
-/// hands at the provider cannot pick up the record that was left behind.
+/// A thin reading of the shared policy in terms of a provider: the subject is
+/// the provider's own identifier for the account, and it is remembered under
+/// a key of that provider's own so that Google and Apple can both be linked
+/// to one record without colliding.
 pub fn resolve(
     existing: Option<&Item>,
     identity: &oidc::Identity,
     provider: Provider,
     allow_self_registration: bool,
 ) -> Resolution {
-    if identity.email.trim().is_empty() {
-        return Resolution::Refuse(Refusal::Unverified);
-    }
-    if !identity.email_verified {
-        return Resolution::Refuse(Refusal::Unverified);
-    }
-    let existing = match existing {
-        None => {
-            return if allow_self_registration {
-                Resolution::Create
-            } else {
-                Resolution::Refuse(Refusal::RegistrationClosed)
-            }
-        }
-        Some(u) => u,
-    };
-    // The lookup that found this record matches a login *or* an email, which
-    // is right for a password sign-in — people type either — but not here.
-    // What the provider vouched for is an address, so an account is only the
-    // right one if that is the address it holds; otherwise an account whose
-    // login happened to be somebody else's email address could be signed
-    // into by that somebody else.
-    if !existing
-        .safe_str("email", "")
-        .trim()
-        .eq_ignore_ascii_case(identity.email.trim())
-    {
-        return Resolution::Refuse(Refusal::Mismatched);
-    }
-    if !existing.safe_bool("role_is_active", false) {
-        return Resolution::Refuse(Refusal::Inactive);
-    }
-    let known = existing.safe_str(&subject_key(provider), "");
-    if !known.is_empty() && known != identity.subject {
-        return Resolution::Refuse(Refusal::Mismatched);
-    }
-    Resolution::SignIn(existing.id)
+    resolve_identity(
+        existing,
+        &identity.email,
+        identity.email_verified,
+        &identity.subject,
+        &subject_key(provider),
+        allow_self_registration,
+    )
+}
+
+/// The `strs` key under which a provider's subject is remembered.
+pub fn subject_key(provider: Provider) -> String {
+    format!("oauth_{}_subject", provider.id())
 }
 
 /// Read a provider's configuration out of the encrypted secret store.
@@ -278,7 +196,7 @@ pub fn resolve(
 /// be started. There is no second flag to leave in the wrong position, and
 /// nothing about it sits in the settings document that plugins and admins
 /// read for other reasons.
-pub fn provider_config(
+pub(crate) fn provider_config(
     srv: &crate::state::data::Data,
     provider: Provider,
 ) -> Option<ProviderConfig> {
@@ -302,7 +220,7 @@ pub fn provider_config(
 /// puts the core: the shipped nginx configuration serves it under `/api`, and
 /// the provider needs the address the *browser* uses, not the one the proxy
 /// forwards to.
-fn redirect_uri(srv: &crate::state::data::Data, provider: Provider) -> String {
+pub(crate) fn redirect_uri(srv: &crate::state::data::Data, provider: Provider) -> String {
     if let Some(cfg) = srv.secrets.lock().as_ref() {
         if let Some(item) = cfg.get_by_name(provider.secret_name()) {
             let explicit = item.safe_str("redirect_uri", "");
@@ -316,245 +234,6 @@ fn redirect_uri(srv: &crate::state::data::Data, provider: Provider) -> String {
         srv.public_url.lock().trim_end_matches('/'),
         provider.id()
     )
-}
-
-/// One provider as an administrator sees it.
-///
-/// The secret store masks everything it is not told is metadata, which is the
-/// right default for a store of secrets but leaves a configuration screen
-/// unable to show a client id — a value that is in the address bar of every
-/// person who ever signs in. Rather than widening that allowlist for every
-/// secret in the deployment, the decision about which of *these* fields are
-/// public is made here, where what each one is for is known.
-fn admin_view(srv: &crate::state::data::Data, provider: Provider) -> serde_json::Value {
-    let stored = provider_config(srv, provider);
-    let cfg = stored.clone().unwrap_or_default();
-    let problem = match &stored {
-        None => String::new(),
-        Some(c) => oidc::validate(provider, c).err().unwrap_or_default(),
-    };
-    // Never the client secret and never the key — only whether there is one,
-    // which is what a form needs to say "leave blank to keep".
-    let has_secret = match provider {
-        Provider::Google => !cfg.client_secret.trim().is_empty(),
-        Provider::Apple => !cfg.private_key.trim().is_empty(),
-    };
-    serde_json::json!({
-        "id": provider.id(),
-        "name": provider.display_name(),
-        "configured": stored.is_some() && problem.is_empty(),
-        "problem": problem,
-        "client_id": cfg.client_id,
-        "team_id": cfg.team_id,
-        "key_id": cfg.key_id,
-        "redirect_uri": stored_redirect_uri(srv, provider),
-        "effective_redirect_uri": redirect_uri(srv, provider),
-        "has_secret": has_secret,
-    })
-}
-
-/// The redirect URI an operator set, as opposed to the one in use.
-fn stored_redirect_uri(srv: &crate::state::data::Data, provider: Provider) -> String {
-    srv.secrets
-        .lock()
-        .as_ref()
-        .and_then(|s| s.get_by_name(provider.secret_name()))
-        .map(|i| i.safe_str("redirect_uri", ""))
-        .unwrap_or_default()
-}
-
-/// What is configured, for the screen that configures it.
-pub async fn auth_config(user: Identity, data: web::Data<State>) -> HttpResponse {
-    if let Err(r) = ensure_admin(&data, &user).await {
-        return r;
-    }
-    let srv: &crate::state::data::Data = &data.server;
-    HttpResponse::Ok().json(serde_json::json!({
-        "providers": [
-            admin_view(srv, Provider::Google),
-            admin_view(srv, Provider::Apple),
-        ],
-    }))
-}
-
-/// One provider's settings, as a form submits them.
-///
-/// Every field is optional and absent means "leave alone", so a form can send
-/// only what changed. For the two that can never be read back — the client
-/// secret and the private key — an empty string means the same thing, because
-/// an empty box on a screen that cannot show them means "unchanged", not
-/// "delete". Removing a provider is `/auth/config/forget`, which says so.
-#[derive(Debug, Deserialize)]
-struct ConfigUpdate {
-    provider: String,
-    #[serde(default)]
-    client_id: Option<String>,
-    #[serde(default)]
-    client_secret: Option<String>,
-    #[serde(default)]
-    team_id: Option<String>,
-    #[serde(default)]
-    key_id: Option<String>,
-    #[serde(default)]
-    private_key: Option<String>,
-    #[serde(default)]
-    redirect_uri: Option<String>,
-}
-
-/// Fold a submitted form onto what is already stored.
-///
-/// Separated from the writing so the "empty means unchanged" rule — the one
-/// that decides whether a saved form can wipe a secret it was never shown —
-/// can be stated as a test.
-fn apply_update(current: &ProviderConfig, update: &ConfigUpdate) -> ProviderConfig {
-    let plain = |field: &Option<String>, existing: &str| -> String {
-        field
-            .as_ref()
-            .map(|v| v.trim().to_string())
-            .unwrap_or_else(|| existing.to_string())
-    };
-    let secret = |field: &Option<String>, existing: &str| -> String {
-        match field.as_ref().map(|v| v.trim()) {
-            Some(v) if !v.is_empty() => v.to_string(),
-            _ => existing.to_string(),
-        }
-    };
-    ProviderConfig {
-        client_id: plain(&update.client_id, &current.client_id),
-        client_secret: secret(&update.client_secret, &current.client_secret),
-        team_id: plain(&update.team_id, &current.team_id),
-        key_id: plain(&update.key_id, &current.key_id),
-        private_key: secret(&update.private_key, &current.private_key),
-    }
-}
-
-fn config_err(msg: impl Into<String>) -> HttpResponse {
-    HttpResponse::Ok().json(isabelle_dm::data_model::process_result::ProcessResult {
-        succeeded: false,
-        error: msg.into(),
-        data: HashMap::new(),
-    })
-}
-
-fn config_ok() -> HttpResponse {
-    HttpResponse::Ok().json(isabelle_dm::data_model::process_result::ProcessResult {
-        succeeded: true,
-        error: String::new(),
-        data: HashMap::new(),
-    })
-}
-
-/// Configure one provider.
-pub async fn auth_config_save(
-    user: Identity,
-    data: web::Data<State>,
-    mut payload: web::Payload,
-) -> HttpResponse {
-    if let Err(r) = ensure_admin(&data, &user).await {
-        return r;
-    }
-    let limits = Limits::from_data(&data.server);
-    let update: ConfigUpdate = match read_json_body(&mut payload, limits).await {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not read the sign-in configuration: {}", e);
-            return HttpResponse::build(e.status()).finish();
-        }
-    };
-    let provider = match Provider::from_id(update.provider.trim()) {
-        Some(p) => p,
-        None => return config_err("There is no such provider."),
-    };
-    let srv: &crate::state::data::Data = &data.server;
-
-    let merged = apply_update(&provider_config(srv, provider).unwrap_or_default(), &update);
-    // Checked before it is stored, not when somebody first tries to sign in:
-    // a private key that cannot be read is a setting that is wrong now.
-    if let Err(e) = oidc::validate(provider, &merged) {
-        return config_err(format!(
-            "{} cannot be used yet: {}",
-            provider.display_name(),
-            e
-        ));
-    }
-    let uri = update
-        .redirect_uri
-        .clone()
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|| stored_redirect_uri(srv, provider));
-    if !uri.is_empty() && !oidc::redirect_uri_is_usable(&uri) {
-        return config_err(
-            "The redirect URI has to be a full address, starting with http:// or https://.",
-        );
-    }
-
-    let mut secrets = srv.secrets.lock();
-    let store = match secrets.as_mut() {
-        Some(s) => s,
-        None => return config_err("The secret store is not available."),
-    };
-    let mut itm = Item::new();
-    itm.id = store
-        .get_by_name(provider.secret_name())
-        .map(|i| i.id)
-        .unwrap_or(u64::MAX);
-    itm.set_str("name", provider.secret_name());
-    itm.set_str("client_id", merged.client_id.trim());
-    itm.set_str("client_secret", merged.client_secret.trim());
-    itm.set_str("team_id", merged.team_id.trim());
-    itm.set_str("key_id", merged.key_id.trim());
-    itm.set_str("private_key", merged.private_key.trim());
-    itm.set_str("redirect_uri", &uri);
-    match store.set(&itm, true) {
-        Ok(_) => {
-            info!("Sign-in with {} was configured", provider.display_name());
-            config_ok()
-        }
-        Err(e) => config_err(format!("The configuration could not be stored: {}", e)),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ForgetRequest {
-    provider: String,
-}
-
-/// Remove a provider's configuration, which is also how it is switched off.
-pub async fn auth_config_forget(
-    user: Identity,
-    data: web::Data<State>,
-    mut payload: web::Payload,
-) -> HttpResponse {
-    if let Err(r) = ensure_admin(&data, &user).await {
-        return r;
-    }
-    let limits = Limits::from_data(&data.server);
-    let req: ForgetRequest = match read_json_body(&mut payload, limits).await {
-        Ok(v) => v,
-        Err(e) => return HttpResponse::build(e.status()).finish(),
-    };
-    let provider = match Provider::from_id(req.provider.trim()) {
-        Some(p) => p,
-        None => return config_err("There is no such provider."),
-    };
-    let srv: &crate::state::data::Data = &data.server;
-    let mut secrets = srv.secrets.lock();
-    let store = match secrets.as_mut() {
-        Some(s) => s,
-        None => return config_err("The secret store is not available."),
-    };
-    let id = match store.get_by_name(provider.secret_name()) {
-        Some(i) => i.id,
-        // Already absent is the state that was asked for.
-        None => return config_ok(),
-    };
-    match store.del(id) {
-        Ok(_) => {
-            info!("Sign-in with {} was removed", provider.display_name());
-            config_ok()
-        }
-        Err(e) => config_err(format!("The configuration could not be removed: {}", e)),
-    }
 }
 
 /// Which providers this deployment can sign in with.
@@ -801,58 +480,33 @@ async fn finish(
         .safe_bool("allow_self_registration", true);
     let resolution = resolve(existing.as_ref(), &identity, provider, allow_registration);
 
-    let record = match resolution {
-        Resolution::Refuse(r) => {
-            info!(
-                "Refusing a {} sign-in for {}: {}",
-                provider.display_name(),
-                identity.email,
-                r.slug()
-            );
-            return refuse(srv, &flow.next, r);
-        }
-        Resolution::SignIn(id) => {
-            let mut itm = Item::new();
-            itm.id = id;
-            itm.set_str(&subject_key(provider), &identity.subject);
-            itm.set_bool("logged_once", true);
-            srv.rw.set_item("user", &itm, true).await;
-            info!(
-                "Signed in {} with {}",
-                identity.email,
-                provider.display_name()
-            );
-            existing
-        }
-        Resolution::Create => {
-            if !login_is_acceptable(&identity.email) {
-                return refuse(srv, &flow.next, Refusal::Failed);
-            }
-            let mut itm = Item::new();
-            itm.set_str("login", &identity.email);
-            itm.set_str("email", &identity.email);
-            itm.set_str(
-                "name",
-                if identity.name.trim().is_empty() {
-                    &identity.email
-                } else {
-                    identity.name.trim()
-                },
-            );
-            itm.set_str(&subject_key(provider), &identity.subject);
-            itm.set_bool("self_registered", true);
-            itm.set_bool("role_is_active", true);
-            itm.set_bool("logged_once", true);
-            let id = srv.rw.set_item("user", &itm, false).await;
-            info!(
-                "Registered {} through {} as id {}",
-                identity.email,
-                provider.display_name(),
-                id
-            );
-            srv.rw.get_item("user", id).await
-        }
-    };
+    if let Resolution::Refuse(r) = resolution {
+        info!(
+            "Refusing a {} sign-in for {}: {}",
+            provider.display_name(),
+            identity.email,
+            r.slug()
+        );
+        return refuse(srv, &flow.next, r);
+    }
+    if resolution == Resolution::Create && !login_is_acceptable(&identity.email) {
+        return refuse(srv, &flow.next, Refusal::Failed);
+    }
+    let record = crate::server::signin::record_for(
+        srv,
+        &resolution,
+        existing,
+        &identity.email,
+        &identity.name,
+        &identity.subject,
+        &subject_key(provider),
+    )
+    .await;
+    info!(
+        "Signed in {} with {}",
+        identity.email,
+        provider.display_name()
+    );
 
     // The session is stamped with the record as it stands after the write, so
     // a generation bumped by that write does not immediately invalidate the
@@ -1096,92 +750,6 @@ mod tests {
             ),
             Resolution::SignIn(7)
         );
-    }
-
-    /// The rule that decides whether saving a form can wipe a secret the
-    /// form was never allowed to show.
-    #[test]
-    fn a_blank_secret_box_means_unchanged_rather_than_delete() {
-        let current = ProviderConfig {
-            client_id: "old-id".into(),
-            client_secret: "kept".into(),
-            ..Default::default()
-        };
-        let update = ConfigUpdate {
-            provider: "google".into(),
-            client_id: Some("new-id".into()),
-            client_secret: Some(String::new()),
-            team_id: None,
-            key_id: None,
-            private_key: None,
-            redirect_uri: None,
-        };
-        let merged = apply_update(&current, &update);
-        assert_eq!(merged.client_id, "new-id");
-        assert_eq!(merged.client_secret, "kept");
-    }
-
-    #[test]
-    fn a_secret_that_was_typed_replaces_the_one_stored() {
-        let current = ProviderConfig {
-            client_secret: "old".into(),
-            ..Default::default()
-        };
-        let update = ConfigUpdate {
-            provider: "google".into(),
-            client_id: None,
-            client_secret: Some("  new  ".into()),
-            team_id: None,
-            key_id: None,
-            private_key: None,
-            redirect_uri: None,
-        };
-        // Trimmed on the way in: a value pasted with a newline would
-        // otherwise be a secret that is subtly not the one issued.
-        assert_eq!(apply_update(&current, &update).client_secret, "new");
-    }
-
-    /// A field the form did not send is a field the form was not editing.
-    #[test]
-    fn what_a_form_leaves_out_it_leaves_alone() {
-        let current = ProviderConfig {
-            client_id: "id".into(),
-            client_secret: "shh".into(),
-            team_id: "T".into(),
-            key_id: "K".into(),
-            private_key: "PEM".into(),
-        };
-        let update = ConfigUpdate {
-            provider: "apple".into(),
-            client_id: None,
-            client_secret: None,
-            team_id: None,
-            key_id: None,
-            private_key: None,
-            redirect_uri: None,
-        };
-        assert_eq!(apply_update(&current, &update), current);
-    }
-
-    /// A non-secret field, on the other hand, can be cleared — it is on the
-    /// screen, so an empty box is a decision.
-    #[test]
-    fn clearing_a_visible_field_clears_it() {
-        let current = ProviderConfig {
-            client_id: "id".into(),
-            team_id: "T".into(),
-            ..Default::default()
-        };
-        let update = ConfigUpdate {
-            provider: "apple".into(),
-            client_id: None,
-            client_secret: None,
-            team_id: Some(String::new()),
-            key_id: None,
-            private_key: None,
-            redirect_uri: None,
-        };
-        assert_eq!(apply_update(&current, &update).team_id, "");
     }
 
     fn flow(started_at: u64) -> PendingFlow {

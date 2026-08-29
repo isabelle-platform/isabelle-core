@@ -14,6 +14,7 @@ Isabelle is a Rust-based framework for building safe and performant servers for 
 - Login/logout functionality.
 - One-time password support.
 - Signing in with Google and Apple.
+- Signing in against an LDAP directory.
 - Self-describing HTTP API: an OpenAPI 3.1 document generated from the running
   deployment, plugin routes included.
 
@@ -160,14 +161,51 @@ all, so Apple sign-in needs TLS even in development.
   `denied`, `unverified`, `registration_closed`, `inactive`, `mismatched` or
   `failed`. The detail behind a refusal is logged rather than put in a URL.
 
+### Signing in against a directory
+
+A directory is not a provider: there is no redirect and no button. People type
+their username and password into the ordinary form, and the password is
+checked by binding to the directory with it. So it hangs off `/login`, and it
+is tried only when the local check has not already let them in — which means a
+deployment that has always worked keeps working whatever state the directory
+is in, and an administrator with a password here can still get in when the
+directory is the thing that is broken.
+
+It is configured through the same `/auth/config` with `provider: "ldap"`, and
+stored as one secret-store entry named `ldap`:
+
+| key | what it is |
+| --- | --- |
+| `url` | `ldaps://directory.example.com`, or `ldap://` |
+| `base_dn` | where to search |
+| `user_filter` | how to search, `%u` standing for what was typed — `(uid=%u)`, `(sAMAccountName=%u)` |
+| `user_dn_template` | the other shape: build the DN and bind straight to it, `uid=%u,ou=people,dc=example,dc=com` |
+| `bind_dn` | the service account that does the searching; blank searches anonymously |
+| `bind_password` | its password |
+| `email_attribute` | default `mail` |
+| `name_attribute` | default `cn` |
+| `allow_plaintext` | required before `ldap://` will be accepted |
+
+Fill in either a base DN with a filter, or a DN template. An entry with no
+address cannot be signed in: an account here *is* an email address, and there
+would be nothing to make one out of.
+
+Three things are refused on purpose. A blank password never reaches the
+directory, because a bind with a DN and no password is an *anonymous* bind
+that succeeds and proves nothing. Values interpolated into a DN or a filter
+are escaped, so a username of `*` is a username and not every entry in the
+tree. And `ldap://` has to be asked for in as many words, because every
+password typed crosses that connection in clear.
+
 ### What a provider is trusted for
 
 The identity, and nothing else — who the account is and what address it has.
 Roles and activity belong to the record here, so no provider can make anyone
 an administrator or revive a disabled account.
 
-An address the provider will not vouch for is not an identity, and is
-refused. A verified one signs into the account that already holds it; if
+The same policy governs a directory sign-in, with the directory as the thing
+that vouched. An address the source will not vouch for is not an identity, and
+is refused. A verified one signs into the account that already holds it; if
 there is none, one is created when `allow_self_registration` permits it. The
 provider's own identifier for the account is remembered on first sign-in, and
 a later sign-in presenting a different one for the same address is refused —

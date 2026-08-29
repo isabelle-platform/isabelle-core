@@ -24,5 +24,6 @@
 pub mod bson_wrapper;
 pub mod crypto;
 pub mod fs;
+pub mod ldap;
 pub mod multipart;
 pub mod oidc;
