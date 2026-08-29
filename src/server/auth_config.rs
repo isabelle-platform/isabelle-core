@@ -558,4 +558,227 @@ mod tests {
         );
         assert_eq!(merged.bind_password, "new");
     }
+
+    fn oidc_update(over: fn(&mut ConfigUpdate)) -> ConfigUpdate {
+        let mut u = ConfigUpdate {
+            provider: "google".into(),
+            ..Default::default()
+        };
+        over(&mut u);
+        u
+    }
+
+    /// Whitespace is not a value. A field holding only spaces means the same
+    /// as an empty one, or a stray keystroke would erase a client secret.
+    #[test]
+    fn whitespace_in_a_secret_field_is_not_a_new_secret() {
+        let current = ProviderConfig {
+            client_secret: "kept".into(),
+            ..Default::default()
+        };
+        for typed in ["", " ", "\t", "\n  "] {
+            let merged = apply_update(
+                &current,
+                &ConfigUpdate {
+                    provider: "google".into(),
+                    client_secret: Some(typed.to_string()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(merged.client_secret, "kept", "{typed:?}");
+        }
+    }
+
+    /// The Apple key is the other unshowable value, and follows the same rule
+    /// — a whole `.p8` is easy to clear by accident.
+    #[test]
+    fn a_blank_apple_key_leaves_the_stored_one_alone() {
+        let current = ProviderConfig {
+            private_key: "-----BEGIN PRIVATE KEY-----".into(),
+            ..Default::default()
+        };
+        let merged = apply_update(
+            &current,
+            &ConfigUpdate {
+                provider: "apple".into(),
+                private_key: Some(String::new()),
+                team_id: Some("NEWTEAM".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.private_key, "-----BEGIN PRIVATE KEY-----");
+        assert_eq!(merged.team_id, "NEWTEAM");
+    }
+
+    /// Values arrive from a form, and a form gives you what was pasted.
+    #[test]
+    fn every_field_is_trimmed_on_the_way_in() {
+        let merged = apply_update(
+            &ProviderConfig::default(),
+            &ConfigUpdate {
+                provider: "apple".into(),
+                client_id: Some("  io.example.web \n".into()),
+                team_id: Some(" TEAM ".into()),
+                key_id: Some("\tKEY\t".into()),
+                private_key: Some("  PEM  ".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.client_id, "io.example.web");
+        assert_eq!(merged.team_id, "TEAM");
+        assert_eq!(merged.key_id, "KEY");
+        assert_eq!(merged.private_key, "PEM");
+    }
+
+    /// A form that changes one field must not disturb the others.
+    #[test]
+    fn changing_one_field_leaves_the_rest_where_they_were() {
+        let current = ProviderConfig {
+            client_id: "id".into(),
+            client_secret: "shh".into(),
+            team_id: "T".into(),
+            key_id: "K".into(),
+            private_key: "PEM".into(),
+        };
+        let merged = apply_update(&current, &oidc_update(|u| u.key_id = Some("K2".into())));
+        assert_eq!(merged.key_id, "K2");
+        assert_eq!(
+            ProviderConfig {
+                key_id: current.key_id.clone(),
+                ..merged
+            },
+            current
+        );
+    }
+
+    /// Merging is not validating: an incomplete result is a legitimate thing
+    /// for the fold to produce, and it is the check afterwards that refuses
+    /// to store it.
+    #[test]
+    fn the_fold_does_not_decide_whether_the_result_is_usable() {
+        let merged = apply_update(
+            &ProviderConfig::default(),
+            &oidc_update(|u| u.client_id = Some("only-an-id".into())),
+        );
+        assert_eq!(merged.client_id, "only-an-id");
+        assert!(oidc::validate(Provider::Google, &merged).is_err());
+    }
+
+    // ---- the directory ---------------------------------------------------
+
+    /// The directory's own unshowable value.
+    #[test]
+    fn whitespace_in_the_service_password_is_not_a_new_password() {
+        let current = LdapConfig {
+            bind_password: "kept".into(),
+            ..Default::default()
+        };
+        for typed in ["", "   ", "\t"] {
+            let merged = apply_ldap_update(
+                &current,
+                &ldap_update_with(|u| u.bind_password = Some(typed.to_string())),
+            );
+            assert_eq!(merged.bind_password, "kept", "{typed:?}");
+        }
+    }
+
+    fn ldap_update_with(over: impl FnOnce(&mut ConfigUpdate)) -> ConfigUpdate {
+        let mut u = ConfigUpdate {
+            provider: "ldap".into(),
+            ..Default::default()
+        };
+        over(&mut u);
+        u
+    }
+
+    /// Everything visible on the directory form can be cleared, because an
+    /// empty box there is a decision somebody could see themselves making.
+    #[test]
+    fn a_visible_directory_field_can_be_emptied() {
+        let current = LdapConfig {
+            url: "ldaps://old".into(),
+            base_dn: "dc=old".into(),
+            user_filter: "(uid=%u)".into(),
+            user_dn_template: "uid=%u,dc=old".into(),
+            email_attribute: "mail".into(),
+            name_attribute: "cn".into(),
+            bind_dn: "cn=svc".into(),
+            ..Default::default()
+        };
+        let merged = apply_ldap_update(
+            &current,
+            &ldap_update_with(|u| {
+                u.base_dn = Some(String::new());
+                u.user_filter = Some(String::new());
+                u.bind_dn = Some(String::new());
+            }),
+        );
+        assert_eq!(merged.base_dn, "");
+        assert_eq!(merged.user_filter, "");
+        assert_eq!(merged.bind_dn, "");
+        // …and switching to the template shape is exactly what that means.
+        assert!(!merged.searches());
+        assert_eq!(merged.user_dn_template, "uid=%u,dc=old");
+    }
+
+    #[test]
+    fn directory_fields_are_trimmed_too() {
+        let merged = apply_ldap_update(
+            &LdapConfig::default(),
+            &ldap_update_with(|u| {
+                u.url = Some("  ldaps://d.example.com \n".into());
+                u.base_dn = Some(" dc=example,dc=com ".into());
+            }),
+        );
+        assert_eq!(merged.url, "ldaps://d.example.com");
+        assert_eq!(merged.base_dn, "dc=example,dc=com");
+    }
+
+    /// Turning the plaintext permission back off has to be possible, or it
+    /// would be a one-way door.
+    #[test]
+    fn the_plaintext_permission_can_be_withdrawn() {
+        let current = LdapConfig {
+            url: "ldap://d.example.com".into(),
+            user_dn_template: "uid=%u,dc=example,dc=com".into(),
+            allow_plaintext: true,
+            ..Default::default()
+        };
+        assert_eq!(crate::util::ldap::validate(&current), Ok(()));
+
+        let merged = apply_ldap_update(
+            &current,
+            &ldap_update_with(|u| u.allow_plaintext = Some(false)),
+        );
+        assert!(!merged.allow_plaintext);
+        // And the configuration stops being acceptable, which is the point.
+        assert!(crate::util::ldap::validate(&merged).is_err());
+    }
+
+    /// The two folds are independent: a directory form carries no provider
+    /// fields, and must not blank the provider's.
+    #[test]
+    fn the_two_forms_do_not_reach_into_each_other() {
+        let provider = ProviderConfig {
+            client_id: "id".into(),
+            client_secret: "shh".into(),
+            ..Default::default()
+        };
+        let untouched = apply_update(
+            &provider,
+            &ldap_update_with(|u| u.url = Some("ldaps://x".into())),
+        );
+        assert_eq!(untouched, provider);
+
+        let directory = LdapConfig {
+            url: "ldaps://d".into(),
+            bind_password: "svc".into(),
+            ..Default::default()
+        };
+        let also_untouched = apply_ldap_update(
+            &directory,
+            &oidc_update(|u| u.client_id = Some("id2".into())),
+        );
+        assert_eq!(also_untouched, directory);
+    }
 }
