@@ -486,4 +486,203 @@ mod tests {
         assert_eq!(named.email_attribute_or_default(), "userPrincipalName");
         assert_eq!(named.name_attribute_or_default(), "displayName");
     }
+
+    /// The characters RFC 4514 names, one at a time, so a regression shows
+    /// which one was dropped rather than that "escaping broke".
+    #[test]
+    fn every_character_a_dn_reserves_is_escaped() {
+        for c in [',', '+', '"', '\\', '<', '>', ';', '='] {
+            let escaped = escape_dn_value(&format!("a{}b", c));
+            assert_eq!(escaped, format!("a\\{}b", c), "{c:?}");
+        }
+    }
+
+    /// …and the ones RFC 4515 names.
+    #[test]
+    fn every_character_a_filter_reserves_is_escaped() {
+        for (c, as_hex) in [('\\', "\\5c"), ('*', "\\2a"), ('(', "\\28"), (')', "\\29")] {
+            assert_eq!(
+                escape_filter_value(&format!("a{}b", c)),
+                format!("a{}b", as_hex),
+                "{c:?}"
+            );
+        }
+    }
+
+    /// Ordinary text is left alone, or every DN in the directory would be
+    /// unreachable.
+    #[test]
+    fn ordinary_text_passes_through_untouched() {
+        for value in ["alice", "alice.smith", "alice-smith_1", "ALICE", "ali ce"] {
+            assert_eq!(escape_dn_value(value), value, "{value}");
+            assert_eq!(escape_filter_value(value), value, "{value}");
+        }
+    }
+
+    /// A leading `#` means a hex-encoded DN value, and a leading or trailing
+    /// space is dropped by a parser that does not see it escaped.
+    #[test]
+    fn the_positional_rules_of_a_dn_are_honoured() {
+        assert_eq!(escape_dn_value("#a"), "\\#a");
+        // Not leading, so not special.
+        assert_eq!(escape_dn_value("a#b"), "a#b");
+        assert_eq!(escape_dn_value(" a"), "\\ a");
+        assert_eq!(escape_dn_value("a "), "a\\ ");
+        assert_eq!(escape_dn_value(" "), "\\ ");
+    }
+
+    /// A NUL is a string terminator to whatever C library is on the far end.
+    #[test]
+    fn a_nul_cannot_be_smuggled_through_either() {
+        assert_eq!(escape_dn_value("a\0b"), "a\\00b");
+        assert_eq!(escape_filter_value("a\0b"), "a\\00b");
+    }
+
+    /// Every placeholder is replaced, not just the first — a filter that
+    /// matches either of two attributes is the ordinary case.
+    #[test]
+    fn a_filter_may_name_the_username_more_than_once() {
+        assert_eq!(
+            search_filter("(|(uid=%u)(mail=%u))", "alice"),
+            "(|(uid=alice)(mail=alice))"
+        );
+        assert_eq!(
+            search_filter("(|(uid=%u)(mail=%u))", "a)b"),
+            "(|(uid=a\\29b)(mail=a\\29b))"
+        );
+    }
+
+    /// The whole reason the filter is escaped: this must not become a filter
+    /// that matches somebody else, or everybody.
+    #[test]
+    fn the_classic_filter_injections_are_inert() {
+        for attempt in ["*", "*)(uid=*", "admin)(|(uid=*", "\\2a", "a*b"] {
+            let filter = search_filter("(uid=%u)", attempt);
+            // Exactly one attribute assertion, and the parentheses are the
+            // two the template put there.
+            assert_eq!(filter.matches('(').count(), 1, "{filter}");
+            assert_eq!(filter.matches(')').count(), 1, "{filter}");
+            assert!(filter.starts_with("(uid="), "{filter}");
+            assert!(filter.ends_with(')'), "{filter}");
+        }
+    }
+
+    /// And the DN equivalent: the template's own structure has to survive.
+    #[test]
+    fn the_classic_dn_injections_are_inert() {
+        // Counted the way a parser reads it: a backslash consumes whatever
+        // follows, so an escaped backslash does not go on to hide the comma
+        // after it.
+        fn separators(dn: &str) -> usize {
+            let mut n = 0;
+            let mut chars = dn.chars();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => {
+                        chars.next();
+                    }
+                    ',' => n += 1,
+                    _ => {}
+                }
+            }
+            n
+        }
+
+        let template = "uid=%u,ou=people,dc=example,dc=com";
+        for attempt in ["admin,ou=admins", "a=b,c=d", "x+y", "admin\\", "a\\,b"] {
+            let dn = user_dn(template, attempt);
+            // The template contributes exactly three separators; the username
+            // contributes none, whatever it holds.
+            assert_eq!(separators(&dn), 3, "{dn}");
+            assert!(dn.ends_with(",ou=people,dc=example,dc=com"), "{dn}");
+        }
+    }
+
+    /// A username that is only whitespace is not a username, and must not
+    /// reach the directory as a bind DN of its own.
+    #[tokio::test]
+    async fn a_blank_username_is_refused_without_asking_the_directory() {
+        let cfg = LdapConfig {
+            url: "ldaps://192.0.2.1".into(),
+            user_dn_template: "uid=%u,dc=example,dc=com".into(),
+            ..Default::default()
+        };
+        for username in ["", " ", "\t"] {
+            assert_eq!(
+                authenticate(&cfg, username, "hunter2").await,
+                Err(LdapError::Rejected),
+                "{username:?}"
+            );
+        }
+    }
+
+    /// A configuration that could never work must not be reached over the
+    /// network first: the answer is known before anything is dialled.
+    #[tokio::test]
+    async fn an_unusable_configuration_fails_without_a_connection() {
+        // 192.0.2.0/24 is reserved for documentation and routes nowhere, so
+        // a connection attempt would hang rather than return promptly.
+        let cfg = LdapConfig {
+            url: "ldaps://192.0.2.1".into(),
+            ..Default::default()
+        };
+        match authenticate(&cfg, "alice", "hunter2").await {
+            Err(LdapError::Unavailable(e)) => assert!(e.contains("base DN"), "{e}"),
+            other => panic!("expected a configuration complaint, got {other:?}"),
+        }
+    }
+
+    /// `ldaps://` needs no permission; it is the plain one that does.
+    #[test]
+    fn a_secure_url_needs_no_extra_blessing() {
+        let cfg = LdapConfig {
+            url: "ldaps://directory.example.com:636".into(),
+            user_dn_template: "uid=%u,dc=example,dc=com".into(),
+            allow_plaintext: false,
+            ..Default::default()
+        };
+        assert_eq!(validate(&cfg), Ok(()));
+    }
+
+    #[test]
+    fn a_url_of_some_other_scheme_is_refused() {
+        for url in ["https://d.example.com", "d.example.com", "ldap:/x", "://d"] {
+            let cfg = LdapConfig {
+                url: url.into(),
+                user_dn_template: "uid=%u,dc=example,dc=com".into(),
+                allow_plaintext: true,
+                ..Default::default()
+            };
+            assert!(validate(&cfg).is_err(), "{url}");
+        }
+    }
+
+    /// Having both shapes filled in is not an error: the search is the more
+    /// capable one and wins, which is worth pinning so it does not quietly
+    /// become the other way round.
+    #[test]
+    fn a_configuration_with_both_shapes_searches() {
+        let cfg = LdapConfig {
+            url: "ldaps://d.example.com".into(),
+            base_dn: "dc=example,dc=com".into(),
+            user_filter: "(uid=%u)".into(),
+            user_dn_template: "uid=%u,dc=example,dc=com".into(),
+            ..Default::default()
+        };
+        assert!(cfg.searches());
+        assert_eq!(validate(&cfg), Ok(()));
+    }
+
+    /// A base DN with no filter is half a configuration, and the template is
+    /// what it falls back to.
+    #[test]
+    fn a_base_dn_without_a_filter_is_not_a_search() {
+        let cfg = LdapConfig {
+            url: "ldaps://d.example.com".into(),
+            base_dn: "dc=example,dc=com".into(),
+            ..Default::default()
+        };
+        assert!(!cfg.searches());
+        assert!(validate(&cfg).unwrap_err().contains("base DN"));
+    }
 }
