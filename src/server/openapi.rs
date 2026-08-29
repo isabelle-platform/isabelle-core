@@ -373,6 +373,193 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
     );
 
     paths.insert(
+        "/auth/providers".to_string(),
+        json!({ "get": {
+            "tags": ["auth"],
+            "summary": "Which identity providers are configured",
+            "description":
+                "Read by a login screen, so it answers without a session. A provider is \
+                 listed when its entry exists in the secret store and carries everything \
+                 that provider needs; nothing about the credentials themselves is \
+                 returned.",
+            "security": [ {} ],
+            "responses": {
+                "200": json_response("The configured providers.", json!({
+                    "type": "object",
+                    "properties": { "providers": { "type": "array", "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "example": "google" },
+                            "name": { "type": "string", "example": "Google" },
+                        },
+                    }}},
+                })),
+            },
+        }}),
+    );
+
+    paths.insert(
+        "/auth/config".to_string(),
+        json!({
+            "get": {
+                "tags": ["auth"],
+                "summary": "How the identity providers are configured",
+                "description":
+                    "Administrators only. Returns each provider's public settings — the \
+                     client id, the redirect URI in use and the one that would be used by \
+                     default — plus `has_secret`, which says whether a client secret or \
+                     signing key is stored. The secret itself is never returned, by this \
+                     or any other endpoint. `problem` carries whatever stops the provider \
+                     being usable, so a half-finished configuration says what is missing.",
+                "responses": {
+                    "200": json_response("The configuration.", json!({ "type": "object" })),
+                    "401": empty_response("No session."),
+                    "403": empty_response("Not an administrator."),
+                },
+            },
+            "post": {
+                "tags": ["auth"],
+                "summary": "Configure a provider",
+                "description":
+                    "Administrators only. Every field is optional and an absent one is \
+                     left alone. `client_secret` and `private_key` cannot be read back, so \
+                     an empty string means unchanged rather than deleted — use \
+                     `/auth/config/forget` to remove a provider. The result is checked \
+                     before it is stored, so an unreadable Apple key is refused here \
+                     rather than at a token endpoint weeks later.",
+                "requestBody": {
+                    "required": true,
+                    "content": { "application/json": { "schema": {
+                        "type": "object",
+                        "required": ["provider"],
+                        "properties": {
+                            "provider": { "type": "string", "enum": ["google", "apple"] },
+                            "client_id": { "type": "string" },
+                            "client_secret": { "type": "string", "description": "Google. Blank leaves it unchanged." },
+                            "team_id": { "type": "string", "description": "Apple." },
+                            "key_id": { "type": "string", "description": "Apple." },
+                            "private_key": { "type": "string", "description": "Apple, the `.p8` in full. Blank leaves it unchanged." },
+                            "redirect_uri": { "type": "string", "description": "Blank falls back to the deployment default." },
+                        },
+                    }}},
+                },
+                "responses": {
+                    "200": process_result_200.clone(),
+                    "400": empty_response("Body malformed, or not read within the deadline."),
+                    "401": empty_response("No session."),
+                    "403": empty_response("Not an administrator."),
+                },
+            },
+        }),
+    );
+
+    paths.insert(
+        "/auth/config/forget".to_string(),
+        json!({ "post": {
+            "tags": ["auth"],
+            "summary": "Remove a provider's configuration",
+            "description":
+                "Administrators only. This is also how a provider is switched off: one \
+                 exists for a deployment exactly when its configuration does. Forgetting \
+                 one that was never configured succeeds.",
+            "requestBody": {
+                "required": true,
+                "content": { "application/json": { "schema": {
+                    "type": "object",
+                    "required": ["provider"],
+                    "properties": { "provider": { "type": "string", "enum": ["google", "apple"] } },
+                }}},
+            },
+            "responses": {
+                "200": process_result_200.clone(),
+                "401": empty_response("No session."),
+                "403": empty_response("Not an administrator."),
+            },
+        }}),
+    );
+
+    paths.insert(
+        "/auth/{provider}/start".to_string(),
+        json!({ "get": {
+            "tags": ["auth"],
+            "summary": "Begin signing in with an identity provider",
+            "description":
+                "A browser navigation, not a fetch: it answers 302 to the provider's \
+                 consent screen and sets a short-lived cookie that ties the callback to \
+                 this browser. `next` is where the browser is sent afterwards and is \
+                 reduced to a path on this site.",
+            "security": [ {} ],
+            "parameters": [
+                { "name": "provider", "in": "path", "required": true,
+                  "schema": { "type": "string", "enum": ["google", "apple"] } },
+                { "name": "next", "in": "query", "required": false,
+                  "schema": { "type": "string", "example": "/" } },
+            ],
+            "responses": {
+                "302": empty_response("To the provider, or back to `next` with `auth_error` when the provider is not configured."),
+                "404": empty_response("No such provider."),
+            },
+        }}),
+    );
+
+    paths.insert(
+        "/auth/{provider}/callback".to_string(),
+        json!({
+            "get": {
+                "tags": ["auth"],
+                "summary": "Finish signing in (redirect callback)",
+                "description":
+                    "Where the provider returns the browser. On success a session cookie \
+                     is issued and the browser is sent to the `next` recorded at the \
+                     start; otherwise it goes to the same place with `auth_error` set to \
+                     one of `denied`, `unverified`, `registration_closed`, `inactive`, \
+                     `mismatched` or `failed`. The detail behind a refusal is logged, not \
+                     put in the URL.",
+                "security": [ {} ],
+                "parameters": [
+                    { "name": "provider", "in": "path", "required": true,
+                      "schema": { "type": "string", "enum": ["google", "apple"] } },
+                    { "name": "code", "in": "query", "required": false, "schema": { "type": "string" } },
+                    { "name": "state", "in": "query", "required": false, "schema": { "type": "string" } },
+                    { "name": "error", "in": "query", "required": false, "schema": { "type": "string" } },
+                ],
+                "responses": {
+                    "302": empty_response("Signed in, or refused with `auth_error`."),
+                    "404": empty_response("No such provider."),
+                },
+            },
+            "post": {
+                "tags": ["auth"],
+                "summary": "Finish signing in (form_post callback)",
+                "description":
+                    "The same exchange for providers that answer by POSTing the form \
+                     back. Apple requires this whenever a scope is requested, and the \
+                     address is a scope.",
+                "security": [ {} ],
+                "parameters": [
+                    { "name": "provider", "in": "path", "required": true,
+                      "schema": { "type": "string", "enum": ["google", "apple"] } },
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": { "application/x-www-form-urlencoded": { "schema": {
+                        "type": "object",
+                        "properties": {
+                            "code": { "type": "string" },
+                            "state": { "type": "string" },
+                            "error": { "type": "string" },
+                        },
+                    }}},
+                },
+                "responses": {
+                    "302": empty_response("Signed in, or refused with `auth_error`."),
+                    "404": empty_response("No such provider."),
+                },
+            },
+        }),
+    );
+
+    paths.insert(
         "/logout".to_string(),
         json!({ "post": {
             "tags": ["auth"],

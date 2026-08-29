@@ -90,6 +90,20 @@ pub struct Data {
     /// can access it without holding the outer Data lock.
     pub secrets: Mutex<Option<crate::state::secrets::SecretStore>>,
 
+    /// Sign-ins started with an identity provider and not yet come back.
+    ///
+    /// In this process rather than in the session cookie: a provider that
+    /// answers by POSTing the callback back gets no `SameSite=Lax` cookie,
+    /// and single-use server-side state is what the OAuth specification asks
+    /// for anyway. See `server::oauth`.
+    pub oauth_flows: Mutex<crate::server::oauth::PendingFlows>,
+
+    /// Whether cookies are issued without `Secure`, mirroring the same
+    /// command-line flag. The OAuth flow cookie has to make the same choice
+    /// the session cookie made, and it is set from a plain handler that does
+    /// not see the arguments.
+    pub cookie_http_insecure: Mutex<bool>,
+
     /// Actor-model plugin registry. Holds an `mpsc::Sender<PluginHookMessage>`
     /// per registered plugin actor.
     ///
@@ -135,6 +149,8 @@ impl Data {
             update_script: Mutex::new(String::new()),
             openapi_private: std::sync::atomic::AtomicBool::new(false),
             secrets: Mutex::new(None),
+            oauth_flows: Mutex::new(Default::default()),
+            cookie_http_insecure: Mutex::new(false),
             plugin_registry: OnceLock::new(),
             core_handle: OnceLock::new(),
             route_cache: Mutex::new(Arc::new(RouteCache::default())),

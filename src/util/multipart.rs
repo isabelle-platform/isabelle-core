@@ -152,9 +152,22 @@ pub async fn read_json_body<T: serde::de::DeserializeOwned>(
     payload: &mut actix_web::web::Payload,
     limits: Limits,
 ) -> Result<T, ReadError> {
+    let body = read_body(payload, limits).await?;
+    serde_json::from_slice(&body).map_err(|e| ReadError::Malformed(e.to_string()))
+}
+
+/// Read a whole request body under `limits`, without deciding what it is.
+///
+/// The bounded read itself is the same for every body shape; only the parse
+/// after it differs. Form-encoded bodies — a provider POSTing an OAuth
+/// callback back to us — need exactly this and no JSON.
+pub async fn read_body(
+    payload: &mut actix_web::web::Payload,
+    limits: Limits,
+) -> Result<actix_web::web::BytesMut, ReadError> {
     use futures_util::StreamExt;
 
-    let body = with_deadline(limits, async {
+    with_deadline(limits, async {
         let mut body = actix_web::web::BytesMut::new();
         while let Some(chunk) = payload.next().await {
             let chunk = match chunk {
@@ -168,9 +181,7 @@ pub async fn read_json_body<T: serde::de::DeserializeOwned>(
         }
         Ok(body)
     })
-    .await?;
-
-    serde_json::from_slice(&body).map_err(|e| ReadError::Malformed(e.to_string()))
+    .await
 }
 
 /// Convenience for the common case: one named field, as UTF-8.

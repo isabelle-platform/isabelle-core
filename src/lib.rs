@@ -65,6 +65,7 @@ use crate::notif::gcal::*;
 use crate::server::guards::{enforce_session_generation, reject_ambiguous_framing};
 use crate::server::itm::*;
 use crate::server::login::*;
+use crate::server::oauth::*;
 use crate::server::openapi::{openapi_docs, openapi_json, DOCS_PATH, OPENAPI_PATH};
 use std::collections::HashMap;
 
@@ -267,6 +268,10 @@ where
         *srv.py_path.lock() = args.py_path.to_string();
         *srv.data_path.lock() = args.data_path.to_string();
         *srv.public_url.lock() = args.pub_url.to_string();
+        // The OAuth flow cookie is set from a handler, which never sees the
+        // arguments; it has to make the same `Secure` decision the session
+        // cookie makes here.
+        *srv.cookie_http_insecure.lock() = args.cookie_http_insecure;
         srv.port
             .store(args.bind_port, std::sync::atomic::Ordering::Relaxed);
         srv.max_payload_bytes
@@ -523,6 +528,24 @@ where
             .route("/gen_otp", web::post().to(gen_otp))
             .route("/logout", web::post().to(logout))
             .route("/is_logged_in", web::get().to(is_logged_in))
+            // Signing in with an identity provider. Unauthenticated by
+            // necessity — they are what a login screen calls — and the whole
+            // exchange is browser navigations, not fetches.
+            .route("/auth/providers", web::get().to(auth_providers))
+            // Configuring them. Administrators only, and the secrets go one
+            // way: what comes back says whether there is one, never what.
+            .route("/auth/config", web::get().to(auth_config))
+            .route("/auth/config", web::post().to(auth_config_save))
+            .route("/auth/config/forget", web::post().to(auth_config_forget))
+            .route("/auth/{provider}/start", web::get().to(auth_start))
+            .route(
+                "/auth/{provider}/callback",
+                web::get().to(auth_callback_get),
+            )
+            .route(
+                "/auth/{provider}/callback",
+                web::post().to(auth_callback_post),
+            )
             .route("/setting/edit", web::post().to(setting_edit))
             .route("/setting/list", web::get().to(setting_list))
             .route("/setting/gcal_auth", web::post().to(setting_gcal_auth))
