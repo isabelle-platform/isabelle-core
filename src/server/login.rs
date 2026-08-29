@@ -803,4 +803,169 @@ mod handler_tests {
 
         assert_eq!(first, second, "throttle did not hold");
     }
+
+    // ---- /login ---------------------------------------------------------
+    //
+    // Written when the handler was restructured to let a directory have a
+    // turn after the local check. Nothing here is about directories: it is
+    // about everything that was already true staying true, which is the half
+    // a refactor drops silently.
+
+    /// An account with a real password hash on it.
+    fn account_with_password(pw: &str) -> Item {
+        let mut itm = provisioned_admin();
+        let salt = crate::util::crypto::get_new_salt();
+        itm.set_str("salt", &salt);
+        itm.set_str(
+            "password",
+            &crate::util::crypto::get_password_hash(pw, &salt),
+        );
+        itm
+    }
+
+    async fn try_login(store: StoreMemory, username: &str, password: &str) -> ProcessResult {
+        call(
+            state_with(store),
+            "/login",
+            web::post().to(login),
+            &[("username", username), ("password", password)],
+        )
+        .await
+    }
+
+    #[actix_web::test]
+    async fn the_right_password_still_gets_in() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_password("hunter2"));
+        assert!(try_login(store, "admin", "hunter2").await.succeeded);
+    }
+
+    #[actix_web::test]
+    async fn the_wrong_password_still_does_not() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_password("hunter2"));
+        let r = try_login(store, "admin", "hunter3").await;
+        assert!(!r.succeeded);
+        assert_eq!(r.error, "Invalid login/password");
+    }
+
+    /// The address is looked up by login or email, and both still work.
+    #[actix_web::test]
+    async fn an_email_is_still_a_way_to_name_yourself() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_password("hunter2"));
+        assert!(
+            try_login(store, "admin@example.org", "hunter2")
+                .await
+                .succeeded
+        );
+    }
+
+    #[actix_web::test]
+    async fn an_unknown_account_is_refused_the_same_way_a_wrong_password_is() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_password("hunter2"));
+        let r = try_login(store, "nobody", "hunter2").await;
+        assert!(!r.succeeded);
+        // The same words, so the endpoint is not an account oracle.
+        assert_eq!(r.error, "Invalid login/password");
+    }
+
+    #[actix_web::test]
+    async fn a_deactivated_account_is_still_shut_out() {
+        let store = StoreMemory::with_collections(&["user"]);
+        let mut itm = account_with_password("hunter2");
+        itm.set_bool("role_is_active", false);
+        store.seed("user", itm);
+        let r = try_login(store, "admin", "hunter2").await;
+        assert!(!r.succeeded);
+        assert_eq!(r.error, "User is inactive");
+    }
+
+    /// An account with no password — one made through a provider or a
+    /// directory — must not be reachable by submitting nothing.
+    #[actix_web::test]
+    async fn an_account_with_no_password_cannot_be_entered_with_an_empty_one() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", provisioned_admin());
+        assert!(!try_login(store.clone(), "admin", "").await.succeeded);
+        assert!(!try_login(store, "admin", "anything").await.succeeded);
+    }
+
+    fn account_with_otp(code: &str, expires_at: u64, attempts: u64) -> Item {
+        let mut itm = account_with_password("hunter2");
+        itm.set_str("otp", code);
+        itm.set_u64("otp_issued_at", now_ts());
+        itm.set_u64("otp_expires_at", expires_at);
+        itm.set_u64("otp_attempts", attempts);
+        itm
+    }
+
+    #[actix_web::test]
+    async fn a_live_one_time_code_still_works_in_place_of_the_password() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_otp("123456", now_ts() + 600, 0));
+        assert!(try_login(store, "admin", "123456").await.succeeded);
+    }
+
+    /// The whole point of a one-time code.
+    #[actix_web::test]
+    async fn a_used_code_is_burned() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_otp("123456", now_ts() + 600, 0));
+
+        assert!(try_login(store.clone(), "admin", "123456").await.succeeded);
+
+        let after = store.peek("user", 1).expect("the account is still there");
+        assert_eq!(after.safe_str("otp", ""), "");
+        assert_eq!(after.safe_u64("otp_expires_at", 1), 0);
+        assert!(after.safe_bool("logged_once", false));
+        // And it really cannot be used again.
+        assert!(!try_login(store, "admin", "123456").await.succeeded);
+    }
+
+    #[actix_web::test]
+    async fn an_expired_code_is_not_a_credential() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_otp("123456", now_ts() - 1, 0));
+        assert!(!try_login(store, "admin", "123456").await.succeeded);
+    }
+
+    #[actix_web::test]
+    async fn a_code_that_has_been_guessed_at_too_often_is_not_a_credential() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed(
+            "user",
+            account_with_otp("123456", now_ts() + 600, OTP_MAX_ATTEMPTS),
+        );
+        assert!(!try_login(store, "admin", "123456").await.succeeded);
+    }
+
+    /// What makes the attempt limit above ever be reached.
+    #[actix_web::test]
+    async fn a_wrong_guess_at_a_live_code_is_counted() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_otp("123456", now_ts() + 600, 0));
+
+        assert!(!try_login(store.clone(), "admin", "999999").await.succeeded);
+
+        let after = store.peek("user", 1).expect("the account is still there");
+        assert_eq!(after.safe_u64("otp_attempts", 0), 1);
+        // …and the code itself survives the wrong guess, so the person still
+        // typing the right one is not locked out by somebody else's mistake.
+        assert_eq!(after.safe_str("otp", ""), "123456");
+    }
+
+    /// A wrong password is not a guess at a code, and must not consume one of
+    /// the attempts of a code that is not being guessed at.
+    #[actix_web::test]
+    async fn a_wrong_password_with_no_code_outstanding_counts_nothing() {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account_with_password("hunter2"));
+
+        assert!(!try_login(store.clone(), "admin", "hunter3").await.succeeded);
+
+        let after = store.peek("user", 1).expect("the account is still there");
+        assert_eq!(after.safe_u64("otp_attempts", 0), 0);
+    }
 }
