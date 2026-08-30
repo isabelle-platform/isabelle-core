@@ -312,7 +312,7 @@ mod rest_delivery_tests {
     use isabelle_plugin_api::actor::{PluginHookMessage, PluginRegistry};
     use std::sync::Arc;
 
-    const PATH: &str = "/proteos/webhooks/stripe";
+    const PATH: &str = "/webhooks/stripe";
     const HANDLER: &str = "proteos_stripe_webhook";
     // Deliberately awkward: whitespace and a non-ASCII character, because HMAC
     // is over the exact bytes and any re-encoding on the way in breaks it.
