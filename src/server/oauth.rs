@@ -257,6 +257,37 @@ pub async fn auth_providers(data: web::Data<State>) -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "providers": out }))
 }
 
+/// What the signed-in account can be got into with.
+///
+/// Asked of the server rather than read off the record, because the record
+/// does not survive the trip: a self-read has the password hash stripped from
+/// it, so a screen that inferred "no password" from its absence would tell
+/// every account it has none. The knowledge is here, so the answer is too.
+///
+/// Booleans only. Which Google account, or which DN, is not something the
+/// browser needs to know to say that one is attached.
+pub async fn auth_methods(
+    user: Option<actix_identity::Identity>,
+    data: web::Data<State>,
+) -> HttpResponse {
+    let srv: &crate::state::data::Data = &data.server;
+    let principal = match user.as_ref().and_then(|i| i.id().ok()) {
+        Some(p) => p,
+        None => return HttpResponse::Unauthorized().finish(),
+    };
+    let usr = match get_user(srv, principal).await {
+        Some(u) => u,
+        None => return HttpResponse::Unauthorized().finish(),
+    };
+    let attached = |key: &str| !usr.safe_str(key, "").trim().is_empty();
+    HttpResponse::Ok().json(serde_json::json!({
+        "password": attached("password"),
+        "google": attached(&subject_key(Provider::Google)),
+        "apple": attached(&subject_key(Provider::Apple)),
+        "directory": attached(crate::server::signin::LDAP_SUBJECT_KEY),
+    }))
+}
+
 /// Send the browser to the provider.
 pub async fn auth_start(
     data: web::Data<State>,

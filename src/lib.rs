@@ -533,6 +533,8 @@ where
             // necessity — they are what a login screen calls — and the whole
             // exchange is browser navigations, not fetches.
             .route("/auth/providers", web::get().to(auth_providers))
+            // What the caller's own account can be signed into with.
+            .route("/auth/methods", web::get().to(auth_methods))
             // Configuring them. Administrators only, and the secrets go one
             // way: what comes back says whether there is one, never what.
             .route("/auth/config", web::get().to(auth_config))
