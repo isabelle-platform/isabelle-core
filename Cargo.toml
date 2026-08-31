@@ -24,6 +24,9 @@ actix-rt = "2.10.0"
 actix-session = { version = "0.8", features = ["cookie-session"] }
 actix-web = { version = "4", features = ["cookies", "rustls-0_23"] }
 argon2 = "0.5.2"
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
 async-trait = "0.1.74"
 bson = { version = "2.9.0", features = ["serde_with"] }
 chrono = "0.4.26"

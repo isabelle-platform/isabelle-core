@@ -62,7 +62,10 @@ use crate::handler::route::url_unprotected_post_route;
 use crate::handler::route::url_unprotected_route;
 use crate::handler::route_call::call_periodic_job_hook;
 use crate::notif::gcal::*;
-use crate::server::guards::{enforce_session_generation, reject_ambiguous_framing};
+use crate::server::api_token::{api_token_issue, api_token_list, api_token_revoke};
+use crate::server::guards::{
+    accept_api_token, enforce_session_generation, reject_ambiguous_framing,
+};
 use crate::server::itm::*;
 use crate::server::login::*;
 use crate::server::openapi::{openapi_docs, openapi_json, DOCS_PATH, OPENAPI_PATH};
@@ -502,6 +505,11 @@ where
         let mut app = App::new()
             .app_data(data.clone())
             .app_data(web::PayloadConfig::new(args.max_payload_bytes))
+            // Innermost of the guards, so it is the last word before the
+            // handler: everything outside it has already decided the request
+            // carries no session, and this is what may then decide it carries
+            // a credential instead.
+            .wrap(from_fn(accept_api_token))
             .wrap(from_fn(enforce_session_generation))
             .wrap(from_fn(reject_ambiguous_framing))
             .wrap(cors_middleware(
@@ -535,6 +543,11 @@ where
             .route("/secret/del", web::post().to(secret_del))
             .route("/secret/list", web::get().to(secret_list))
             .route("/secret/get", web::post().to(secret_get))
+            // Managing tokens takes a session, never a token: see `NEVER` in
+            // server::api_token.
+            .route("/api_token/issue", web::post().to(api_token_issue))
+            .route("/api_token/list", web::get().to(api_token_list))
+            .route("/api_token/revoke", web::post().to(api_token_revoke))
             // Registered before the plugin routes below, so a plugin cannot
             // shadow the description of the very surface it is part of.
             .route(OPENAPI_PATH, web::get().to(openapi_json))

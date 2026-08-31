@@ -37,7 +37,7 @@ use actix_web::body::{EitherBody, MessageBody};
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::http::header;
 use actix_web::middleware::Next;
-use actix_web::{Error, HttpResponse};
+use actix_web::{Error, HttpMessage, HttpResponse};
 use log::{info, warn};
 
 /// Key the session generation is stored under in the cookie.
@@ -741,4 +741,147 @@ mod revocation_tests {
             "a session outlived the revocation of its account"
         );
     }
+}
+
+/// Accept an API token in place of a session cookie.
+///
+/// This runs before the `Identity` extractor gets its hands on the request,
+/// which is the only place it can run: the extractor answers 401 for anything
+/// without a session, inside a crate we do not own, before any handler is
+/// reached. So a token is turned into an ordinary identity here, and
+/// everything downstream — every handler, every plugin, every permission
+/// check — sees exactly what a browser's cookie would have produced and needs
+/// to know nothing about tokens.
+///
+/// Three things are decided here and nowhere else:
+///
+/// * **A request with no bearer token passes untouched.** Cookies keep
+///   working, and a header meant for something else in front of us is not our
+///   business.
+/// * **A token that fails is 401 and the request stops.** It is deliberately
+///   not "continue as anonymous": a caller who presented a credential wants to
+///   know it was refused, and letting it fall through would answer some
+///   requests successfully as nobody, which is a far more confusing thing to
+///   debug than a 401.
+/// * **A token outside its scopes is 403.** Different from 401 on purpose: the
+///   credential is good, the request is not.
+pub async fn accept_api_token(
+    req: ServiceRequest,
+    next: Next<impl MessageBody + 'static>,
+) -> Result<ServiceResponse<EitherBody<impl MessageBody>>, Error> {
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::server::api_token::from_header);
+
+    let Some(presented) = presented else {
+        return next.call(req).await.map(|res| res.map_into_left_body());
+    };
+
+    let Some(state) = req.app_data::<actix_web::web::Data<State>>().cloned() else {
+        // Nothing to check against. Refusing is the only safe answer: passing
+        // would serve a credentialed request as anonymous.
+        return Ok(refuse(
+            req,
+            HttpResponse::Unauthorized(),
+            "server state is unavailable",
+        ));
+    };
+    let srv: &crate::state::data::Data = &state.server;
+
+    let record = match crate::server::api_token::resolve(srv, &presented).await {
+        Ok(r) => r,
+        Err(e) => {
+            // The reason goes to the log, never to the caller: telling one
+            // apart from another turns a 401 into an oracle for guessing
+            // identifiers.
+            warn!(
+                "Refusing token {} on {} {}: {}",
+                presented.id,
+                req.method(),
+                req.path(),
+                e.reason()
+            );
+            return Ok(refuse(req, HttpResponse::Unauthorized(), "invalid token"));
+        }
+    };
+
+    let owner_id = record.safe_id(crate::server::api_token::FIELD_USER, u64::MAX);
+    let owner = match srv.rw.get_item("user", owner_id).await {
+        Some(u) if u.safe_bool("role_is_active", false) => u,
+        _ => {
+            warn!(
+                "Refusing token {}: {}",
+                presented.id,
+                crate::server::api_token::Rejected::OwnerInactive.reason()
+            );
+            return Ok(refuse(req, HttpResponse::Unauthorized(), "invalid token"));
+        }
+    };
+
+    // Which scope this request needs, out of whichever table answers for it.
+    //
+    // A plugin route is one thing, so its scope is named after the route. The
+    // generic item routes are every collection at once, so theirs is named
+    // after the collection in the query — otherwise `/itm/edit` would be a
+    // single permission covering a test run and the project it belongs to.
+    let declared = {
+        let cache = srv.route_cache.lock().clone();
+        match crate::server::api_token::item_route_verb(req.path()) {
+            Some(verb) => {
+                crate::server::api_token::collection_of(req.query_string()).and_then(|c| {
+                    cache
+                        .collection_scopes
+                        .get(&format!("{}:{}", c, verb))
+                        .cloned()
+                })
+            }
+            None => cache.route_scopes.get(req.path()).cloned(),
+        }
+    };
+    let granted = crate::server::api_token::scopes_of(&record);
+    if let Err(why) =
+        crate::server::api_token::scope_allows(req.path(), &granted, declared.as_deref())
+    {
+        warn!("Refusing token {}: {}", presented.id, why);
+        return Ok(refuse(req, HttpResponse::Forbidden(), &why));
+    }
+
+    // From here the request is indistinguishable from a signed-in one.
+    let principal = owner.safe_str("email", "");
+    // The borrow has to end before `req` can be moved into a refusal.
+    let attached = {
+        let extensions = req.extensions();
+        actix_identity::Identity::login(&extensions, principal.clone()).err()
+    };
+    if let Some(e) = attached {
+        warn!(
+            "Could not attach an identity for token {}: {}",
+            presented.id, e
+        );
+        return Ok(refuse(req, HttpResponse::Unauthorized(), "invalid token"));
+    }
+    // The session-generation check runs after this one and would otherwise
+    // find a session with no stamp and read it as generation zero. Stamping it
+    // keeps a token honest about revocation: bump the account's generation and
+    // its tokens stop working with its cookies.
+    let _ = req
+        .get_session()
+        .insert(SESSION_GEN_KEY, session_generation(&owner));
+
+    crate::server::api_token::touch(srv, &record).await;
+
+    next.call(req).await.map(|res| res.map_into_left_body())
+}
+
+/// End the request here, with a body the caller can read.
+fn refuse<B: MessageBody + 'static>(
+    req: ServiceRequest,
+    mut status: actix_web::HttpResponseBuilder,
+    message: &str,
+) -> ServiceResponse<EitherBody<B>> {
+    let body = serde_json::json!({"succeeded": false, "error": message}).to_string();
+    req.into_response(status.content_type("application/json").body(body))
+        .map_into_right_body()
 }
