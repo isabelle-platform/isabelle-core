@@ -389,14 +389,112 @@ mod revocation_tests {
             );
         }
 
-        // And the same request without the token is anonymous, which is what
-        // replaying anything the answer carried would amount to.
-        let replayed =
-            test::call_service(&app, test::TestRequest::get().uri("/probe").to_request()).await;
+        // And whatever the answer did carry, replayed without the token,
+        // authenticates nobody. Sending it back is the whole point: a request
+        // with no cookie at all would prove only that an anonymous caller is
+        // refused, which was never in question.
+        let mut replay = test::TestRequest::get().uri("/probe");
+        for c in answered.response().cookies() {
+            replay = replay.cookie(Cookie::new(c.name().to_string(), c.value().to_string()));
+        }
+        let replayed = test::call_service(&app, replay.to_request()).await;
         assert_eq!(
             replayed.status(),
             actix_web::http::StatusCode::UNAUTHORIZED,
-            "a request with no credential at all was served"
+            "a cookie taken from the answer to a token request was accepted"
+        );
+    }
+
+    /// The same escalation, assembled from two credentials that are each
+    /// perfectly good on their own.
+    ///
+    /// Attaching a token's identity to a request that already carries a
+    /// session overwrites whoever the cookie named, and the session store here
+    /// is the cookie — so the answer would hand back a session belonging to
+    /// the token's owner, with none of the token's scopes, past `NEVER`, and
+    /// beyond the reach of revoking the token.
+    #[actix_web::test]
+    async fn a_session_and_a_token_together_are_refused() {
+        let store = StoreMemory::with_collections(&["user", "api_token"]);
+        store.seed("user", account_with_password("hunter2"));
+
+        // A second account, and a token that belongs to it rather than to the
+        // one whose cookie will be sent.
+        let mut other = Item::new();
+        other.id = 2;
+        other.set_str("login", "bob");
+        other.set_str("email", "bob@example.org");
+        other.set_bool("role_is_active", true);
+        store.seed("user", other);
+
+        let secret = crate::server::api_token::generate_secret();
+        let mut token = Item::new();
+        token.id = 1;
+        token.set_id("user", 2);
+        token.set_str("hash", &crate::server::api_token::hash(&secret));
+        token.set_str("scopes", r#"["read"]"#);
+        store.seed("api_token", token);
+
+        let mut internals = Item::new();
+        let mut scopes = std::collections::HashMap::new();
+        scopes.insert("1".to_string(), "/probe:read".to_string());
+        internals.set_strstr("route_scope", &scopes);
+        store.set_internals(internals);
+
+        let mut data = Data::new();
+        data.rw = Box::new(store.clone());
+        data.rebuild_route_cache().await;
+        let state = web::Data::new(State::from_data(data));
+        let app = app_with!(state.clone());
+
+        let signed_in = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/login")
+                .insert_header((
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", BOUNDARY),
+                ))
+                .set_payload(multipart_body(&[
+                    ("username", "alice"),
+                    ("password", "hunter2"),
+                ]))
+                .to_request(),
+        )
+        .await;
+        let session = signed_in
+            .response()
+            .cookies()
+            .find(|c| c.name() == "id")
+            .map(|c| Cookie::new(c.name().to_string(), c.value().to_string()))
+            .expect("signing in produced no session cookie");
+
+        let whole = crate::server::api_token::assemble(1, &secret);
+        let answered = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/probe")
+                .insert_header((header::AUTHORIZATION, format!("Bearer {}", whole)))
+                .cookie(session)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            answered.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "a session and a token were accepted together"
+        );
+
+        // And the refusal hands back nothing that authenticates anybody.
+        let mut replay = test::TestRequest::get().uri("/probe");
+        for c in answered.response().cookies() {
+            replay = replay.cookie(Cookie::new(c.name().to_string(), c.value().to_string()));
+        }
+        let replayed = test::call_service(&app, replay.to_request()).await;
+        assert_ne!(
+            replayed.status(),
+            actix_web::http::StatusCode::OK,
+            "the refusal handed back a usable session"
         );
     }
 
@@ -868,10 +966,32 @@ pub async fn accept_api_token(
         return next.call(req).await.map(|res| res.map_into_left_body());
     };
 
-    // Whether the caller was already signed in before the token was looked
-    // at. It decides what happens to the session afterwards: one this
-    // middleware created has to go, and one the caller brought is theirs.
-    let had_session = req.get_identity().is_ok();
+    // One credential at a time.
+    //
+    // A request carrying both a session and a token is ambiguous, and the
+    // ambiguity is not academic: attaching the token's identity overwrites
+    // whoever the cookie said, and the session middleware then serialises
+    // *that* back into the response. The caller would walk away with a cookie
+    // carrying the token owner's identity, free of the token's scopes and of
+    // `NEVER`, and outliving any revocation — an escalation built out of two
+    // credentials that were each fine alone.
+    //
+    // Refusing is not politeness about tidy requests. It is the only answer
+    // that leaves nothing to reason about: the token path runs on
+    // session-less requests only, so the session it creates is always ours to
+    // destroy.
+    if req.get_identity().is_ok() {
+        warn!(
+            "Refusing {} {}: a session and a token were presented together",
+            req.method(),
+            req.path()
+        );
+        return Ok(refuse(
+            req,
+            HttpResponse::BadRequest(),
+            "send either a session cookie or a token, not both",
+        ));
+    }
 
     let Some(state) = req.app_data::<actix_web::web::Data<State>>().cloned() else {
         // Nothing to check against. Refusing is the only safe answer: passing
@@ -985,13 +1105,9 @@ pub async fn accept_api_token(
     // than to keep it, which is the only shape that says "this credential was
     // good for one request".
     //
-    // Only a session this middleware made, though. A caller who sent a cookie
-    // *and* a token gets the token's limits applied to that request — they
-    // presented a credential, so it counts — but their browser session is
-    // theirs and is not something a stray `Authorization` header should end.
-    if !had_session {
-        res.request().get_session().purge();
-    }
+    // Unconditionally: the request had no session of its own — that was
+    // refused above — so this one is the middleware's own making.
+    res.request().get_session().purge();
 
     Ok(res.map_into_left_body())
 }
