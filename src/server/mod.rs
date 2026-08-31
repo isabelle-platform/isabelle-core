@@ -21,6 +21,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+pub mod api_token;
 pub mod auth_config;
 pub mod guards;
 pub mod itm;

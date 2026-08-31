@@ -32,6 +32,7 @@ clap = { version = "4.5.23", features = ["derive"] }
 cron = "0.12.1"
 env_logger = "0.8.4"
 futures-util = "0.3.29"
+hex = "0.4"
 jsonwebtoken = "9"
 # Sign-in against a directory. rustls to match the rest of the TLS in this
 # crate; the synchronous and Kerberos halves of the crate are not used.

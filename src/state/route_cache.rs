@@ -55,6 +55,29 @@ pub struct RouteCache {
 
     /// Post-edit hooks bound to all collections.
     pub item_post_edit_wildcard: Vec<String>,
+
+    /// Which scope an API token needs to reach a route: path → scope name.
+    /// Source: `internals.strstrs["route_scope"]` (`"path:scope"`).
+    ///
+    /// Declared beside the routes themselves rather than in code, because
+    /// which scope a route belongs to is a statement about that route, and
+    /// core does not know what a flavour's routes mean. A route absent from
+    /// this table is reachable by no token at all — see
+    /// `server::api_token::scope_allows`.
+    pub route_scopes: HashMap<String, String>,
+
+    /// Which scope an API token needs to reach a collection through the
+    /// generic item API: `"<collection>:<verb>"` → scope name, where the verb
+    /// is `read` or `write`.
+    /// Source: `internals.strstrs["collection_scope"]`
+    /// (`"collection:verb:scope"`).
+    ///
+    /// `/itm/edit` is one route for every collection there is, so a scope
+    /// named after the route would be the same permission for a test run and
+    /// for a project. The collection is in the query string, which is how the
+    /// handler itself knows what it is editing, and it is the only thing on
+    /// that route worth naming a scope after.
+    pub collection_scopes: HashMap<String, String>,
 }
 
 impl RouteCache {
@@ -94,6 +117,35 @@ impl RouteCache {
             .values()
         {
             parse_path_route(spec, &mut c.rest_routes);
+        }
+
+        for spec in internals
+            .strstrs
+            .get("route_scope")
+            .unwrap_or(&empty)
+            .values()
+        {
+            // Format: "path:scope". Two segments, not three: a scope is about
+            // what the route does, not which verb asked for it.
+            let parts: Vec<&str> = spec.split(':').collect();
+            if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+                c.route_scopes
+                    .insert(parts[0].to_string(), parts[1].to_string());
+            }
+        }
+
+        for spec in internals
+            .strstrs
+            .get("collection_scope")
+            .unwrap_or(&empty)
+            .values()
+        {
+            // Format: "collection:verb:scope".
+            let parts: Vec<&str> = spec.split(':').collect();
+            if parts.len() >= 3 && !parts[0].is_empty() && !parts[2].is_empty() {
+                c.collection_scopes
+                    .insert(format!("{}:{}", parts[0], parts[1]), parts[2].to_string());
+            }
         }
 
         let parse_collection_hook =
