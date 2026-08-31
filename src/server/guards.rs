@@ -405,6 +405,63 @@ mod revocation_tests {
         );
     }
 
+    /// An account with no e-mail cannot be spoken for.
+    ///
+    /// The principal a session carries is an e-mail address, and resolving
+    /// one searches for a record whose login *or* e-mail matches it. An empty
+    /// principal therefore matches the first account that also has an empty
+    /// field — so a token belonging to an account without an e-mail would act
+    /// as whichever record the store returned first. It is refused instead.
+    #[actix_web::test]
+    async fn a_token_whose_owner_has_no_email_is_refused() {
+        let store = StoreMemory::with_collections(&["user", "api_token"]);
+
+        // Two accounts, neither with an e-mail: exactly the shape that makes
+        // an empty principal ambiguous.
+        for (id, login) in [(1u64, "nameless"), (2u64, "also-nameless")] {
+            let mut itm = Item::new();
+            itm.id = id;
+            itm.set_str("login", login);
+            itm.set_bool("role_is_active", true);
+            store.seed("user", itm);
+        }
+
+        let secret = crate::server::api_token::generate_secret();
+        let mut token = Item::new();
+        token.id = 1;
+        token.set_id("user", 1);
+        token.set_str("hash", &crate::server::api_token::hash(&secret));
+        token.set_str("scopes", r#"["read"]"#);
+        store.seed("api_token", token);
+
+        let mut internals = Item::new();
+        let mut scopes = std::collections::HashMap::new();
+        scopes.insert("1".to_string(), "/probe:read".to_string());
+        internals.set_strstr("route_scope", &scopes);
+        store.set_internals(internals);
+
+        let mut data = Data::new();
+        data.rw = Box::new(store.clone());
+        data.rebuild_route_cache().await;
+        let state = web::Data::new(State::from_data(data));
+        let app = app_with!(state.clone());
+
+        let whole = crate::server::api_token::assemble(1, &secret);
+        let answered = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/probe")
+                .insert_header((header::AUTHORIZATION, format!("Bearer {}", whole)))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            answered.status(),
+            actix_web::http::StatusCode::UNAUTHORIZED,
+            "a token acted for an account that cannot be named"
+        );
+    }
+
     /// The same escalation, assembled from two credentials that are each
     /// perfectly good on their own.
     ///
@@ -1065,7 +1122,22 @@ pub async fn accept_api_token(
     // From here the handler sees what a signed-in caller would. The identity
     // has to go through the session, because that is where the `Identity`
     // extractor every handler uses will look for it.
+    //
+    // The principal is an e-mail address, and an account without one would
+    // name nobody. That is not merely useless: resolving a principal searches
+    // for a record whose login *or* e-mail matches, so an empty one matches
+    // the first account that also has an empty field — the token would act as
+    // whichever account the store happened to return. Refusing is the only
+    // answer that cannot be somebody else's.
     let principal = owner.safe_str("email", "");
+    if principal.trim().is_empty() {
+        warn!(
+            "Refusing token {}: its owner (user {}) has no e-mail to be \
+             identified by",
+            presented.id, owner_id
+        );
+        return Ok(refuse(req, HttpResponse::Unauthorized(), "invalid token"));
+    }
     // The borrow has to end before `req` can be moved into a refusal.
     let attached = {
         let extensions = req.extensions();
