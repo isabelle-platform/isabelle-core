@@ -84,6 +84,11 @@ pub const FIELD_EXPIRES: &str = "expires";
 pub const FIELD_LAST_USED: &str = "last_used";
 pub const FIELD_REVOKED: &str = "revoked";
 
+/// Every scope this instance's own routes name, for tests that need a token
+/// that holds everything there is to hold.
+#[cfg(test)]
+const PROVIDERS_SCOPES: [&str; 3] = ["read", "write", "admin"];
+
 /// How many bytes of randomness the secret carries.
 ///
 /// 32 bytes is far past guessing, which is why the stored hash can be a plain
@@ -718,6 +723,47 @@ mod tests {
         assert_eq!(collection_of("sort_key=id"), None);
         assert_eq!(collection_of("collection="), None);
         assert_eq!(collection_of(""), None);
+    }
+
+    /// A scope nobody declared grants nothing, and cannot be talked into
+    /// granting something by being named after one.
+    ///
+    /// Issuing does not check the vocabulary — core does not own it, the
+    /// flavour declares it — so a token can be made with any word in it. That
+    /// is only safe because the word has to appear in a table on the way out
+    /// as well, and this is the test that says so.
+    #[test]
+    fn an_invented_scope_opens_nothing() {
+        let invented = vec![
+            "wat".to_string(),
+            "*".to_string(),
+            "admin".to_string(),
+            // The words the refusals are written with, in case one of them
+            // were ever compared against a scope by accident.
+            "never".to_string(),
+            String::new(),
+        ];
+        assert!(scope_allows("/secret/list", &invented, None).is_err());
+        assert!(scope_allows("/anything", &invented, None).is_err());
+        assert!(scope_allows("/anything", &invented, Some("read")).is_err());
+        // And an empty granted list is not a wildcard either.
+        assert!(scope_allows("/anything", &[], Some("read")).is_err());
+    }
+
+    /// The forbidden list is about the route, not about who is asking.
+    ///
+    /// An administrator's token carries an administrator's permissions —
+    /// that is the point of it — but the routes that mint credentials stay
+    /// shut, or a leaked token would be a way to make more of itself.
+    #[test]
+    fn the_forbidden_list_does_not_bend_for_a_powerful_owner() {
+        let everything: Vec<String> = PROVIDERS_SCOPES.iter().map(|s| s.to_string()).collect();
+        for path in ["/secret/list", "/api_token/issue", "/system/update"] {
+            assert!(
+                scope_allows(path, &everything, Some("read")).is_err(),
+                "{path} was reachable"
+            );
+        }
     }
 
     #[test]
