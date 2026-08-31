@@ -287,6 +287,10 @@ mod revocation_tests {
             test::init_service(
                 App::new()
                     .app_data($state)
+                    // The same order as the server builds: a token becomes an
+                    // identity innermost, after everything outside has decided
+                    // the request carries no session.
+                    .wrap(from_fn(accept_api_token))
                     .wrap(from_fn(enforce_session_generation))
                     .wrap(actix_identity::IdentityMiddleware::default())
                     .wrap(
@@ -309,6 +313,91 @@ mod revocation_tests {
             )
             .await
         };
+    }
+
+    /// A token is good for the request it was sent with, and for nothing
+    /// after it.
+    ///
+    /// The session store here is the cookie itself, so writing the identity
+    /// into the session to tell the handler who is calling would otherwise
+    /// hand the caller a *session* — one that outlives the token, ignores its
+    /// scopes, and cannot be taken back by revoking it. This asserts the
+    /// answer carries no such thing.
+    #[actix_web::test]
+    async fn a_token_does_not_leave_a_session_behind() {
+        let store = StoreMemory::with_collections(&["user", "api_token"]);
+        store.seed("user", account_with_password("hunter2"));
+
+        let secret = crate::server::api_token::generate_secret();
+        let mut token = Item::new();
+        token.id = 1;
+        token.set_id("user", 1);
+        token.set_str("hash", &crate::server::api_token::hash(&secret));
+        token.set_str("scopes", r#"["read"]"#);
+        store.seed("api_token", token);
+
+        // The probe route has to be in a scope, or the token is refused for
+        // the right reason and the test learns nothing about sessions. This
+        // is the same declaration a flavour makes in `internals.js`.
+        let mut internals = Item::new();
+        let mut scopes = std::collections::HashMap::new();
+        scopes.insert("1".to_string(), "/probe:read".to_string());
+        internals.set_strstr("route_scope", &scopes);
+        store.set_internals(internals);
+
+        let mut data = Data::new();
+        data.rw = Box::new(store.clone());
+        data.rebuild_route_cache().await;
+        let state = web::Data::new(State::from_data(data));
+        let app = app_with!(state.clone());
+
+        let whole = crate::server::api_token::assemble(1, &secret);
+        let answered = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/probe")
+                .insert_header((header::AUTHORIZATION, format!("Bearer {}", whole)))
+                .to_request(),
+        )
+        .await;
+        assert!(
+            answered.status().is_success(),
+            "the token was refused: {}",
+            answered.status()
+        );
+
+        // Whatever the answer sets, it must not be a usable session. A
+        // removal is fine — that is what purging looks like on the wire — and
+        // so is nothing at all; a session cookie with a value is not.
+        let handed_back: Vec<String> = answered
+            .response()
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .map(|v| v.to_str().unwrap_or_default().to_string())
+            .filter(|c| c.starts_with("id=") || c.contains("isabelle-cookie="))
+            .collect();
+        for cookie in &handed_back {
+            let value = cookie
+                .split(';')
+                .next()
+                .and_then(|kv| kv.split_once('='))
+                .map(|(_, v)| v)
+                .unwrap_or("");
+            assert!(
+                value.is_empty(),
+                "a token request was answered with a session cookie: {cookie}"
+            );
+        }
+
+        // And the same request without the token is anonymous, which is what
+        // replaying anything the answer carried would amount to.
+        let replayed =
+            test::call_service(&app, test::TestRequest::get().uri("/probe").to_request()).await;
+        assert_eq!(
+            replayed.status(),
+            actix_web::http::StatusCode::UNAUTHORIZED,
+            "a request with no credential at all was served"
+        );
     }
 
     #[actix_web::test]
@@ -779,6 +868,11 @@ pub async fn accept_api_token(
         return next.call(req).await.map(|res| res.map_into_left_body());
     };
 
+    // Whether the caller was already signed in before the token was looked
+    // at. It decides what happens to the session afterwards: one this
+    // middleware created has to go, and one the caller brought is theirs.
+    let had_session = req.get_identity().is_ok();
+
     let Some(state) = req.app_data::<actix_web::web::Data<State>>().cloned() else {
         // Nothing to check against. Refusing is the only safe answer: passing
         // would serve a credentialed request as anonymous.
@@ -848,7 +942,9 @@ pub async fn accept_api_token(
         return Ok(refuse(req, HttpResponse::Forbidden(), &why));
     }
 
-    // From here the request is indistinguishable from a signed-in one.
+    // From here the handler sees what a signed-in caller would. The identity
+    // has to go through the session, because that is where the `Identity`
+    // extractor every handler uses will look for it.
     let principal = owner.safe_str("email", "");
     // The borrow has to end before `req` can be moved into a refusal.
     let attached = {
@@ -872,7 +968,32 @@ pub async fn accept_api_token(
 
     crate::server::api_token::touch(srv, &record).await;
 
-    next.call(req).await.map(|res| res.map_into_left_body())
+    let res = next.call(req).await?;
+
+    // And it ends with the request.
+    //
+    // Writing the identity into the session is how the handler is told who is
+    // calling; letting that session *survive* would hand the caller a cookie
+    // worth more than the token that produced it. The session store is the
+    // cookie itself, so without this the answer to a read-scoped request
+    // carries a full session: replay it without the token and every scope is
+    // gone, `NEVER` with it — the holder of a token that may only read runs
+    // could mint itself another token. Revoking the token would not help,
+    // because the cookie is no longer a token.
+    //
+    // Purging leaves the response asking the client to drop the cookie rather
+    // than to keep it, which is the only shape that says "this credential was
+    // good for one request".
+    //
+    // Only a session this middleware made, though. A caller who sent a cookie
+    // *and* a token gets the token's limits applied to that request — they
+    // presented a credential, so it counts — but their browser session is
+    // theirs and is not something a stray `Authorization` header should end.
+    if !had_session {
+        res.request().get_session().purge();
+    }
+
+    Ok(res.map_into_left_body())
 }
 
 /// End the request here, with a body the caller can read.
