@@ -63,6 +63,15 @@ pub async fn itm_edit(
             return HttpResponse::BadRequest().into();
         }
     };
+    // Credentials are not items. See `api_token::hidden_from_item_api`.
+    if crate::server::api_token::hidden_from_item_api(&mc.collection) {
+        error!(
+            "Refusing a write of {} through the item API",
+            crate::server::api_token::COLLECTION
+        );
+        return HttpResponse::Forbidden().into();
+    }
+
     let mut itm = match serde_qs::from_str::<Item>(&req.query_string()) {
         Ok(v) => v,
         Err(e) => {
@@ -236,6 +245,14 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
             return HttpResponse::BadRequest().into();
         }
     };
+    // Credentials are not items. See `api_token::hidden_from_item_api`.
+    if crate::server::api_token::hidden_from_item_api(&mc.collection) {
+        error!(
+            "Refusing a delete of {} through the item API",
+            crate::server::api_token::COLLECTION
+        );
+        return HttpResponse::Forbidden().into();
+    }
     let itm = match serde_qs::from_str::<Item>(&req.query_string()) {
         Ok(v) => v,
         Err(e) => {
@@ -334,6 +351,17 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
             return HttpResponse::BadRequest().into();
         }
     };
+
+    // Credentials are not items. See `api_token::hidden_from_item_api`: the
+    // records hold the hash every presented token is checked against, and
+    // `/api_token/list` is the read that exists for them.
+    if crate::server::api_token::hidden_from_item_api(&lq.collection) {
+        error!(
+            "Refusing a read of {} through the item API",
+            crate::server::api_token::COLLECTION
+        );
+        return HttpResponse::Forbidden().into();
+    }
 
     if !srv.has_collection(&lq.collection) {
         error!("Collection {} doesn't exist", lq.collection);

@@ -97,6 +97,23 @@ const PROVIDERS_SCOPES: [&str; 3] = ["read", "write", "admin"];
 /// the server's CPU with wrong tokens.
 const SECRET_BYTES: usize = 32;
 
+/// Whether the generic item API may touch a collection at all.
+///
+/// It may not touch this one, and that is enforced here rather than in a
+/// plugin because the collection and the endpoints that maintain it are the
+/// core's own. A rule that lived in a plugin would hold only for the
+/// deployments that load it, and a token record is a *credential*: whoever
+/// can write one chooses both the owner and the hash, which is to say mints a
+/// working credential for somebody else's account. Whoever can read one is
+/// handed the verifier every presented token is measured against.
+///
+/// Tokens are made by `/api_token/issue`, ended by `/api_token/revoke`, and
+/// listed by `/api_token/list`, which returns what a person needs to manage
+/// them and never the hash.
+pub fn hidden_from_item_api(collection: &str) -> bool {
+    collection == COLLECTION
+}
+
 /// A token as presented by a caller, split into the part that finds the record
 /// and the part that proves it.
 #[derive(Debug, PartialEq, Eq)]
@@ -732,6 +749,23 @@ mod tests {
     /// flavour declares it — so a token can be made with any word in it. That
     /// is only safe because the word has to appear in a table on the way out
     /// as well, and this is the test that says so.
+    /// The collection is not an item collection, and core says so itself.
+    ///
+    /// This lived in one plugin's authorization rules first, which was the
+    /// wrong place twice over: a deployment loading a different plugin set
+    /// had no rule at all, and the collection belongs to core rather than to
+    /// any plugin. Whoever can write a token record chooses its owner and its
+    /// hash — that is a working credential for somebody else's account.
+    #[test]
+    fn the_token_collection_is_not_reachable_as_items() {
+        assert!(hidden_from_item_api(COLLECTION));
+        // And nothing else is swept up with it: the rule is about this one
+        // collection, not about anything whose name resembles it.
+        for other in ["user", "note", "api_tokens", "api_token_x", "", "token"] {
+            assert!(!hidden_from_item_api(other), "{other} was hidden too");
+        }
+    }
+
     #[test]
     fn an_invented_scope_opens_nothing() {
         let invented = vec![
