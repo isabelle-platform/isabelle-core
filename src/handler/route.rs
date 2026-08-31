@@ -267,7 +267,10 @@ mod header_tests {
     #[test]
     fn a_signature_survives_with_its_name_folded() {
         let h = headers_of(TestRequest::post().insert_header(("Stripe-Signature", "t=1,v1=ab")));
-        assert_eq!(h.get("stripe-signature").map(String::as_str), Some("t=1,v1=ab"));
+        assert_eq!(
+            h.get("stripe-signature").map(String::as_str),
+            Some("t=1,v1=ab")
+        );
     }
 
     /// A plugin is told who the caller is through `user`. Handing it the raw
@@ -285,7 +288,10 @@ mod header_tests {
         assert!(!h.contains_key("authorization"), "{h:?}");
         assert!(!h.contains_key("proxy-authorization"), "{h:?}");
         // …and the ordinary ones still come through, or the filter is a wall.
-        assert_eq!(h.get("content-type").map(String::as_str), Some("application/json"));
+        assert_eq!(
+            h.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
     }
 }
 
@@ -318,12 +324,9 @@ mod rest_delivery_tests {
         let mut internals = Item::new();
         internals.set_strstr(
             "extra_rest_route",
-            &[(
-                "1".to_string(),
-                format!("{PATH}:post:{HANDLER}"),
-            )]
-            .into_iter()
-            .collect(),
+            &[("1".to_string(), format!("{PATH}:post:{HANDLER}"))]
+                .into_iter()
+                .collect(),
         );
 
         let data = Data::new();
@@ -393,7 +396,10 @@ mod rest_delivery_tests {
         assert_eq!(hndl, HANDLER);
         // Byte-for-byte: this is what the HMAC is computed over.
         assert_eq!(payload, BODY);
-        assert_eq!(headers.get("stripe-signature").map(String::as_str), Some(SIG));
+        assert_eq!(
+            headers.get("stripe-signature").map(String::as_str),
+            Some(SIG)
+        );
         assert!(!headers.contains_key("cookie"), "{headers:?}");
     }
 }
