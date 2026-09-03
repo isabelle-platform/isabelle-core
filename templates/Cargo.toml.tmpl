@@ -9,6 +9,14 @@ path = "src/main.rs"
 
 [dependencies]
 actix-web = { version = "4", features = ["cookies", "rustls-0_23"] }
+# Not used here. Named only to turn its `std` feature on for the whole graph:
+# unicode-normalization, hickory-proto and quinn-proto all ask for tinyvec with
+# `alloc` alone, and 1.13.0 does not compile that way — it calls `vec![]` in a
+# module whose `use alloc::vec::self` shadows the macro with the module of the
+# same name. With `std` the macro comes from the prelude instead. This binary is
+# hosted and links std regardless, so the feature costs nothing. Remove once
+# tinyvec ships a release that builds under `alloc` alone.
+tinyvec = { version = "1", features = ["std"] }
 # Parent core via path — local edits picked up on next `cargo build`.
 isabelle-core = { path = "__CORE_PATH__" }
 # Plugins from flavours/__FLAVOUR__.json:
