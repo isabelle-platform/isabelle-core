@@ -18,6 +18,24 @@
 flavour ?=
 flavours_dir ?= ../release-generator/flavours
 
+# Room in the Mach-O header for the rpath `tools/fix_rpath.sh` stamps on after
+# the link.
+#
+# A binary is linked with exactly the load commands it already has, and
+# `install_name_tool` cannot grow that header afterwards: it refuses, the rpath
+# of the native asp library never gets added, and the server aborts on the
+# first run with "Library not loaded: @rpath/libasp.dylib — no LC_RPATH's
+# found". The flag is Mach-O's own and means nothing to any other linker, so it
+# is added on macOS only rather than unconditionally.
+#
+# Exported rather than passed per recipe so that it reaches cargo however this
+# Makefile is entered. A caller that sets RUSTFLAGS on the command line — the
+# midair-ts suite does — overrides this outright, so it has to carry the flag
+# itself; it does.
+ifeq ($(shell uname -s),Darwin)
+export RUSTFLAGS := $(RUSTFLAGS) -C link-arg=-Wl,-headerpad_max_install_names
+endif
+
 all: build
 
 build:
