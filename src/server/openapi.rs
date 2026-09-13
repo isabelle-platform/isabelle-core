@@ -227,6 +227,7 @@ pub fn build_spec(
             { "name": "auth", "description": "Sessions, registration and one-time codes." },
             { "name": "items", "description": "The generic collection store." },
             { "name": "settings", "description": "Deployment settings. Admin only." },
+            { "name": "features", "description": "What this deployment may do. Read-only over HTTP; edited on disk." },
             { "name": "secrets", "description": "Encrypted secret store. Admin only." },
             { "name": "system", "description": "Operational endpoints. Admin only." },
             { "name": "meta", "description": "This document." },
@@ -756,6 +757,28 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
                 "200": json_response("The settings item.", schema_ref("Item")),
                 "401": empty_response("No session."),
                 "403": empty_response("Not an admin."),
+            },
+        }}),
+    );
+
+    paths.insert(
+        "/feature/list".to_string(),
+        json!({ "get": {
+            "tags": ["features"],
+            "summary": "The features this deployment declares, by name",
+            "description":
+                "Read from `features.js` in the data directory at startup. There is no \
+                 endpoint that writes it: the feature set is an installation decision, \
+                 so no session and no token can widen it. Each feature also carries a \
+                 free-form descriptor in that file; descriptors stay on the server and \
+                 are read by the code implementing the feature, never served here. A \
+                 deployment with no readable `features.js` answers an empty list.",
+            "responses": {
+                "200": json_response(
+                    "Declared feature names, sorted.",
+                    json!({ "type": "array", "items": { "type": "string" } }),
+                ),
+                "401": empty_response("No session."),
             },
         }}),
     );
@@ -1619,6 +1642,37 @@ mod tests {
             .collect();
         it.strstrs.insert(category.to_string(), inner);
         it
+    }
+
+    /// A documented operation only reaches `/docs` if its tag is one the
+    /// document declares: the renderer groups by tag and silently drops
+    /// anything else. So the feature endpoint is checked in both places —
+    /// present in `paths`, and under a tag that exists.
+    #[test]
+    fn the_feature_list_is_documented_under_a_declared_tag() {
+        let spec = build_spec("http://localhost:8090", &[], &[], false);
+
+        let op = &spec["paths"]["/feature/list"]["get"];
+        assert!(op.is_object(), "/feature/list is not in the document");
+
+        let tag = op["tags"][0].as_str().expect("no tag");
+        let declared: Vec<&str> = spec["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(
+            declared.contains(&tag),
+            "tag {:?} is not declared; the operation would vanish from /docs",
+            tag
+        );
+
+        // And the write nobody should find: there is no edit endpoint to
+        // document, because there is none to call.
+        for path in ["/feature/edit", "/feature/del", "/feature/set"] {
+            assert!(spec["paths"][path].is_null(), "{} is documented", path);
+        }
     }
 
     /// The three route tables `run()` reads have to be the three this reads,

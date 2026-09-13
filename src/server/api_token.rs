@@ -296,9 +296,14 @@ const ALWAYS: [&str; 1] = ["/is_logged_in"];
 ///
 /// Plugin routes name their scope in `internals.js`, beside the route itself,
 /// because which scope a route belongs to is a statement about that route and
-/// core has no business guessing it. This one is core's own and names no
+/// core has no business guessing it. These are core's own and name no
 /// collection, so core is the one place that can say.
-const CORE_SCOPES: [(&str, &str); 1] = [("/setting/list", "read")];
+const CORE_SCOPES: [(&str, &str); 2] = [
+    ("/setting/list", "read"),
+    // What the deployment may do, by name. A read, and there is no write to
+    // pair it with: `features.js` is edited on disk. See `server::feature`.
+    ("/feature/list", "read"),
+];
 
 /// The generic item routes, and what each of them does.
 ///
@@ -862,6 +867,36 @@ mod tests {
                 scope_allows(path, &nothing, None).is_err(),
                 "{} was reachable with a token holding no scope",
                 path
+            );
+        }
+    }
+
+    /// Reading the feature list is a read, so it needs the read scope and
+    /// nothing wider — and, like every core route, it needs *a* scope: the
+    /// point of listing it is that it is reachable at all.
+    #[test]
+    fn the_feature_list_is_a_read() {
+        assert!(scope_allows("/feature/list", &["read".to_string()], None).is_ok());
+        for narrower in [vec![], vec!["write".to_string()], vec!["runs".to_string()]] {
+            assert!(
+                scope_allows("/feature/list", &narrower, None).is_err(),
+                "a token with {:?} read the feature list",
+                narrower
+            );
+        }
+    }
+
+    /// There is no write to the feature list, and a token must not find one.
+    /// The route does not exist — `features.js` is edited on disk — so this
+    /// asserts what would happen if somebody added one without thinking:
+    /// nothing, until they place it in a scope deliberately.
+    #[test]
+    fn there_is_no_way_to_write_the_feature_list() {
+        let everything: Vec<String> = PROVIDERS_SCOPES.iter().map(|s| s.to_string()).collect();
+        for path in ["/feature/edit", "/feature/del", "/feature/set"] {
+            assert!(
+                scope_allows(path, &everything, None).is_err(),
+                "{path} was reachable"
             );
         }
     }

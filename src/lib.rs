@@ -64,6 +64,7 @@ use crate::handler::route_call::call_periodic_job_hook;
 use crate::notif::gcal::*;
 use crate::server::api_token::{api_token_issue, api_token_list, api_token_revoke};
 use crate::server::auth_config::*;
+use crate::server::feature::feature_list;
 use crate::server::guards::{
     accept_api_token, enforce_session_generation, reject_ambiguous_framing,
 };
@@ -392,6 +393,10 @@ where
         // strings on every request.
         srv.rebuild_route_cache().await;
 
+        // What this deployment is allowed to do. Read once, like
+        // `internals.js`, and never written back.
+        srv.load_features();
+
         // Initialize Google Calendar
         info!("Flow: initializing Google Calendar");
         init_google(srv).await;
@@ -559,6 +564,9 @@ where
             )
             .route("/setting/edit", web::post().to(setting_edit))
             .route("/setting/list", web::get().to(setting_list))
+            // Read-only by construction: `features.js` is edited on disk, so
+            // there is no edit route here to leave out of `NEVER`.
+            .route("/feature/list", web::get().to(feature_list))
             .route("/setting/gcal_auth", web::post().to(setting_gcal_auth))
             .route(
                 "/setting/gcal_auth_end",
