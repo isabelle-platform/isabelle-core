@@ -278,6 +278,20 @@ const NEVER: [&str; 6] = [
     "/user/pwd",
 ];
 
+/// Routes any valid token may call, whatever it was issued for.
+///
+/// One entry, and the case for it is narrow: asking the server which account
+/// this credential belongs to is not a privilege beyond holding it. A caller
+/// that presents a token already knows the secret; `/is_logged_in` tells it
+/// the name on the account and nothing else.
+///
+/// Without this the endpoint sits in no scope at all, and fails closed — so a
+/// token could be used to start a run but not to find out whose it was, and
+/// the first thing any client does with a new credential is check it.
+/// Widening this list is not a small decision: everything here is reachable
+/// by the narrowest token anybody ever issues.
+const ALWAYS: [&str; 1] = ["/is_logged_in"];
+
 /// The scopes core's own routes belong to.
 ///
 /// Plugin routes name their scope in `internals.js`, beside the route itself,
@@ -326,6 +340,10 @@ pub fn scope_allows(path: &str, granted: &[String], declared: Option<&str>) -> R
     let route_scope = declared;
     if NEVER.iter().any(|p| path.starts_with(p)) {
         return Err(format!("{} is never reachable with a token", path));
+    }
+
+    if ALWAYS.contains(&path) {
+        return Ok(());
     }
 
     let needed = match CORE_SCOPES.iter().find(|(p, _)| *p == path) {
@@ -806,6 +824,46 @@ mod tests {
         // be quietly covered by a token issued today.
         let everything = vec!["read".to_string(), "write".to_string(), "runs".to_string()];
         assert!(scope_allows("/something/new", &everything, None).is_err());
+    }
+
+    /// Asking which account a credential belongs to is not a privilege
+    /// beyond holding it, and it is the first thing every client does with a
+    /// new token. Without this it fails closed like any unlisted route, and
+    /// a token could start a run but never say whose it was.
+    #[test]
+    fn any_token_may_ask_which_account_it_is() {
+        for granted in [
+            vec![],
+            vec!["read".to_string()],
+            vec!["runs".to_string()],
+            vec!["distributions".to_string()],
+        ] {
+            assert!(
+                scope_allows("/is_logged_in", &granted, None).is_ok(),
+                "a token with {:?} could not check itself",
+                granted
+            );
+        }
+    }
+
+    /// And the exception is exactly one route: everything else still has to
+    /// be placed in a scope by somebody.
+    #[test]
+    fn asking_who_you_are_is_the_only_thing_every_token_may_do() {
+        let nothing: Vec<String> = vec![];
+        for path in [
+            "/login",
+            "/logout",
+            "/itm/list",
+            "/setting/list",
+            "/register",
+        ] {
+            assert!(
+                scope_allows(path, &nothing, None).is_err(),
+                "{} was reachable with a token holding no scope",
+                path
+            );
+        }
     }
 
     #[test]
