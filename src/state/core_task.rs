@@ -240,6 +240,15 @@ async fn handle_message(state: &State, msg: CoreMessage) {
             let _ = reply.send(res);
         }
 
+        // -------- Features --------
+        CoreMessage::FeaturesGetAll { reply } => {
+            // The whole document, descriptors included. The HTTP API serves
+            // only the names out of it (see `server::feature`); a plugin is
+            // the code that implements a feature, so it gets what the file
+            // actually said about it.
+            let _ = reply.send(srv.features().all().clone());
+        }
+
         // CoreMessage is `#[non_exhaustive]`. Unknown future variants are
         // silently ignored — same as old PluginApi-stub behaviour for
         // unimplemented methods.
@@ -302,6 +311,60 @@ mod tests {
                 !handle.auth_verify_password("wrong", &hash).await,
                 "verify should reject the wrong password"
             );
+        });
+    }
+
+    /// A plugin asks what the deployment may do, and gets the descriptors —
+    /// the half of `features.js` the HTTP API deliberately does not serve.
+    /// This is the wiring between the two crates: the message is declared in
+    /// `isabelle-plugin-api` and only means anything if core answers it.
+    #[test]
+    fn a_plugin_reads_the_feature_descriptors() {
+        use crate::state::features::Features;
+        use serde_json::{json, Value};
+        use std::collections::BTreeMap;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+
+        local.block_on(&rt, async {
+            let mut declared = BTreeMap::new();
+            declared.insert("reports".to_string(), json!({ "formats": ["pdf"] }));
+            declared.insert("beta_ui".to_string(), Value::Null);
+
+            let state = State::new();
+            *state.server.features.lock() =
+                std::sync::Arc::new(Features::from_map(declared.clone()));
+            let handle = spawn_core_task(state);
+
+            assert_eq!(handle.features_all().await, declared);
+            assert_eq!(
+                handle.features_get("reports").await,
+                Some(json!({ "formats": ["pdf"] }))
+            );
+            // Declared with a null descriptor is still declared.
+            assert!(handle.features_has("beta_ui").await);
+            assert!(!handle.features_has("never_declared").await);
+        });
+    }
+
+    /// A deployment that declares nothing answers nothing — the same thing a
+    /// plugin sees when core is gone, and the safe reading in both cases.
+    #[test]
+    fn a_plugin_sees_no_features_when_none_are_declared() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+
+        local.block_on(&rt, async {
+            let handle = spawn_core_task(State::new());
+            assert!(handle.features_all().await.is_empty());
+            assert!(!handle.features_has("reports").await);
         });
     }
 }
