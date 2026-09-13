@@ -17,6 +17,8 @@ Isabelle is a Rust-based framework for building safe and performant servers for 
 - Signing in against an LDAP directory.
 - Self-describing HTTP API: an OpenAPI 3.1 document generated from the running
   deployment, plugin routes included.
+- Feature gate declared on disk in `features.js`, readable over the API and
+  writable only by whoever installs the deployment.
 
 ## API description
 
@@ -211,6 +213,60 @@ provider's own identifier for the account is remembered on first sign-in, and
 a later sign-in presenting a different one for the same address is refused —
 so an address that changes hands at the provider cannot pick up the record
 left behind.
+
+## What a deployment may do: `features.js`
+
+Which features a deployment has is an installation decision, so it is written
+in a file and nowhere else. `features.js` lives in the data directory, beside
+`settings.js` and `internals.js`, and core only ever reads it. There is no
+`/feature/edit` to go with `/setting/edit`: no session, no API token and no
+plugin can grant a feature that was not granted on disk, and its absence from
+the API is the guarantee rather than a gap.
+
+It is a JSON object. Each key is a feature name; each value is that feature's
+descriptor, in whatever shape the feature wants:
+
+```json
+{
+  "reports": { "formats": ["pdf", "csv"], "retention_days": 90 },
+  "sso": { "tenant": "acme" },
+  "beta_ui": null
+}
+```
+
+Core interprets exactly one thing here — the set of keys. Descriptors are
+carried through untouched, so there is no schema to violate and no format to
+migrate; a feature's own code is the only thing that has to understand its
+descriptor.
+
+- `GET /feature/list` — the declared names, sorted, as a JSON array. Any
+  signed-in caller: the UI a normal user looks at is the main thing that needs
+  to know which features exist. An API token needs the `read` scope.
+
+Descriptors are not served. They can hold quotas, tenant names and licence
+detail that the feature's implementation needs and a browser does not, so they
+stay on the server: core reads them through `Data::features()`, and a plugin
+asks for them over the plugin channel — `CoreHandle::features_all()`, with
+`features_get`, `features_has` and `features_list` beside it. Nothing in
+either direction writes them.
+
+The file is read once, at startup, exactly as `internals.js` is — an operator
+who edits it restarts core, and until then every reader in the process agrees
+about what the deployment may do.
+
+Two consequences worth stating plainly, both deliberate:
+
+- **A deployment with no `features.js` declares no features.** Empty is the
+  safe direction for a list that says what is *permitted* — unlike an empty
+  `settings.js`, which means defaults. A missing file is logged as a warning
+  and an unparseable one as an error, because those are the two ways a
+  deployment that should have features ends up with none.
+- **Updates must leave the data directory alone.** Core never writes
+  `features.js`, so nothing inside the server can lose it; what can is an
+  update script (`--update-script`, `POST /system/update`) that replaces more
+  than the binary. The same already applies to `settings.js`, `internals.js`,
+  `secrets.enc` and the key files, so a script that is safe for those is safe
+  for this.
 
 ## Dependencies
 
