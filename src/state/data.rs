@@ -23,6 +23,7 @@
  */
 use crate::args::{DEFAULT_BODY_TIMEOUT_SECS, DEFAULT_MAX_PAYLOAD_BYTES};
 use crate::handler::route_call::call_collection_read_hook;
+use crate::state::features::Features;
 use crate::state::route_cache::RouteCache;
 use crate::state::store::Store;
 use crate::state::store_local::*;
@@ -125,6 +126,12 @@ pub struct Data {
     /// startup via `rebuild_route_cache()` and treated as immutable from then
     /// on (matches the immutability of `internals.js` itself).
     pub route_cache: Mutex<Arc<RouteCache>>,
+
+    /// What this deployment is allowed to do, from `features.js`. Loaded once
+    /// at startup via `load_features()` and immutable from then on, for the
+    /// same reason `internals.js` is: it is an installation decision, not a
+    /// runtime one. Nothing here ever writes the file — see `state::features`.
+    pub features: Mutex<Arc<Features>>,
 }
 
 impl Data {
@@ -154,6 +161,7 @@ impl Data {
             plugin_registry: OnceLock::new(),
             core_handle: OnceLock::new(),
             route_cache: Mutex::new(Arc::new(RouteCache::default())),
+            features: Mutex::new(Arc::new(Features::new())),
         }
     }
 
@@ -204,6 +212,28 @@ impl Data {
             new.item_post_edit_wildcard.len(),
         );
         *self.route_cache.lock() = new;
+    }
+
+    /// Load `features.js` from the data directory.
+    ///
+    /// Called once at startup, after the data path is known. `features.js` is
+    /// treated as immutable for the life of the process, exactly as
+    /// `internals.js` is, so there is no invalidation to get wrong — an
+    /// operator who edits it restarts core, and until then every reader in
+    /// the process agrees about what the deployment may do.
+    pub fn load_features(&self) {
+        let data_path = self.data_path.lock().clone();
+        let new = Arc::new(Features::load(&data_path));
+        crate::state::features::log_summary(&new);
+        *self.features.lock() = new;
+    }
+
+    /// What this deployment may do.
+    ///
+    /// The full document, descriptors included — this is what plugins read.
+    /// The HTTP API serves only the names out of it; see `server::feature`.
+    pub fn features(&self) -> Arc<Features> {
+        self.features.lock().clone()
     }
 
     /// Check existence of collection
