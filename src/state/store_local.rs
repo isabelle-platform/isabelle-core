@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn get_items_returns_all_when_no_paging() {
-        let (_dir, mut store) = make_store_with_items(&[3, 1, 2, 5, 4]);
+        let (_dir, store) = make_store_with_items(&[3, 1, 2, 5, 4]);
         let rt = rt();
         let lr =
             rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", u64::MAX, u64::MAX));
@@ -603,7 +603,7 @@ mod tests {
     fn get_items_paginates_in_id_ascending_order() {
         // Items inserted out-of-order; with skip=2 limit=2 we must get the
         // 3rd and 4th by sorted id (3, 4), not arbitrary HashMap order.
-        let (_dir, mut store) = make_store_with_items(&[5, 1, 4, 2, 3]);
+        let (_dir, store) = make_store_with_items(&[5, 1, 4, 2, 3]);
         let rt = rt();
         let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", 2, 2));
         assert_eq!(sorted_ids(&lr), vec![3, 4]);
@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn get_items_limit_zero_returns_empty_page_but_full_total() {
-        let (_dir, mut store) = make_store_with_items(&[1, 2, 3]);
+        let (_dir, store) = make_store_with_items(&[1, 2, 3]);
         let rt = rt();
         let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", 0, 0));
         assert!(lr.map.is_empty());
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn get_items_id_range_filters_total_count_too() {
-        let (_dir, mut store) = make_store_with_items(&[1, 2, 3, 4, 5, 6, 7]);
+        let (_dir, store) = make_store_with_items(&[1, 2, 3, 4, 5, 6, 7]);
         let rt = rt();
         let lr = rt.block_on(store.get_items("test", 3, 5, "", "", 0, u64::MAX));
         assert_eq!(sorted_ids(&lr), vec![3, 4, 5]);
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn get_items_skip_past_end_yields_empty() {
-        let (_dir, mut store) = make_store_with_items(&[1, 2, 3]);
+        let (_dir, store) = make_store_with_items(&[1, 2, 3]);
         let rt = rt();
         let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", 10, u64::MAX));
         assert!(lr.map.is_empty());
@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn get_items_skip_max_is_treated_as_zero() {
         // skip = u64::MAX is the unset sentinel; must behave as 0.
-        let (_dir, mut store) = make_store_with_items(&[1, 2, 3]);
+        let (_dir, store) = make_store_with_items(&[1, 2, 3]);
         let rt = rt();
         let lr = rt.block_on(store.get_items("test", u64::MAX, u64::MAX, "", "", u64::MAX, 2));
         assert_eq!(sorted_ids(&lr), vec![1, 2]);
