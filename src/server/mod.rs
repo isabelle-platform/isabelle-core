@@ -35,3 +35,54 @@ pub mod setting;
 pub mod signin;
 pub mod system;
 pub mod user_control;
+
+/// The answer shape every one of these endpoints gives.
+///
+/// A `ProcessResult` document, always, whatever the status — clients here
+/// parse the body before they look at the status line, so an answer with no
+/// body is the one that makes `resp.json()` throw.
+pub(crate) mod reply {
+    use actix_web::HttpResponse;
+    use isabelle_dm::data_model::process_result::ProcessResult;
+    use std::collections::HashMap;
+
+    pub(crate) fn ok() -> HttpResponse {
+        ok_with(HashMap::new())
+    }
+
+    pub(crate) fn ok_with(data: HashMap<String, String>) -> HttpResponse {
+        HttpResponse::Ok().body(
+            serde_json::to_string(&ProcessResult {
+                succeeded: true,
+                error: String::new(),
+                data,
+            })
+            .unwrap(),
+        )
+    }
+
+    /// A success that names the id it just wrote.
+    pub(crate) fn ok_with_id(id: u64) -> HttpResponse {
+        let mut data = HashMap::new();
+        data.insert("id".to_string(), id.to_string());
+        ok_with(data)
+    }
+
+    pub(crate) fn err(msg: impl Into<String>) -> HttpResponse {
+        err_status(actix_web::http::StatusCode::OK, msg)
+    }
+
+    pub(crate) fn err_status(
+        status: actix_web::http::StatusCode,
+        msg: impl Into<String>,
+    ) -> HttpResponse {
+        HttpResponse::build(status).body(
+            serde_json::to_string(&ProcessResult {
+                succeeded: false,
+                error: msg.into(),
+                data: HashMap::new(),
+            })
+            .unwrap(),
+        )
+    }
+}

@@ -21,16 +21,15 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
+use crate::server::reply;
 use crate::server::user_control::*;
 use crate::state::state::*;
 use crate::util::multipart::{read_json_body, Limits};
 use actix_identity::Identity;
 use actix_web::{web, HttpRequest, HttpResponse};
 use isabelle_dm::data_model::item::Item;
-use isabelle_dm::data_model::process_result::ProcessResult;
 use log::error;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Deserialize)]
 pub struct SecretIdReq {
@@ -60,51 +59,6 @@ pub(crate) async fn ensure_admin(
     Ok(())
 }
 
-fn proc_err(msg: impl Into<String>) -> HttpResponse {
-    proc_err_status(actix_web::http::StatusCode::OK, msg)
-}
-
-/// A failure envelope at a chosen status.
-///
-/// Every other answer from these endpoints is a `ProcessResult` document, and
-/// clients parse the body before they look at the status. A bare
-/// `HttpResponse::NotFound()` sends no body at all, so the one answer that
-/// carries a distinct status was also the one that made `resp.json()` throw.
-fn proc_err_status(status: actix_web::http::StatusCode, msg: impl Into<String>) -> HttpResponse {
-    HttpResponse::build(status).body(
-        serde_json::to_string(&ProcessResult {
-            succeeded: false,
-            error: msg.into(),
-            data: HashMap::new(),
-        })
-        .unwrap(),
-    )
-}
-
-fn proc_ok_with_id(id: u64) -> HttpResponse {
-    let mut data_map: HashMap<String, String> = HashMap::new();
-    data_map.insert("id".to_string(), id.to_string());
-    HttpResponse::Ok().body(
-        serde_json::to_string(&ProcessResult {
-            succeeded: true,
-            error: "".to_string(),
-            data: data_map,
-        })
-        .unwrap(),
-    )
-}
-
-fn proc_ok() -> HttpResponse {
-    HttpResponse::Ok().body(
-        serde_json::to_string(&ProcessResult {
-            succeeded: true,
-            error: "".to_string(),
-            data: HashMap::new(),
-        })
-        .unwrap(),
-    )
-}
-
 /// Read this request's JSON body under the deployment's size and time limits.
 ///
 /// These endpoints used the `web::Json<T>` extractor, which honours the
@@ -131,7 +85,7 @@ async fn body_json<T: serde::de::DeserializeOwned>(
 /// that collided. So the space is closed here to everybody, administrators
 /// included: the way to change one is the screen it belongs to.
 fn reserved(name: &str) -> HttpResponse {
-    proc_err(format!(
+    reply::err(format!(
         "'{name}' is in the reserved '{}' name space, which holds this server's own \
          configuration. Change it on the screen it belongs to; secrets of your own can have \
          any other name.",
@@ -163,7 +117,7 @@ pub async fn secret_edit(
     let mut secrets = srv.secrets.lock();
     let store = match secrets.as_mut() {
         Some(s) => s,
-        None => return proc_err("secret store is not initialized"),
+        None => return reply::err("secret store is not initialized"),
     };
     if body.id != u64::MAX {
         if let Some(existing) = store.get(body.id) {
@@ -178,8 +132,8 @@ pub async fn secret_edit(
     // caller didn't include. Together with the "<hidden>" placeholder rule
     // in SecretStore::set, this lets a client round-trip a masked Item.
     match store.set(&body, true) {
-        Ok(id) => proc_ok_with_id(id),
-        Err(e) => proc_err(format!("failed to write secret: {}", e)),
+        Ok(id) => reply::ok_with_id(id),
+        Err(e) => reply::err(format!("failed to write secret: {}", e)),
     }
 }
 
@@ -200,11 +154,11 @@ pub async fn secret_get(
     let secrets = srv.secrets.lock();
     let store = match secrets.as_ref() {
         Some(s) => s,
-        None => return proc_err("secret store is not initialized"),
+        None => return reply::err("secret store is not initialized"),
     };
     match store.get_masked(body.id) {
         Some(item) => HttpResponse::Ok().body(serde_json::to_string(&item).unwrap()),
-        None => proc_err_status(
+        None => reply::err_status(
             actix_web::http::StatusCode::NOT_FOUND,
             "no such secret".to_string(),
         ),
@@ -228,7 +182,7 @@ pub async fn secret_del(
     let mut secrets = srv.secrets.lock();
     let store = match secrets.as_mut() {
         Some(s) => s,
-        None => return proc_err("secret store is not initialized"),
+        None => return reply::err("secret store is not initialized"),
     };
     // Closed the same way editing is, and for the same reason: an entry in
     // the reserved space is configuration the server needs to work, and
@@ -244,12 +198,12 @@ pub async fn secret_del(
     // to success left a client unable to tell a deletion from a no-op — the
     // one thing this call exists to confirm.
     match store.del(body.id) {
-        Ok(true) => proc_ok(),
-        Ok(false) => proc_err_status(
+        Ok(true) => reply::ok(),
+        Ok(false) => reply::err_status(
             actix_web::http::StatusCode::NOT_FOUND,
             "no such secret".to_string(),
         ),
-        Err(e) => proc_err(format!("failed to delete secret: {}", e)),
+        Err(e) => reply::err(format!("failed to delete secret: {}", e)),
     }
 }
 
@@ -269,7 +223,7 @@ pub async fn secret_list(
             .into_iter()
             .map(|(id, name)| SecretRef { id, name })
             .collect(),
-        None => return proc_err("secret store is not initialized"),
+        None => return reply::err("secret store is not initialized"),
     };
     HttpResponse::Ok().body(serde_json::to_string(&refs).unwrap())
 }
@@ -279,6 +233,7 @@ mod tests {
     use super::*;
     use actix_web::body::MessageBody;
     use actix_web::http::StatusCode;
+    use isabelle_dm::data_model::process_result::ProcessResult;
 
     fn parse(resp: HttpResponse) -> (StatusCode, ProcessResult) {
         let status = resp.status();
@@ -295,7 +250,7 @@ mod tests {
     /// that broke its parser.
     #[test]
     fn a_missing_secret_answers_404_with_a_parseable_body() {
-        let (status, result) = parse(proc_err_status(StatusCode::NOT_FOUND, "no such secret"));
+        let (status, result) = parse(reply::err_status(StatusCode::NOT_FOUND, "no such secret"));
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(!result.succeeded);
         assert_eq!(result.error, "no such secret");
@@ -306,7 +261,7 @@ mod tests {
     /// change.
     #[test]
     fn an_ordinary_failure_still_answers_200() {
-        let (status, result) = parse(proc_err("secret store is not initialized"));
+        let (status, result) = parse(reply::err("secret store is not initialized"));
         assert_eq!(status, StatusCode::OK);
         assert!(!result.succeeded);
         assert_eq!(result.error, "secret store is not initialized");
@@ -314,7 +269,7 @@ mod tests {
 
     #[test]
     fn success_is_reported_as_success() {
-        let (status, result) = parse(proc_ok());
+        let (status, result) = parse(reply::ok());
         assert_eq!(status, StatusCode::OK);
         assert!(result.succeeded);
         assert_eq!(result.error, "");

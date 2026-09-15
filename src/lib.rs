@@ -583,6 +583,9 @@ where
                 web::post().to(setting_gcal_auth_end),
             )
             .route("/system/update", web::post().to(system_update))
+            .route("/system/mail", web::get().to(system_mail))
+            .route("/system/mail", web::post().to(system_mail_save))
+            .route("/system/mail/forget", web::post().to(system_mail_forget))
             .route("/secret/edit", web::post().to(secret_edit))
             .route("/secret/del", web::post().to(secret_del))
             .route("/secret/list", web::get().to(secret_list))
