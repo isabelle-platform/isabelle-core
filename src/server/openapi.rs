@@ -859,6 +859,84 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
         }}),
     );
 
+    paths.insert(
+        "/system/mail".to_string(),
+        json!({
+            "get": {
+                "tags": ["system"],
+                "summary": "How mail is configured",
+                "description":
+                    "Administrators only. `data` carries `server`, `from`, `login` and \
+                     `password_set` — whether a password is stored, never which. The \
+                     password is not returned by this or any other endpoint.",
+                "responses": {
+                    "200": process_result_200.clone(),
+                    "401": empty_response("No session."),
+                    "403": empty_response("Not an admin."),
+                },
+            },
+            "post": {
+                "tags": ["system"],
+                "summary": "Configure mail",
+                "description":
+                    "Administrators only. The host and the sender are stored in the \
+                     settings; the credentials go to the encrypted secret store, under a \
+                     reserved name the generic secret endpoints refuse. An empty \
+                     `password`, or the placeholder `<hidden>`, leaves the stored one \
+                     alone — which is what a screen posts back, having never been given \
+                     it. A `from` that is not an address is refused here rather than \
+                     discovered later by mail that does not arrive.",
+                "requestBody": {
+                    "required": true,
+                    "content": { "application/json": { "schema": {
+                        "type": "object",
+                        "properties": {
+                            "server": { "type": "string" },
+                            "from": { "type": "string" },
+                            "login": { "type": "string" },
+                            "password": { "type": "string" },
+                        },
+                    }}},
+                },
+                "responses": {
+                    "200": process_result_200.clone(),
+                    "401": empty_response("No session."),
+                    "403": empty_response("Not an admin."),
+                },
+            },
+        }),
+    );
+
+    paths.insert(
+        "/system/mail/forget".to_string(),
+        json!({ "post": {
+            "tags": ["system"],
+            "summary": "Forget the mail configuration",
+            "description":
+                "Administrators only. Clears the host and the sender and removes the \
+                 stored credentials. Forgetting what was never configured succeeds.",
+            "responses": {
+                "200": process_result_200.clone(),
+                "401": empty_response("No session."),
+                "403": empty_response("Not an admin."),
+            },
+        }}),
+    );
+
+    // The same handlers answer at `/system/auth`, which is where configuring
+    // the server belongs; `/auth/config` is kept until every flavour's
+    // interface has moved. Both are described, so a client written against
+    // either finds it here — and described from one source, so they cannot
+    // drift into saying different things about one endpoint.
+    for (old, new) in [
+        ("/auth/config", "/system/auth"),
+        ("/auth/config/forget", "/system/auth/forget"),
+    ] {
+        if let Some(p) = paths.get(old).cloned() {
+            paths.insert(new.to_string(), p);
+        }
+    }
+
     let secret_id_body = json!({
         "required": true,
         "content": { "application/json": { "schema": {
@@ -1642,6 +1720,57 @@ mod tests {
             .collect();
         it.strstrs.insert(category.to_string(), inner);
         it
+    }
+
+    /// Configuring the server is described wherever it answers. The two
+    /// spellings of the sign-in configuration are one description, so they
+    /// cannot drift into saying different things about one endpoint, and the
+    /// mail endpoints are described at all — an endpoint missing from this
+    /// document is one a client author never learns exists.
+    #[test]
+    fn the_system_space_is_documented() {
+        let spec = build_spec("http://localhost:8090", &[], &[], false);
+        for path in [
+            "/system/update",
+            "/system/mail",
+            "/system/mail/forget",
+            "/system/auth",
+            "/system/auth/forget",
+        ] {
+            assert!(
+                spec["paths"][path].is_object(),
+                "{path} is not in the document"
+            );
+        }
+        // One description, two names. Everything but the operation id, which
+        // is derived from the path and has to differ — `every_operation_has_a
+        // _unique_id` is the test that says so.
+        let without_ids = |v: &Value| {
+            let mut v = v.clone();
+            if let Some(ops) = v.as_object_mut() {
+                for op in ops.values_mut() {
+                    if let Some(op) = op.as_object_mut() {
+                        op.remove("operationId");
+                    }
+                }
+            }
+            v
+        };
+        for (a, b) in [
+            ("/system/auth", "/auth/config"),
+            ("/system/auth/forget", "/auth/config/forget"),
+        ] {
+            assert_eq!(
+                without_ids(&spec["paths"][a]),
+                without_ids(&spec["paths"][b]),
+                "{a} and {b} describe one endpoint and must say the same about it"
+            );
+        }
+        // And the secret is never something this document offers to return.
+        let get = spec["paths"]["/system/mail"]["get"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(get.contains("never which"), "{get}");
     }
 
     /// A documented operation only reaches `/docs` if its tag is one the

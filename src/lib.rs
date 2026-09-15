@@ -560,6 +560,14 @@ where
             .route("/auth/methods", web::get().to(auth_methods))
             // Configuring them. Administrators only, and the secrets go one
             // way: what comes back says whether there is one, never what.
+            // Configuring who may sign in is configuring the server, so it
+            // belongs beside the rest of that — see `server::system`. The
+            // `/auth/config` spelling stays for now: this core serves every
+            // flavour, and renaming it would take the sign-in settings away
+            // from each of their interfaces until they had all been released.
+            .route("/system/auth", web::get().to(auth_config))
+            .route("/system/auth", web::post().to(auth_config_save))
+            .route("/system/auth/forget", web::post().to(auth_config_forget))
             .route("/auth/config", web::get().to(auth_config))
             .route("/auth/config", web::post().to(auth_config_save))
             .route("/auth/config/forget", web::post().to(auth_config_forget))

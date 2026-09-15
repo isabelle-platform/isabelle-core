@@ -32,6 +32,21 @@
 //!
 //! Secrets never come back out. A screen that shows what is configured shows
 //! that something is, not what it is.
+//!
+//! # What is here and what is not
+//!
+//! The test is: administrator-only, and about the deployment rather than
+//! about the caller. Mail is here. So is who may sign in, reachable as
+//! `/system/auth` — its handlers live in [`crate::server::auth_config`] and
+//! answer at `/auth/config` as well, because this core serves every flavour
+//! and renaming a route would take that screen away from each of their
+//! interfaces until they had all been released.
+//!
+//! `/auth/providers`, `/auth/methods` and the sign-in flow itself are not
+//! here and should not be: they answer "how do I sign in", which is a
+//! question the sign-in page asks without an account. Neither is
+//! `/feature/list`, which is deliberately open to any signed-in caller —
+//! the interface an ordinary user looks at is the main thing that needs it.
 use crate::server::user_control::*;
 
 use crate::server::reply;
