@@ -121,6 +121,24 @@ async fn body_json<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Why the reserved space is not editable here.
+///
+/// These entries are the application's own configuration — how it sends
+/// mail, who it trusts to sign people in — and each is written by the screen
+/// that owns it, which knows what a valid one looks like. Reached through
+/// this endpoint instead, they can be half-written, renamed, or created by
+/// somebody who only meant to save a password of their own and picked a name
+/// that collided. So the space is closed here to everybody, administrators
+/// included: the way to change one is the screen it belongs to.
+fn reserved(name: &str) -> HttpResponse {
+    proc_err(format!(
+        "'{name}' is in the reserved '{}' name space, which holds this server's own \
+         configuration. Change it on the screen it belongs to; secrets of your own can have \
+         any other name.",
+        crate::state::secrets::GLOBAL_PREFIX
+    ))
+}
+
 pub async fn secret_edit(
     user: Identity,
     data: web::Data<State>,
@@ -135,11 +153,26 @@ pub async fn secret_edit(
         Err(r) => return r,
     };
     let srv: &crate::state::data::Data = &data.server;
+    // Refused on the name that was sent and again on the one it would be
+    // changing: a request may not create an entry in the reserved space, and
+    // it may not reach into one by id either.
+    let wanted = body.safe_str("name", "");
+    if crate::state::secrets::is_global_name(&wanted) {
+        return reserved(&wanted);
+    }
     let mut secrets = srv.secrets.lock();
     let store = match secrets.as_mut() {
         Some(s) => s,
         None => return proc_err("secret store is not initialized"),
     };
+    if body.id != u64::MAX {
+        if let Some(existing) = store.get(body.id) {
+            let current = existing.safe_str("name", "");
+            if crate::state::secrets::is_global_name(&current) {
+                return reserved(&current);
+            }
+        }
+    }
     // Default to merge semantics: external clients cannot read raw values,
     // so a fresh PUT of a partial Item must not silently wipe fields the
     // caller didn't include. Together with the "<hidden>" placeholder rule
@@ -197,6 +230,16 @@ pub async fn secret_del(
         Some(s) => s,
         None => return proc_err("secret store is not initialized"),
     };
+    // Closed the same way editing is, and for the same reason: an entry in
+    // the reserved space is configuration the server needs to work, and
+    // removing it from here would leave the screen that owns it describing
+    // something that is no longer there.
+    if let Some(existing) = store.get(body.id) {
+        let name = existing.safe_str("name", "");
+        if crate::state::secrets::is_global_name(&name) {
+            return reserved(&name);
+        }
+    }
     // `del` reports whether anything was actually removed. Mapping every `Ok`
     // to success left a client unable to tell a deletion from a no-op — the
     // one thing this call exists to confirm.

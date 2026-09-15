@@ -135,7 +135,7 @@ fn html_to_text(html: &str) -> String {
 ///
 /// The same shape the identity providers and the directory use: one named
 /// entry, several fields, read by name.
-pub const SMTP_SECRET: &str = "smtp";
+pub const SMTP_SECRET: &str = "global.smtp";
 
 /// Who to log in to the mail server as.
 ///

@@ -84,8 +84,8 @@ impl Provider {
     /// switch to leave in the wrong position.
     pub fn secret_name(self) -> &'static str {
         match self {
-            Provider::Google => "oauth_google",
-            Provider::Apple => "oauth_apple",
+            Provider::Google => "global.oauth_google",
+            Provider::Apple => "global.oauth_apple",
         }
     }
 

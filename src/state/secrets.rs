@@ -58,6 +58,33 @@ fn is_secret_key(k: &str) -> bool {
     !METADATA_KEYS.iter().any(|m| lowered == *m)
 }
 
+/// The name space the application keeps for itself.
+///
+/// Everything under it is configuration the server reads to work at all —
+/// how it sends mail, who it trusts to sign people in — written by the
+/// screens that own those settings and by nothing else. A person's own
+/// secrets live outside it.
+///
+/// The prefix exists so that the two cannot be confused. Without it, an
+/// entry called `smtp` might be the mail configuration or might be something
+/// an administrator saved with that name, and the server would read whichever
+/// it found.
+pub const GLOBAL_PREFIX: &str = "global.";
+
+/// Whether this name belongs to the application rather than to a person.
+///
+/// Matched on the whole of `global`, not only on `global.`: a name like
+/// `globalsmtp` is close enough to one of ours to be worth refusing, and
+/// nothing is lost by keeping the whole word to ourselves.
+pub fn is_global_name(name: &str) -> bool {
+    name.trim().to_lowercase().starts_with("global")
+}
+
+/// The system name for a legacy one — `ldap` becomes `global.ldap`.
+pub fn global_name(name: &str) -> String {
+    format!("{GLOBAL_PREFIX}{name}")
+}
+
 #[derive(Serialize, Deserialize)]
 struct Envelope {
     v: u32,
@@ -240,6 +267,35 @@ impl SecretStore {
         }
         self.name_index.insert(name, target_id);
         Ok(target_id)
+    }
+
+    /// Move the application's own entries into its name space.
+    ///
+    /// An installation set up before the prefix existed has them under their
+    /// bare names, and the server would stop finding them the moment it
+    /// started looking for the prefixed ones. Renaming is done here, once, at
+    /// start-up, rather than by asking every reader to look in two places for
+    /// ever.
+    ///
+    /// An entry already under the prefix is left alone, and so is a legacy
+    /// one whose prefixed form already exists: two entries claiming to be the
+    /// same configuration is a question for a person, not something to
+    /// resolve by overwriting one of them.
+    pub fn adopt_global_names(&mut self, legacy: &[&str]) -> io::Result<Vec<String>> {
+        let mut moved = Vec::new();
+        for name in legacy {
+            let target = global_name(name);
+            if self.name_index.contains_key(&target) {
+                continue;
+            }
+            let Some(mut item) = self.get_by_name(name) else {
+                continue;
+            };
+            item.set_str(NAME_FIELD, &target);
+            self.set(&item, false)?;
+            moved.push(target);
+        }
+        Ok(moved)
     }
 
     pub fn del(&mut self, id: u64) -> io::Result<bool> {
@@ -1343,5 +1399,128 @@ mod tests {
         let raw = store.get(id).unwrap();
         assert_eq!(raw.strs.get(NAME_FIELD).cloned(), Some("svc".into()));
         assert_eq!(raw.strs.get("description").cloned(), Some("y".into()));
+    }
+
+    // -------- the reserved name space --------
+
+    /// The space the application keeps for itself. Matched on the whole
+    /// word, so that a name merely close to one of ours is refused too.
+    #[test]
+    fn the_reserved_space_is_recognised() {
+        for name in [
+            "global.smtp",
+            "global.ldap",
+            "GLOBAL.smtp",
+            " global.x ",
+            "globalsmtp",
+        ] {
+            assert!(is_global_name(name), "{name} should be reserved");
+        }
+        for name in ["smtp", "my-global-thing", "a.global", "", "glob"] {
+            assert!(!is_global_name(name), "{name} should not be reserved");
+        }
+        assert_eq!(global_name("smtp"), "global.smtp");
+    }
+
+    /// An installation set up before the prefix existed keeps the server's
+    /// own entries under their bare names, and nothing would find them again.
+    #[test]
+    fn legacy_entries_are_moved_into_the_reserved_space() {
+        let dir = tempdir().unwrap();
+        let (k, p) = paths(&dir);
+        let mut store = SecretStore::open(&k, &p).unwrap();
+        for (name, value) in [("smtp", "pw1"), ("ldap", "pw2"), ("mine", "pw3")] {
+            let mut itm = Item::new();
+            itm.id = u64::MAX;
+            itm.set_str("name", name);
+            itm.set_str("password", value);
+            store.set(&itm, false).unwrap();
+        }
+
+        let moved = store
+            .adopt_global_names(&["smtp", "ldap", "oauth_google"])
+            .unwrap();
+        assert_eq!(moved, vec!["global.smtp", "global.ldap"]);
+
+        // Moved, with their contents.
+        assert_eq!(
+            store
+                .get_by_name("global.smtp")
+                .unwrap()
+                .safe_str("password", ""),
+            "pw1"
+        );
+        assert_eq!(
+            store
+                .get_by_name("global.ldap")
+                .unwrap()
+                .safe_str("password", ""),
+            "pw2"
+        );
+        // The old names are gone, so nothing can shadow them later.
+        assert!(store.get_by_name("smtp").is_none());
+        assert!(store.get_by_name("ldap").is_none());
+        // Somebody's own entry is untouched.
+        assert_eq!(
+            store.get_by_name("mine").unwrap().safe_str("password", ""),
+            "pw3"
+        );
+        // One that was never there is not invented.
+        assert!(store.get_by_name("global.oauth_google").is_none());
+    }
+
+    /// Running it again changes nothing, which matters because it runs at
+    /// every start-up.
+    #[test]
+    fn adopting_twice_is_the_same_as_adopting_once() {
+        let dir = tempdir().unwrap();
+        let (k, p) = paths(&dir);
+        let mut store = SecretStore::open(&k, &p).unwrap();
+        let mut itm = Item::new();
+        itm.id = u64::MAX;
+        itm.set_str("name", "smtp");
+        itm.set_str("password", "pw");
+        store.set(&itm, false).unwrap();
+
+        assert_eq!(
+            store.adopt_global_names(&["smtp"]).unwrap(),
+            vec!["global.smtp"]
+        );
+        assert!(store.adopt_global_names(&["smtp"]).unwrap().is_empty());
+        assert_eq!(
+            store
+                .get_by_name("global.smtp")
+                .unwrap()
+                .safe_str("password", ""),
+            "pw"
+        );
+    }
+
+    /// Two entries claiming to be the same configuration is a question for a
+    /// person, not something to settle by overwriting one of them.
+    #[test]
+    fn a_legacy_entry_never_overwrites_one_already_in_the_space() {
+        let dir = tempdir().unwrap();
+        let (k, p) = paths(&dir);
+        let mut store = SecretStore::open(&k, &p).unwrap();
+        for (name, value) in [("smtp", "old"), ("global.smtp", "current")] {
+            let mut itm = Item::new();
+            itm.id = u64::MAX;
+            itm.set_str("name", name);
+            itm.set_str("password", value);
+            store.set(&itm, false).unwrap();
+        }
+        assert!(store.adopt_global_names(&["smtp"]).unwrap().is_empty());
+        assert_eq!(
+            store
+                .get_by_name("global.smtp")
+                .unwrap()
+                .safe_str("password", ""),
+            "current"
+        );
+        assert_eq!(
+            store.get_by_name("smtp").unwrap().safe_str("password", ""),
+            "old"
+        );
     }
 }

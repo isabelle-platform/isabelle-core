@@ -167,7 +167,7 @@ pub fn ldap_config(srv: &crate::state::data::Data) -> Option<crate::util::ldap::
 }
 
 /// The name of the secret-store entry that configures the directory.
-pub const LDAP_SECRET: &str = "ldap";
+pub const LDAP_SECRET: &str = "global.ldap";
 
 /// Where a directory entry's DN is remembered on a record.
 pub const LDAP_SUBJECT_KEY: &str = "ldap_dn";

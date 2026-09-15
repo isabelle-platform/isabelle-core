@@ -299,8 +299,18 @@ where
             let _ = std::fs::create_dir_all(parent);
         }
         match crate::state::secrets::SecretStore::open(&key_file, &store_file) {
-            Ok(s) => {
+            Ok(mut s) => {
                 info!("Secret store: opened ({} entries)", s.list().len());
+                // An installation set up before the reserved name space
+                // existed keeps the server's own entries under their bare
+                // names, and nothing would find them again. Moved once, here.
+                match s.adopt_global_names(&["smtp", "ldap", "oauth_google", "oauth_apple"]) {
+                    Ok(moved) if !moved.is_empty() => {
+                        info!("Secret store: adopted {}", moved.join(", "))
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::error!("Secret store: could not adopt system names: {}", e),
+                }
                 *srv.secrets.lock() = Some(s);
             }
             Err(e) => {
