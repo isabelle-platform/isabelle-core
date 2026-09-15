@@ -24,10 +24,11 @@
 
 use crate::state::store::Store;
 use lettre::message::header::ContentType;
-use lettre::message::{MultiPart, SinglePart};
+use lettre::message::{Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use log::{error, info};
+use std::time::Duration;
 
 /// What marks a body as a document to be rendered rather than text to be
 /// read as it stands.
@@ -147,57 +148,178 @@ pub async fn send_email(srv: &crate::state::data::Data, to: &str, subject: &str,
         return;
     }
 
+    let message = match build_message(&smtp_from, to, subject, body) {
+        Ok(m) => m,
+        Err(e) => {
+            // Not a panic. This runs inside the core task, the one that
+            // answers every plugin's database call, and a panic there takes
+            // that task with it: the senders stay alive, so every later
+            // request waits for a reply nobody will ever send. An address
+            // somebody typed into their profile must not be able to do that.
+            error!("Not sending: {}", e);
+            return;
+        }
+    };
+
+    // Off the core task, and not waited for.
+    //
+    // The transport is lettre's blocking one, and the conversation it has —
+    // DNS, TLS, then SMTP itself — is seconds on a good day and the whole
+    // timeout on a bad one. Run here, it would hold the loop that carries
+    // every plugin's reads and writes, so a mail server that stopped
+    // answering would stop the application. Nothing needs the result: the
+    // caller was never given one, because `send_email` has no reply channel.
+    let server = smtp_server.clone();
+    let creds = Credentials::new(smtp_login.to_owned(), smtp_password.to_owned());
+    actix_rt::task::spawn_blocking(move || {
+        let relay = match SmtpTransport::relay(&server) {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Cannot reach the mail server '{}': {:?}", server, e);
+                return;
+            }
+        };
+        // Said here rather than left to the library's default, so that the
+        // longest this can take is a number somebody chose.
+        let mailer = relay.credentials(creds).timeout(Some(SMTP_TIMEOUT)).build();
+        match mailer.send(&message) {
+            Ok(_) => info!("Email sent successfully"),
+            Err(e) => error!("Could not send email: {:?}", e),
+        }
+    });
+}
+
+/// How long one attempt at the whole SMTP conversation may take.
+///
+/// Thirty seconds. Long enough for a slow relay to answer, short enough that
+/// a queue of messages to a server that has gone away drains in minutes
+/// rather than hours.
+const SMTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The message, or why there is not one.
+///
+/// Every failure here used to be an `unwrap`. The addresses are the reason
+/// that mattered: `from` is a setting an operator typed and `to` is whatever
+/// a person put in their profile, and neither is checked anywhere else.
+fn build_message(from: &str, to: &str, subject: &str, body: &str) -> Result<Message, String> {
+    let from: Mailbox = from
+        .parse()
+        .map_err(|e| format!("'smtp_from' is not an address ({from:?}): {e}"))?;
+    let to: Mailbox = to
+        .parse()
+        .map_err(|e| format!("not an address ({to:?}): {e}"))?;
+
     // A body that is an HTML document is sent as one, with the same message
     // in plain text beside it for a client that will not render it. Anything
     // else is text, exactly as it always was: this is additive, and a caller
     // that has never heard of it is unaffected.
+    let builder = Message::builder().from(from).to(to).subject(subject);
     let built = if is_html_document(body) {
-        Message::builder()
-            .from(smtp_from.parse().unwrap())
-            .to(to.parse().unwrap())
-            .subject(subject)
-            .multipart(
-                MultiPart::alternative()
-                    .singlepart(
-                        SinglePart::builder()
-                            .header(ContentType::TEXT_PLAIN)
-                            .body(html_to_text(body)),
-                    )
-                    .singlepart(
-                        SinglePart::builder()
-                            .header(ContentType::TEXT_HTML)
-                            .body(String::from(body)),
-                    ),
-            )
+        builder.multipart(
+            MultiPart::alternative()
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_PLAIN)
+                        .body(html_to_text(body)),
+                )
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_HTML)
+                        .body(String::from(body)),
+                ),
+        )
     } else {
-        Message::builder()
-            .from(smtp_from.parse().unwrap())
-            .to(to.parse().unwrap())
-            .subject(subject)
+        builder
             .header(ContentType::TEXT_PLAIN)
             .body(String::from(body))
     };
-    let email = built.unwrap();
-
-    let creds = Credentials::new(smtp_login.to_owned(), smtp_password.to_owned());
-
-    info!("Sending email...");
-    // Open a remote connection to gmail
-    let mailer = SmtpTransport::relay(&smtp_server)
-        .unwrap()
-        .credentials(creds)
-        .build();
-
-    // Send the email
-    match mailer.send(&email) {
-        Ok(_) => println!("Email sent successfully!"),
-        Err(e) => error!("Could not send email: {:?}", e),
-    }
+    built.map_err(|e| format!("could not build the message: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reason this exists. `send_email` runs inside the core task — the
+    /// one that answers every plugin's database call — and a panic there
+    /// takes that task with it: the senders stay alive, so every later
+    /// request waits for a reply nobody will ever send. An address somebody
+    /// typed into their profile must not be able to do that, and until this
+    /// it could.
+    #[test]
+    fn a_bad_address_is_an_error_and_never_a_panic() {
+        for bad in [
+            "",
+            "not an address",
+            "a@b@c",
+            "@example.com",
+            "a@",
+            "a b@c.dev",
+        ] {
+            let r = build_message("from@example.com", bad, "s", "b");
+            assert!(r.is_err(), "accepted {bad:?} as a recipient");
+            assert!(r.unwrap_err().contains("not an address"));
+        }
+        // And the setting, which an operator types and nothing else checks.
+        let r = build_message("nonsense", "to@example.com", "s", "b");
+        assert!(r.is_err());
+        assert!(
+            r.unwrap_err().contains("smtp_from"),
+            "it should name the setting"
+        );
+    }
+
+    /// What a good one does.
+    #[test]
+    fn a_good_address_builds_a_message() {
+        assert!(build_message("from@example.com", "to@example.com", "s", "b").is_ok());
+        // The forms a mail client writes.
+        assert!(build_message(
+            "Proteos <from@example.com>",
+            "Someone <to@example.com>",
+            "s",
+            "b"
+        )
+        .is_ok());
+    }
+
+    /// Plain text goes out as it always did, so a caller that has never heard
+    /// of documents is unaffected.
+    #[test]
+    fn text_is_still_sent_as_text() {
+        let m = build_message(
+            "f@e.dev",
+            "t@e.dev",
+            "Your login code",
+            "Enter this: 123456",
+        )
+        .expect("a message");
+        let wire = String::from_utf8_lossy(&m.formatted()).to_string();
+        assert!(wire.contains("text/plain"), "{wire}");
+        assert!(!wire.contains("multipart/alternative"), "{wire}");
+        assert!(wire.contains("Enter this: 123456"));
+    }
+
+    /// A document goes out as both halves, so neither reader is served a
+    /// compromise.
+    #[test]
+    fn a_document_is_sent_as_both_halves() {
+        let html = "<!DOCTYPE html><html><body><h1>Ready</h1><p>at a.dev</p></body></html>";
+        let m = build_message("f@e.dev", "t@e.dev", "Ready", html).expect("a message");
+        let wire = String::from_utf8_lossy(&m.formatted()).to_string();
+        assert!(wire.contains("multipart/alternative"), "{wire}");
+        assert!(wire.contains("text/plain"), "{wire}");
+        assert!(wire.contains("text/html"), "{wire}");
+        // And the text half carries the words, not the markup.
+        assert!(wire.contains("Ready"));
+    }
+
+    /// The longest one attempt may take is a number somebody chose, not a
+    /// library default nobody has read.
+    #[test]
+    fn the_conversation_has_a_deadline() {
+        assert_eq!(SMTP_TIMEOUT, Duration::from_secs(30));
+    }
 
     /// An exact marker, not a guess. A message that merely mentions a tag —
     /// an error quoting markup back at somebody — must not arrive as a web
