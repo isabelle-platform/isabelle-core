@@ -23,6 +23,7 @@
  */
 
 use crate::state::store::Store;
+use isabelle_dm::data_model::item::Item;
 use lettre::message::header::ContentType;
 use lettre::message::{Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
@@ -130,6 +131,48 @@ fn html_to_text(html: &str) -> String {
     lines.join("\n")
 }
 
+/// The name of the secret-store entry that holds the mail credentials.
+///
+/// The same shape the identity providers and the directory use: one named
+/// entry, several fields, read by name.
+pub const SMTP_SECRET: &str = "smtp";
+
+/// Who to log in to the mail server as.
+///
+/// From the secret store, which is encrypted at rest under a key of its own,
+/// and from the settings only when the store has nothing to say. A password
+/// in `settings.js` is a password in every backup of it and in every copy
+/// somebody made of the data directory to debug something — which is the
+/// whole reason the store exists.
+///
+/// The fallback is not a courtesy to be tidied away later: an installation
+/// that has the password in its settings keeps working across this change,
+/// and moving it is then something an operator does when they choose to
+/// rather than something that happens to their mail while they are asleep.
+fn smtp_credentials(srv: &crate::state::data::Data, settings: &Item) -> (String, String) {
+    // The guard is dropped at the end of this block and never held across an
+    // await: the store is behind a mutex the HTTP handlers take too.
+    let from_store = {
+        let guard = srv.secrets.lock();
+        guard.as_ref().and_then(|s| s.get_by_name(SMTP_SECRET))
+    };
+    if let Some(item) = from_store {
+        let login = item.safe_str("login", "");
+        let password = item.safe_str("password", "");
+        if !login.is_empty() || !password.is_empty() {
+            return (login, password);
+        }
+        // An entry with neither is an entry somebody emptied. Falling through
+        // to the settings here would quietly bring back the value they were
+        // trying to remove.
+        return (String::new(), String::new());
+    }
+    (
+        settings.safe_str("smtp_login", ""),
+        settings.safe_str("smtp_password", ""),
+    )
+}
+
 /// Send the email using predefined global options
 pub async fn send_email(srv: &crate::state::data::Data, to: &str, subject: &str, body: &str) {
     info!("Checking options...");
@@ -137,9 +180,8 @@ pub async fn send_email(srv: &crate::state::data::Data, to: &str, subject: &str,
     let settings = srv.rw.get_settings().await.clone();
 
     let smtp_server = settings.safe_str("smtp_server", "");
-    let smtp_login = settings.safe_str("smtp_login", "");
-    let smtp_password = settings.safe_str("smtp_password", "");
     let smtp_from = settings.safe_str("smtp_from", "");
+    let (smtp_login, smtp_password) = smtp_credentials(srv, &settings);
 
     info!("Building email...");
 
@@ -239,6 +281,79 @@ fn build_message(from: &str, to: &str, subject: &str, body: &str) -> Result<Mess
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store with the credentials in it, for the tests below.
+    fn data_with_secret(login: &str, password: &str) -> crate::state::data::Data {
+        let dir = std::env::temp_dir().join(format!(
+            "isabelle-smtp-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store =
+            crate::state::secrets::SecretStore::open(&dir.join("key"), &dir.join("secrets.enc"))
+                .unwrap();
+        let mut itm = Item::new();
+        itm.id = u64::MAX;
+        itm.set_str("name", SMTP_SECRET);
+        itm.set_str("login", login);
+        itm.set_str("password", password);
+        store.set(&itm, false).unwrap();
+
+        let data = crate::state::data::Data::new();
+        *data.secrets.lock() = Some(store);
+        data
+    }
+
+    fn settings_with(login: &str, password: &str) -> Item {
+        let mut s = Item::new();
+        s.set_str("smtp_login", login);
+        s.set_str("smtp_password", password);
+        s
+    }
+
+    /// The point of the change: a password in `settings.js` is a password in
+    /// every backup of it, so the store is asked first.
+    #[test]
+    fn the_credentials_come_from_the_secret_store() {
+        let data = data_with_secret("mailer", "s3cret");
+        let (login, password) = smtp_credentials(&data, &settings_with("old", "stale"));
+        assert_eq!(login, "mailer");
+        assert_eq!(password, "s3cret");
+    }
+
+    /// An installation that has them in its settings keeps working across
+    /// this change: moving them is something an operator does when they
+    /// choose to, not something that happens to their mail while they sleep.
+    #[test]
+    fn the_settings_are_used_when_the_store_has_nothing() {
+        let data = crate::state::data::Data::new();
+        let (login, password) = smtp_credentials(&data, &settings_with("from-settings", "pw"));
+        assert_eq!(login, "from-settings");
+        assert_eq!(password, "pw");
+    }
+
+    /// An entry somebody emptied is an entry somebody emptied. Falling back
+    /// to the settings there would quietly restore the value they were
+    /// trying to take away.
+    #[test]
+    fn an_emptied_entry_does_not_bring_the_old_value_back() {
+        let data = data_with_secret("", "");
+        let (login, password) = smtp_credentials(&data, &settings_with("old", "stale"));
+        assert_eq!(login, "");
+        assert_eq!(password, "");
+    }
+
+    /// Half an entry is still the entry: an operator who set only the
+    /// password there has moved that one, and the login beside it is theirs.
+    #[test]
+    fn a_partly_filled_entry_is_still_the_answer() {
+        let data = data_with_secret("", "s3cret");
+        let (login, password) = smtp_credentials(&data, &settings_with("old", "stale"));
+        assert_eq!(login, "");
+        assert_eq!(password, "s3cret");
+    }
 
     /// The reason this exists. `send_email` runs inside the core task — the
     /// one that answers every plugin's database call — and a panic there
