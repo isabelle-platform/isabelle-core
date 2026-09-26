@@ -47,11 +47,16 @@ use actix_web::{web, HttpRequest, HttpResponse};
 /// admin-only answer would leave it guessing. It says nothing about the
 /// caller, so it discloses nothing one account could not learn from another.
 pub async fn feature_list(
-    _user: Identity,
+    user: Option<Identity>,
     data: web::Data<State>,
     _req: HttpRequest,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
+    // What the deployment can do decides what a public instance shows its
+    // anonymous readers, so they are told too; nobody else is.
+    if user.is_none() && !crate::server::public_read::is_public(srv).await {
+        return HttpResponse::Unauthorized().into();
+    }
     let features = srv.features();
     HttpResponse::Ok().json(features.names())
 }

@@ -107,11 +107,14 @@ pub async fn call_item_list_db_filter_hook(
 
 pub async fn call_url_route(
     srv: &crate::state::data::Data,
-    user: Identity,
+    user: Option<Identity>,
     hndl: &str,
     query: &str,
 ) -> HttpResponse {
-    let usr: Option<Item> = get_user(srv, principal(&user)).await;
+    let usr: Option<Item> = match &user {
+        Some(u) => get_user(srv, principal(u)).await,
+        None => None,
+    };
     let wr = call_url_route_actor(srv, hndl, &usr, query).await;
     if matches!(wr, WebResponse::NotImplemented) {
         return HttpResponse::NotFound().into();

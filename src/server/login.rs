@@ -456,6 +456,14 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
     user.licensed_to = pick("licensed_to", "default_licensed_to", "end user");
     let language = pick("language", "default_language", "en");
     user.params.insert("language".to_string(), language);
+    // Whether a visitor with no session may read: the UI shows a public
+    // instance to them instead of sending them to the sign-in.
+    user.params.insert(
+        "public".to_string(),
+        settings
+            .safe_bool(crate::server::public_read::SETTING_PUBLIC, false)
+            .to_string(),
+    );
 
     let identity = match _user.as_ref().and_then(|i| i.id().ok()) {
         Some(email) if srv.has_collection("user") => email,

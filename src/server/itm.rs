@@ -340,9 +340,12 @@ pub async fn itm_del(user: Identity, data: web::Data<State>, req: HttpRequest) -
 /// Action that is called on any attempt to list database items.
 /// This function invokes all necessary hooks before giving away the list
 /// in form of json array.
-pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) -> HttpResponse {
+pub async fn itm_list(
+    user: Option<Identity>,
+    data: web::Data<State>,
+    req: HttpRequest,
+) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, principal(&user)).await;
 
     let mut lq = match serde_qs::from_str::<ListQuery>(&req.query_string()) {
         Ok(v) => v,
@@ -367,6 +370,19 @@ pub async fn itm_list(user: Identity, data: web::Data<State>, req: HttpRequest) 
         error!("Collection {} doesn't exist", lq.collection);
         return HttpResponse::BadRequest().into();
     }
+
+    // No session: only on a public instance, and only the collections its
+    // flavour opened (see `public_read`). The hooks below are then called
+    // with no user and narrow the rest.
+    let usr = match &user {
+        Some(u) => get_user(srv, principal(u)).await,
+        None => {
+            if !crate::server::public_read::anonymous_may_list(srv, &lq.collection).await {
+                return HttpResponse::Unauthorized().into();
+            }
+            None
+        }
+    };
 
     // The caller's filter and sort key both reach Mongo, and both leak through
     // `total_count`, which is counted on the raw query before any list filter

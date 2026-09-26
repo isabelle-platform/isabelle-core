@@ -38,11 +38,17 @@ use std::collections::HashMap;
 /// Call HTTP URL hooks. This function checks actual location from request
 /// first.
 pub async fn url_route(
-    user: Identity,
+    user: Option<Identity>,
     data: actix_web::web::Data<State>,
     req: HttpRequest,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
+    // A plugin's GET routes are read routes. On a public instance they are
+    // called without a user, and the plugin's own guard decides which of
+    // them that is enough for; otherwise a session is needed, as always.
+    if user.is_none() && !crate::server::public_read::is_public(srv).await {
+        return HttpResponse::Unauthorized().into();
+    }
     let cache = srv.route_cache.lock().clone();
 
     trace!("Custom URL: {}", req.path());
