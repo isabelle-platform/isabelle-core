@@ -105,16 +105,33 @@ pub async fn setting_edit(
 }
 
 pub async fn setting_list(
-    user: Identity,
+    user: Option<Identity>,
     data: web::Data<State>,
     _req: HttpRequest,
 ) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
-    let usr = get_user(srv, principal(&user)).await;
+    let usr = match &user {
+        Some(u) => get_user(srv, principal(u)).await,
+        None => None,
+    };
 
-    // Non-admins can't list settings
+    // Everybody else who may read gets the part the flavour names — the
+    // screens every reader opens need the site's name and its sections — and
+    // nobody else gets anything.
     if !check_role(srv, &usr, "admin").await {
-        return HttpResponse::Forbidden().into();
+        let may_read = match &usr {
+            Some(u) => u.safe_bool("role_is_active", false),
+            None => user.is_none() && crate::server::public_read::is_public(srv).await,
+        };
+        if !may_read {
+            return if user.is_none() {
+                HttpResponse::Unauthorized().into()
+            } else {
+                HttpResponse::Forbidden().into()
+            };
+        }
+        let st = crate::server::public_read::public_settings(srv).await;
+        return HttpResponse::Ok().body(serde_json::to_string(&st).unwrap());
     }
 
     // Return settings finally

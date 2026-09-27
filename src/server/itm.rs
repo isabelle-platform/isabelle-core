@@ -377,8 +377,18 @@ pub async fn itm_list(
     let usr = match &user {
         Some(u) => get_user(srv, principal(u)).await,
         None => {
-            if !crate::server::public_read::anonymous_may_list(srv, &lq.collection).await {
+            if !crate::server::public_read::is_public(srv).await {
                 return HttpResponse::Unauthorized().into();
+            }
+            if !crate::server::public_read::anonymous_may_list(srv, &lq.collection).await {
+                // A public instance answers a visitor's question about what
+                // it did not open with nothing, not with a refusal: see
+                // `public_read`.
+                let empty = ListResult {
+                    map: HashMap::new(),
+                    total_count: 0,
+                };
+                return HttpResponse::Ok().body(serde_json::to_string(&empty).unwrap());
             }
             None
         }

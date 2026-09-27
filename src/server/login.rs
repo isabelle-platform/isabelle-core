@@ -460,9 +460,7 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
     // instance to them instead of sending them to the sign-in.
     user.params.insert(
         "public".to_string(),
-        settings
-            .safe_bool(crate::server::public_read::SETTING_PUBLIC, false)
-            .to_string(),
+        crate::server::public_read::is_public(srv).await.to_string(),
     );
 
     let identity = match _user.as_ref().and_then(|i| i.id().ok()) {
