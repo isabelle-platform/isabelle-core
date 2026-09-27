@@ -239,6 +239,15 @@ async fn handle_message(state: &State, msg: CoreMessage) {
             let res = srv.secrets.lock().as_ref().and_then(|s| s.get(id));
             let _ = reply.send(res);
         }
+        CoreMessage::SecretList { reply } => {
+            let res = srv
+                .secrets
+                .lock()
+                .as_ref()
+                .map(|s| s.list())
+                .unwrap_or_default();
+            let _ = reply.send(res);
+        }
 
         // -------- Features --------
         CoreMessage::FeaturesGetAll { reply } => {
@@ -312,6 +321,46 @@ mod tests {
                 "verify should reject the wrong password"
             );
         });
+    }
+
+    /// A plugin finds a credential by the name a person gave it, and learns
+    /// nothing else from the listing: the material stays behind `SecretGet`.
+    #[test]
+    fn a_plugin_lists_secrets_by_name_only() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        let dir = std::env::temp_dir().join(format!("isabelle-secret-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        local.block_on(&rt, async {
+            let state = State::new();
+            {
+                let mut store = crate::state::secrets::SecretStore::open(
+                    &dir.join(".secret-key"),
+                    &dir.join("secrets.enc"),
+                )
+                .unwrap();
+                for (name, value) in [("lab login", "hunter2"), ("git token", "ghp_x")] {
+                    let mut it = isabelle_dm::data_model::item::Item::new();
+                    it.id = u64::MAX;
+                    it.set_str("name", name);
+                    it.set_str("secret_value", value);
+                    store.set(&it, false).unwrap();
+                }
+                *state.server.secrets.lock() = Some(store);
+            }
+            let handle = spawn_core_task(state);
+
+            let listed = handle.secret_list().await.expect("core answers");
+            let names: Vec<&str> = listed.iter().map(|(_, n)| n.as_str()).collect();
+            assert_eq!(names, ["git token", "lab login"]);
+            let text = format!("{:?}", listed);
+            assert!(!text.contains("hunter2") && !text.contains("ghp_x"));
+        });
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A plugin asks what the deployment may do, and gets the descriptors —
