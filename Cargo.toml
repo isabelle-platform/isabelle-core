@@ -40,7 +40,7 @@ ldap3 = { version = "0.12", default-features = false, features = [
 	"tls-rustls-ring",
 ] }
 isabelle-dm = { "git" = "https://github.com/isabelle-platform/isabelle-dm", tag = "1.10.0" }
-isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.26.0" }
+isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.27.0" }
 lettre = { version = "0.11.11", features = [
 	"rustls-tls",
 	"smtp-transport",
