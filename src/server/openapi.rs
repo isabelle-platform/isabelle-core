@@ -228,7 +228,7 @@ pub fn build_spec(
             { "name": "items", "description": "The generic collection store." },
             { "name": "settings", "description": "Deployment settings. Admin only." },
             { "name": "features", "description": "What this deployment may do. Read-only over HTTP; edited on disk." },
-            { "name": "secrets", "description": "Encrypted secret store. Admin only." },
+            { "name": "secrets", "description": "Encrypted secret store. Every active account keeps its own secrets; administrators see them all." },
             { "name": "system", "description": "Operational endpoints. Admin only." },
             { "name": "meta", "description": "This document." },
             { "name": "plugin", "description": "Plugin routes requiring a session." },
@@ -756,7 +756,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
             "responses": {
                 "200": json_response("The settings item.", schema_ref("Item")),
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
             },
         }}),
     );
@@ -800,7 +800,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
                 "200": process_result_200.clone(),
                 "400": empty_response("Malformed query."),
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
                 "413": empty_response("Body over `--max-payload`."),
                 "500": json_response("The settings write did not reach the store.", schema_ref("ProcessResult")),
             },
@@ -816,7 +816,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
                 "200": { "description": "The Google consent URL to send the admin to.",
                          "content": { "text/plain": { "schema": { "type": "string" } } } },
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
             },
         }}),
     );
@@ -837,7 +837,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
                          "content": { "text/plain": { "schema": { "type": "string" } } } },
                 "400": empty_response("A query missing any of the three parameters."),
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
             },
         }}),
     );
@@ -854,7 +854,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
             "responses": {
                 "200": process_result_200.clone(),
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
             },
         }}),
     );
@@ -872,7 +872,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
                 "responses": {
                     "200": process_result_200.clone(),
                     "401": empty_response("No session."),
-                    "403": empty_response("Not an admin."),
+                    "403": empty_response("No active account."),
                 },
             },
             "post": {
@@ -901,7 +901,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
                 "responses": {
                     "200": process_result_200.clone(),
                     "401": empty_response("No session."),
-                    "403": empty_response("Not an admin."),
+                    "403": empty_response("No active account."),
                 },
             },
         }),
@@ -918,7 +918,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
             "responses": {
                 "200": process_result_200.clone(),
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
             },
         }}),
     );
@@ -953,10 +953,10 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
             "summary": "List secret ids and names",
             "description": "Names and ids only — values are never listed.",
             "responses": {
-                "200": json_response("Every stored secret, by reference.",
+                "200": json_response("The caller's secrets (every one, for an administrator), by reference.",
                     json!({ "type": "array", "items": schema_ref("SecretRef") })),
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
             },
         }}),
     );
@@ -974,7 +974,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
             "responses": {
                 "200": json_response("The secret item, with values masked.", schema_ref("Item")),
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
                 "404": json_response("No such secret.", schema_ref("ProcessResult")),
             },
         }}),
@@ -987,7 +987,9 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
             "summary": "Create or update a secret",
             "description":
                 "Merge semantics: fields the caller omits keep their stored values, and a \
-                 field sent as `<hidden>` is left untouched.",
+                 field sent as `<hidden>` is left untouched. A new secret belongs to its \
+                 caller (`ids.owner`); only its owner and administrators may read, change or \
+                 delete it, and to anybody else it answers as if it did not exist.",
             "requestBody": {
                 "required": true,
                 "content": { "application/json": { "schema": schema_ref("Item") } },
@@ -996,7 +998,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
                 "200": json_response("`data.id` carries the stored id.", schema_ref("ProcessResult")),
                 "400": empty_response("Body malformed, or not read within the deadline."),
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
                 "413": empty_response("Body over `--max-payload`."),
             },
         }}),
@@ -1011,7 +1013,7 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
             "responses": {
                 "200": json_response("Removed.", schema_ref("ProcessResult")),
                 "401": empty_response("No session."),
-                "403": empty_response("Not an admin."),
+                "403": empty_response("No active account."),
                 "404": json_response("There was nothing to remove.", schema_ref("ProcessResult")),
             },
         }}),

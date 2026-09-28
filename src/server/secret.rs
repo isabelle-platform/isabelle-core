@@ -59,6 +59,46 @@ pub(crate) async fn ensure_admin(
     Ok(())
 }
 
+/// Who is asking, as far as secrets are concerned.
+///
+/// Anybody with an active account may keep secrets: a person connecting a
+/// node of their own needs somewhere to put its password. Each secret belongs
+/// to whoever stored it (`owner::FIELD_OWNER`), and only its owner and the
+/// administrators see or change it. Entries stored before secrets had owners
+/// have none, and are the administrators'.
+struct Caller {
+    id: u64,
+    admin: bool,
+}
+
+impl Caller {
+    fn may_touch(&self, secret: &Item) -> bool {
+        crate::server::owner::may_touch(secret, self.id, self.admin)
+    }
+}
+
+async fn caller(data: &web::Data<State>, user: &Identity) -> Result<Caller, HttpResponse> {
+    let srv: &crate::state::data::Data = &data.server;
+    let usr = get_user(srv, principal(user)).await;
+    if !check_role(srv, &usr, "active").await {
+        return Err(HttpResponse::Forbidden().into());
+    }
+    let admin = check_role(srv, &usr, "admin").await;
+    match usr {
+        Some(u) => Ok(Caller { id: u.id, admin }),
+        None => Err(HttpResponse::Forbidden().into()),
+    }
+}
+
+/// The answer for a secret the caller may not see: the same as for one that
+/// is not there, so that asking discloses nothing.
+fn no_such_secret() -> HttpResponse {
+    reply::err_status(
+        actix_web::http::StatusCode::NOT_FOUND,
+        "no such secret".to_string(),
+    )
+}
+
 /// Read this request's JSON body under the deployment's size and time limits.
 ///
 /// These endpoints used the `web::Json<T>` extractor, which honours the
@@ -99,10 +139,11 @@ pub async fn secret_edit(
     _req: HttpRequest,
     mut payload: web::Payload,
 ) -> HttpResponse {
-    if let Err(r) = ensure_admin(&data, &user).await {
-        return r;
-    }
-    let body: Item = match body_json(&data, &mut payload).await {
+    let me = match caller(&data, &user).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let mut body: Item = match body_json(&data, &mut payload).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -119,20 +160,32 @@ pub async fn secret_edit(
         Some(s) => s,
         None => return reply::err("secret store is not initialized"),
     };
-    if body.id != u64::MAX {
-        if let Some(existing) = store.get(body.id) {
-            let current = existing.safe_str("name", "");
-            if crate::state::secrets::is_global_name(&current) {
-                return reserved(&current);
-            }
+    let existing = if body.id != u64::MAX {
+        store.get(body.id)
+    } else {
+        None
+    };
+    if let Some(existing) = &existing {
+        if !me.may_touch(existing) {
+            return no_such_secret();
+        }
+        let current = existing.safe_str("name", "");
+        if crate::state::secrets::is_global_name(&current) {
+            return reserved(&current);
         }
     }
+    crate::server::owner::stamp(&mut body, existing.as_ref(), me.id);
     // Default to merge semantics: external clients cannot read raw values,
     // so a fresh PUT of a partial Item must not silently wipe fields the
     // caller didn't include. Together with the "<hidden>" placeholder rule
     // in SecretStore::set, this lets a client round-trip a masked Item.
     match store.set(&body, true) {
         Ok(id) => reply::ok_with_id(id),
+        // Names are unique across the store, so a taken one may be somebody
+        // else's: say that it is taken, not whose it is.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && !me.admin => reply::err(
+            format!("a secret named '{wanted}' already exists; choose another name"),
+        ),
         Err(e) => reply::err(format!("failed to write secret: {}", e)),
     }
 }
@@ -143,9 +196,10 @@ pub async fn secret_get(
     _req: HttpRequest,
     mut payload: web::Payload,
 ) -> HttpResponse {
-    if let Err(r) = ensure_admin(&data, &user).await {
-        return r;
-    }
+    let me = match caller(&data, &user).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
     let body: SecretIdReq = match body_json(&data, &mut payload).await {
         Ok(v) => v,
         Err(r) => return r,
@@ -157,11 +211,10 @@ pub async fn secret_get(
         None => return reply::err("secret store is not initialized"),
     };
     match store.get_masked(body.id) {
-        Some(item) => HttpResponse::Ok().body(serde_json::to_string(&item).unwrap()),
-        None => reply::err_status(
-            actix_web::http::StatusCode::NOT_FOUND,
-            "no such secret".to_string(),
-        ),
+        Some(item) if me.may_touch(&item) => {
+            HttpResponse::Ok().body(serde_json::to_string(&item).unwrap())
+        }
+        _ => no_such_secret(),
     }
 }
 
@@ -171,9 +224,10 @@ pub async fn secret_del(
     _req: HttpRequest,
     mut payload: web::Payload,
 ) -> HttpResponse {
-    if let Err(r) = ensure_admin(&data, &user).await {
-        return r;
-    }
+    let me = match caller(&data, &user).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
     let body: SecretIdReq = match body_json(&data, &mut payload).await {
         Ok(v) => v,
         Err(r) => return r,
@@ -189,6 +243,9 @@ pub async fn secret_del(
     // removing it from here would leave the screen that owns it describing
     // something that is no longer there.
     if let Some(existing) = store.get(body.id) {
+        if !me.may_touch(&existing) {
+            return no_such_secret();
+        }
         let name = existing.safe_str("name", "");
         if crate::state::secrets::is_global_name(&name) {
             return reserved(&name);
@@ -199,10 +256,7 @@ pub async fn secret_del(
     // one thing this call exists to confirm.
     match store.del(body.id) {
         Ok(true) => reply::ok(),
-        Ok(false) => reply::err_status(
-            actix_web::http::StatusCode::NOT_FOUND,
-            "no such secret".to_string(),
-        ),
+        Ok(false) => no_such_secret(),
         Err(e) => reply::err(format!("failed to delete secret: {}", e)),
     }
 }
@@ -212,15 +266,17 @@ pub async fn secret_list(
     data: web::Data<State>,
     _req: HttpRequest,
 ) -> HttpResponse {
-    if let Err(r) = ensure_admin(&data, &user).await {
-        return r;
-    }
+    let me = match caller(&data, &user).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
     let srv: &crate::state::data::Data = &data.server;
     let secrets = srv.secrets.lock();
     let refs: Vec<SecretRef> = match secrets.as_ref() {
         Some(s) => s
             .list()
             .into_iter()
+            .filter(|(id, _)| s.get(*id).map_or(false, |it| me.may_touch(&it)))
             .map(|(id, name)| SecretRef { id, name })
             .collect(),
         None => return reply::err("secret store is not initialized"),
@@ -273,5 +329,231 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(result.succeeded);
         assert_eq!(result.error, "");
+    }
+}
+
+/// Whose secrets are whose, through a real app.
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use crate::server::login::login;
+    use crate::state::data::Data;
+    use crate::state::store_memory::StoreMemory;
+    use crate::util::crypto::{get_new_salt, get_password_hash};
+    use actix_web::cookie::Cookie;
+    use actix_web::{test, App};
+    use serde_json::{json, Value};
+
+    const BOUNDARY: &str = "----isabelletestboundary";
+
+    fn account(id: u64, login: &str, admin: bool, active: bool) -> Item {
+        let mut itm = Item::new();
+        itm.id = id;
+        itm.set_str("login", login);
+        itm.set_str("email", &format!("{}@example.org", login));
+        itm.set_str("password", &get_password_hash("hunter2", &get_new_salt()));
+        itm.set_bool("role_is_active", active);
+        if admin {
+            itm.set_bool("role_is_admin", true);
+        }
+        itm
+    }
+
+    fn state(dir: &tempfile::TempDir) -> web::Data<State> {
+        let store = StoreMemory::with_collections(&["user"]);
+        store.seed("user", account(1, "admin", true, true));
+        store.seed("user", account(2, "bob", false, true));
+        store.seed("user", account(3, "carol", false, true));
+        store.seed("user", account(4, "dave", false, false));
+        let mut data = Data::new();
+        data.rw = Box::new(store);
+        let mut secrets = crate::state::secrets::SecretStore::open(
+            &dir.path().join("key"),
+            &dir.path().join("store"),
+        )
+        .unwrap();
+        // Stored before secrets had owners.
+        let mut legacy = Item::new();
+        legacy.set_str("name", "legacy");
+        legacy.set_str("secret_value", "old");
+        secrets.set(&legacy, false).unwrap();
+        *data.secrets.lock() = Some(secrets);
+        web::Data::new(State::from_data(data))
+    }
+
+    macro_rules! app_with {
+        ($state:expr) => {
+            test::init_service(
+                App::new()
+                    .app_data($state)
+                    .wrap(actix_identity::IdentityMiddleware::default())
+                    .wrap(
+                        actix_session::SessionMiddleware::builder(
+                            actix_session::storage::CookieSessionStore::default(),
+                            actix_web::cookie::Key::from(&[0u8; 64]),
+                        )
+                        .cookie_secure(false)
+                        .build(),
+                    )
+                    .route("/login", web::post().to(login))
+                    .route("/secret/edit", web::post().to(secret_edit))
+                    .route("/secret/del", web::post().to(secret_del))
+                    .route("/secret/list", web::get().to(secret_list))
+                    .route("/secret/get", web::post().to(secret_get)),
+            )
+            .await
+        };
+    }
+
+    macro_rules! sign_in {
+        ($app:expr, $username:expr) => {{
+            let body = format!(
+                "--{b}\r\nContent-Disposition: form-data; name=\"username\"\r\n\r\n{u}\r\n\
+                 --{b}\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\nhunter2\r\n\
+                 --{b}--\r\n",
+                b = BOUNDARY,
+                u = $username
+            );
+            let res = test::call_service(
+                &$app,
+                test::TestRequest::post()
+                    .uri("/login")
+                    .insert_header((
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", BOUNDARY),
+                    ))
+                    .set_payload(body)
+                    .to_request(),
+            )
+            .await;
+            let raw = res
+                .response()
+                .cookies()
+                .find(|c| c.name() == "id")
+                .expect("no session cookie was issued");
+            Cookie::new(raw.name().to_string(), raw.value().to_string())
+        }};
+    }
+
+    macro_rules! post {
+        ($app:expr, $who:expr, $path:expr, $body:expr) => {{
+            let res = test::call_service(
+                &$app,
+                test::TestRequest::post()
+                    .uri($path)
+                    .cookie($who.clone())
+                    .insert_header(("content-type", "application/json"))
+                    .set_payload($body.to_string())
+                    .to_request(),
+            )
+            .await;
+            let status = res.status();
+            let body = test::read_body(res).await;
+            (
+                status,
+                serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
+            )
+        }};
+    }
+
+    macro_rules! names {
+        ($app:expr, $who:expr) => {{
+            let body = test::call_and_read_body(
+                &$app,
+                test::TestRequest::get()
+                    .uri("/secret/list")
+                    .cookie($who.clone())
+                    .to_request(),
+            )
+            .await;
+            let refs: Vec<Value> = serde_json::from_slice(&body).unwrap();
+            let mut n: Vec<String> = refs
+                .iter()
+                .map(|r| r["name"].as_str().unwrap().to_string())
+                .collect();
+            n.sort();
+            n
+        }};
+    }
+
+    fn secret(name: &str) -> Value {
+        json!({ "id": u64::MAX, "strs": { "name": name, "secret_value": "s3cret" } })
+    }
+
+    #[actix_web::test]
+    async fn everybody_keeps_their_own_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with!(state(&dir));
+        let admin = sign_in!(app, "admin");
+        let bob = sign_in!(app, "bob");
+        let carol = sign_in!(app, "carol");
+
+        let (_, r) = post!(app, bob, "/secret/edit", secret("bob ssh"));
+        assert_eq!(r["succeeded"], true, "{r}");
+        let bobs: u64 = r["data"]["id"].as_str().unwrap().parse().unwrap();
+        let (_, r) = post!(app, carol, "/secret/edit", secret("carol ssh"));
+        assert_eq!(r["succeeded"], true, "{r}");
+
+        assert_eq!(names!(app, bob), vec!["bob ssh"]);
+        assert_eq!(names!(app, carol), vec!["carol ssh"]);
+        assert_eq!(names!(app, admin), vec!["bob ssh", "carol ssh", "legacy"]);
+
+        // Carol cannot read, change or delete Bob's; it answers as if absent.
+        let (st, _) = post!(app, carol, "/secret/get", json!({ "id": bobs }));
+        assert_eq!(st, actix_web::http::StatusCode::NOT_FOUND);
+        let (st, _) = post!(
+            app,
+            carol,
+            "/secret/edit",
+            json!({ "id": bobs, "strs": { "name": "bob ssh", "secret_value": "mine" } })
+        );
+        assert_eq!(st, actix_web::http::StatusCode::NOT_FOUND);
+        let (st, _) = post!(app, carol, "/secret/del", json!({ "id": bobs }));
+        assert_eq!(st, actix_web::http::StatusCode::NOT_FOUND);
+
+        // Nor can she take it over by claiming it on a new one.
+        let (_, r) = post!(
+            app,
+            carol,
+            "/secret/edit",
+            json!({ "id": u64::MAX, "ids": { "owner": 2 }, "strs": { "name": "planted" } })
+        );
+        assert_eq!(r["succeeded"], true, "{r}");
+        assert!(!names!(app, bob).contains(&"planted".to_string()));
+
+        // A taken name does not say whose it is.
+        let (_, r) = post!(app, carol, "/secret/edit", secret("bob ssh"));
+        assert_eq!(r["succeeded"], false);
+        assert!(!r["error"].as_str().unwrap().contains("by id"), "{r}");
+
+        // Bob edits his own and keeps it.
+        let (_, r) = post!(
+            app,
+            bob,
+            "/secret/edit",
+            json!({ "id": bobs, "ids": { "owner": 3 }, "strs": { "description": "lab" } })
+        );
+        assert_eq!(r["succeeded"], true, "{r}");
+        let (_, got) = post!(app, bob, "/secret/get", json!({ "id": bobs }));
+        assert_eq!(got["ids"]["owner"], 2);
+        assert_eq!(got["strs"]["description"], "lab");
+
+        // The administrator reaches everybody's, and Bob his own.
+        let (st, _) = post!(app, admin, "/secret/get", json!({ "id": bobs }));
+        assert!(st.is_success());
+        let (_, r) = post!(app, bob, "/secret/del", json!({ "id": bobs }));
+        assert_eq!(r["succeeded"], true, "{r}");
+    }
+
+    #[actix_web::test]
+    async fn an_unowned_secret_is_the_administrators() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with!(state(&dir));
+        let bob = sign_in!(app, "bob");
+        let admin = sign_in!(app, "admin");
+        let (st, _) = post!(app, bob, "/secret/get", json!({ "id": 0 }));
+        assert_eq!(st, actix_web::http::StatusCode::NOT_FOUND);
+        let (st, _) = post!(app, admin, "/secret/get", json!({ "id": 0 }));
+        assert!(st.is_success());
     }
 }
