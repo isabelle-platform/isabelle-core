@@ -102,6 +102,17 @@ pub async fn itm_edit(
     let internals = srv.rw.get_internals().await;
     let cache = srv.route_cache.lock().clone();
 
+    // Stamped before the hooks run, so the ones deciding who may write see
+    // the owner the record will have, not the one the request claims.
+    if crate::server::owner::is_owned(&internals, &mc.collection) {
+        let caller = match &usr {
+            Some(u) => u.id,
+            None => return HttpResponse::Forbidden().into(),
+        };
+        let old = srv.rw.get_item(&mc.collection, itm.id).await;
+        crate::server::owner::stamp(&mut itm, old.as_ref(), caller);
+    }
+
     /* call auth hooks */
     if let Some(routes) = internals.strstrs.get("itm_auth_hook") {
         for route in routes {
@@ -545,6 +556,7 @@ pub async fn itm_list(
      * (or remove) items on the current page. They do not affect total_count
      * — for cross-page filtering use itm_list_db_filter_hook instead, which
      * is pushed down into the database query. */
+    let before_hooks = lr.map.len();
     if let Some(routes) = internals.strstrs.get("itm_list_filter_hook") {
         let mut sorted_routes: Vec<_> = routes.iter().collect();
         sorted_routes.sort_by(|a, b| a.0.cmp(b.0));
@@ -561,5 +573,185 @@ pub async fn itm_list(
         }
     }
 
+    // A record the hooks withheld has to read exactly like one that does not
+    // exist, or asking for it by id tells the caller it is there. For the
+    // reads by id the total was counted before the hooks ran, so it is put
+    // right here; a single id nobody may see gets the missing record's answer.
+    if lq.id != u64::MAX {
+        if lr.map.is_empty() {
+            return HttpResponse::BadRequest().into();
+        }
+        lr.total_count = lr.map.len() as u64;
+    } else if !lq.id_list.is_empty() {
+        let withheld = (before_hooks - lr.map.len()) as u64;
+        lr.total_count = lr.total_count.saturating_sub(withheld);
+    }
+
     HttpResponse::Ok().body(serde_json::to_string(&lr).unwrap())
+}
+
+/// Owned collections, through a real app: the server decides the owner.
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use crate::server::login::login;
+    use crate::state::data::Data;
+    use crate::state::store_memory::StoreMemory;
+    use crate::util::crypto::{get_new_salt, get_password_hash};
+    use actix_web::cookie::Cookie;
+    use actix_web::{test, App};
+
+    const BOUNDARY: &str = "----isabelletestboundary";
+
+    fn account(id: u64, login: &str) -> Item {
+        let mut itm = Item::new();
+        itm.id = id;
+        itm.set_str("login", login);
+        itm.set_str("email", &format!("{}@example.org", login));
+        itm.set_str("password", &get_password_hash("hunter2", &get_new_salt()));
+        itm.set_bool("role_is_active", true);
+        itm
+    }
+
+    fn store() -> StoreMemory {
+        let store = StoreMemory::with_collections(&["user", "workspace", "test"]);
+        store.seed("user", account(2, "bob"));
+        store.seed("user", account(3, "carol"));
+        let mut internals = Item::new();
+        let mut owned = HashMap::new();
+        owned.insert("1".to_string(), "workspace".to_string());
+        internals
+            .strstrs
+            .insert(crate::server::owner::INTERNALS_OWNED.to_string(), owned);
+        store.set_internals(internals);
+        store
+    }
+
+    fn form(fields: &[(&str, &str)]) -> String {
+        let mut s = String::new();
+        for (k, v) in fields {
+            s += &format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n"
+            );
+        }
+        s + &format!("--{BOUNDARY}--\r\n")
+    }
+
+    macro_rules! app_with {
+        ($store:expr) => {{
+            let mut data = Data::new();
+            data.rw = Box::new($store);
+            test::init_service(
+                App::new()
+                    .app_data(web::Data::new(State::from_data(data)))
+                    .wrap(actix_identity::IdentityMiddleware::default())
+                    .wrap(
+                        actix_session::SessionMiddleware::builder(
+                            actix_session::storage::CookieSessionStore::default(),
+                            actix_web::cookie::Key::from(&[0u8; 64]),
+                        )
+                        .cookie_secure(false)
+                        .build(),
+                    )
+                    .route("/login", web::post().to(login))
+                    .route("/itm/edit", web::post().to(itm_edit)),
+            )
+            .await
+        }};
+    }
+
+    macro_rules! send {
+        ($app:expr, $req:expr) => {
+            test::call_service(
+                &$app,
+                $req.insert_header((
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", BOUNDARY),
+                ))
+                .to_request(),
+            )
+            .await
+        };
+    }
+
+    macro_rules! sign_in {
+        ($app:expr, $username:expr) => {{
+            let res = send!(
+                $app,
+                test::TestRequest::post()
+                    .uri("/login")
+                    .set_payload(form(&[("username", $username), ("password", "hunter2")]))
+            );
+            let raw = res
+                .response()
+                .cookies()
+                .find(|c| c.name() == "id")
+                .expect("no session cookie was issued");
+            Cookie::new(raw.name().to_string(), raw.value().to_string())
+        }};
+    }
+
+    macro_rules! edit {
+        ($app:expr, $who:expr, $collection:expr, $id:expr, $item:expr) => {{
+            let res = send!(
+                $app,
+                test::TestRequest::post()
+                    .uri(&format!("/itm/edit?collection={}&id={}", $collection, $id))
+                    .cookie($who.clone())
+                    .set_payload(form(&[("item", $item)]))
+            );
+            assert!(res.status().is_success(), "{}", res.status());
+        }};
+    }
+
+    #[actix_web::test]
+    async fn a_record_belongs_to_its_creator_whatever_it_claims() {
+        let store = store();
+        let app = app_with!(store.clone());
+        let bob = sign_in!(app, "bob");
+        let carol = sign_in!(app, "carol");
+
+        edit!(
+            app,
+            bob,
+            "workspace",
+            10,
+            r#"{"ids":{"owner":3},"strs":{"name":"w"}}"#
+        );
+        assert_eq!(store.peek("workspace", 10).unwrap().ids["owner"], 2);
+
+        // A later change keeps it, whoever sends it and whatever it says.
+        edit!(
+            app,
+            carol,
+            "workspace",
+            10,
+            r#"{"ids":{"owner":3},"strs":{"name":"x"}}"#
+        );
+        let w = store.peek("workspace", 10).unwrap();
+        assert_eq!(w.ids["owner"], 2);
+        assert_eq!(w.strs["name"], "x");
+
+        // A collection that is not owned is left as sent.
+        edit!(app, bob, "test", 11, r#"{"ids":{"owner":3}}"#);
+        assert_eq!(store.peek("test", 11).unwrap().ids["owner"], 3);
+    }
+
+    #[actix_web::test]
+    async fn an_unowned_record_is_not_claimed_by_editing_it() {
+        let store = store();
+        store.seed("workspace", {
+            let mut w = Item::new();
+            w.id = 5;
+            w
+        });
+        let app = app_with!(store.clone());
+        let bob = sign_in!(app, "bob");
+        edit!(app, bob, "workspace", 5, r#"{"ids":{"owner":2}}"#);
+        assert!(!store
+            .peek("workspace", 5)
+            .unwrap()
+            .ids
+            .contains_key("owner"));
+    }
 }
