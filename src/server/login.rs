@@ -145,6 +145,12 @@ pub async fn register(
     if !login_is_acceptable(&login) || !login_is_acceptable(&email) {
         return ok_json(false, "Invalid login or email");
     }
+    if !login_is_registrable(&login) {
+        return ok_json(false, "A login may not contain spaces");
+    }
+    if !email_is_registrable(&email) {
+        return ok_json(false, "This is not an e-mail address");
+    }
 
     if !srv
         .rw
@@ -160,7 +166,9 @@ pub async fn register(
     let usr_by_email = get_user(srv, email.clone()).await;
 
     let target = registration_target(&usr_by_login, &usr_by_email);
-    if target == RegistrationTarget::Taken {
+    if target == RegistrationTarget::Taken
+        || (target == RegistrationTarget::Create && taken_ignoring_case(srv, &login, &email).await)
+    {
         info!("Login or email is already taken: {}", login);
         return ok_json(false, "Login is already used");
     }

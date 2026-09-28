@@ -61,6 +61,87 @@ pub fn login_is_acceptable(login: &str) -> bool {
     !login.is_empty() && login.len() <= 254 && !login_has_bad_symbols(login)
 }
 
+/// Whether `login` is a name somebody can sign up under.
+///
+/// Stricter than [`login_is_acceptable`], which only asks whether a lookup can
+/// find it: a name with spaces around it is found by nobody who types it
+/// without them, and one with spaces or control characters inside it is not a
+/// name anybody means. Refused rather than trimmed, so that what the person
+/// sees accepted is what they will sign in with.
+pub fn login_is_registrable(login: &str) -> bool {
+    login_is_acceptable(login) && !login.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Whether `email` has the shape of an address mail can be sent to: one `@`,
+/// something before it, a domain with a dot after it, and no spaces.
+///
+/// The address is where the one-time sign-in code goes. An account created
+/// with one that cannot receive mail is an account nobody can ever sign in to
+/// — and one that holds a login somebody else may want.
+pub fn email_is_registrable(email: &str) -> bool {
+    if !login_is_acceptable(email) || email.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    let mut parts = email.split('@');
+    let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !domain.contains("..")
+}
+
+/// The pattern that matches `value` exactly, ignoring case, as a Mongo
+/// `$regex` — escaped, so a `.` in an address is a dot.
+fn exact_ignoring_case(value: &str) -> String {
+    let mut out = String::from("^");
+    for c in value.chars() {
+        if "\\.^$|?*+()[]{}/".contains(c) {
+            // One backslash for the regex, doubled for the JSON it sits in.
+            out.push_str("\\\\");
+        }
+        out.push(c);
+    }
+    out.push('$');
+    out
+}
+
+/// Whether an account already answers to `login` or `email` in any case.
+///
+/// Sign-in finds an account by the exact spelling, but people do not: to a
+/// person `Admin` is the administrator, and an account registered under it
+/// beside `admin` is one made to be mistaken for it. So registration refuses
+/// a name or an address that differs from a taken one only in case.
+pub async fn taken_ignoring_case(srv: &crate::state::data::Data, login: &str, email: &str) -> bool {
+    // Narrowed in the database where the store can, and decided here, where
+    // every store agrees on what "ignoring case" means.
+    let filter = format!(
+        "{{ \"$or\": [ {{ \"strs.login\": {{ \"$regex\": \"{l}\", \"$options\": \"i\" }} }}, \
+         {{ \"strs.email\": {{ \"$regex\": \"{l}\", \"$options\": \"i\" }} }}, \
+         {{ \"strs.login\": {{ \"$regex\": \"{e}\", \"$options\": \"i\" }} }}, \
+         {{ \"strs.email\": {{ \"$regex\": \"{e}\", \"$options\": \"i\" }} }} ] }}",
+        l = exact_ignoring_case(login),
+        e = exact_ignoring_case(email),
+    );
+    let (login, email) = (login.to_lowercase(), email.to_lowercase());
+    srv.rw
+        .get_all_items("user", "id", &filter)
+        .await
+        .map
+        .values()
+        .any(|u| {
+            let theirs = [
+                u.safe_str("login", "").to_lowercase(),
+                u.safe_str("email", "").to_lowercase(),
+            ];
+            theirs
+                .iter()
+                .any(|t| !t.is_empty() && (*t == login || *t == email))
+        })
+}
+
 /// What registration is allowed to do with the records it found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RegistrationTarget {
@@ -705,5 +786,51 @@ mod tests {
         // `get_user` returns None for these, so they would report as free.
         assert!(!login_is_acceptable("bob$"));
         assert!(!login_is_acceptable("{\"$ne\": null}"));
+    }
+
+    /// What a person signs up with is what they sign in with: no spaces a
+    /// lookup would need typed exactly.
+    #[test]
+    fn a_login_with_spaces_is_not_registrable() {
+        assert!(login_is_registrable("carol"));
+        assert!(login_is_registrable("carol.smith-2"));
+        assert!(!login_is_registrable(" carol "));
+        assert!(!login_is_registrable("carol smith"));
+        assert!(!login_is_registrable("carol\t"));
+        assert!(!login_is_registrable(""));
+    }
+
+    /// The sign-in code is mailed there, so it has to be an address.
+    #[test]
+    fn only_an_address_is_registrable_as_one() {
+        for ok in [
+            "carol@example.com",
+            "c.s+tag@mail.example.org",
+            "root@10.0.0.1",
+        ] {
+            assert!(email_is_registrable(ok), "{ok}");
+        }
+        for bad in [
+            "not-an-address",
+            "a@",
+            "@b.com",
+            "a b@c.com",
+            "a@b@c.com",
+            "a@localhost",
+            "a@.com",
+            "a@b.",
+            "a@b..com",
+            "",
+        ] {
+            assert!(!email_is_registrable(bad), "{bad}");
+        }
+    }
+
+    /// A dot in an address is a dot, not "any character", or `a.b@x.io`
+    /// would be taken by `axb@x.io`.
+    #[test]
+    fn the_case_blind_pattern_is_exact() {
+        assert_eq!(exact_ignoring_case("admin"), "^admin$");
+        assert_eq!(exact_ignoring_case("a.b@x.io"), "^a\\\\.b@x\\\\.io$");
     }
 }
