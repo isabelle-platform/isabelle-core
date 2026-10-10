@@ -156,6 +156,13 @@ pub async fn register(
         info!("Self-registration is disabled, rejecting {}", login);
         return ok_json(false, "Registration is disabled");
     }
+    if crate::server::signin::email_domain_blocked(srv, &email).await {
+        info!("E-mail domain is blocked, rejecting {}", email);
+        return ok_json(
+            false,
+            "Accounts cannot be made with an e-mail address at this domain",
+        );
+    }
 
     let usr_by_login = get_user(srv, login.clone()).await;
     let usr_by_email = get_user(srv, email.clone()).await;
@@ -351,7 +358,7 @@ async fn directory_login(
     };
 
     let existing = get_user(srv, identity.email.clone()).await;
-    let allow_registration = crate::server::signin::registration_open(srv).await;
+    let allow_registration = crate::server::signin::may_register(srv, &identity.email).await;
     // The directory authenticated them, so the address on their entry is
     // vouched for in the sense this asks about.
     let resolution = crate::server::signin::resolve_identity(
@@ -727,6 +734,44 @@ mod handler_tests {
 
         assert!(!result.succeeded, "registration went through while closed");
         assert_eq!(store.count("user"), 0);
+    }
+
+    /// An address at a blocked domain is refused, and the refusal says why;
+    /// one at any other domain still goes through.
+    #[actix_web::test]
+    async fn register_refuses_a_blocked_e_mail_domain() {
+        let store = StoreMemory::with_collections(&["user"]);
+        let mut settings = Item::new();
+        settings.set_str("blocked_email_domains", "mailinator.com");
+        store.set_settings(settings).await;
+
+        let refused = call(
+            state_with(store.clone()),
+            "/register",
+            web::post().to(register),
+            &[
+                ("login", "bob"),
+                ("email", "bob@sub.mailinator.com"),
+                ("dry", "false"),
+            ],
+        )
+        .await;
+        assert!(!refused.succeeded);
+        assert!(refused.error.contains("domain"), "{}", refused.error);
+        assert_eq!(store.count("user"), 0);
+
+        let accepted = call(
+            state_with(store.clone()),
+            "/register",
+            web::post().to(register),
+            &[
+                ("login", "bob"),
+                ("email", "bob@example.org"),
+                ("dry", "false"),
+            ],
+        )
+        .await;
+        assert!(accepted.succeeded, "{}", accepted.error);
     }
 
     /// The settings are the administrator's answer and win over what

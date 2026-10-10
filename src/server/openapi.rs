@@ -587,7 +587,8 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
             "summary": "Self-registration",
             "description":
                 "Refused with `succeeded: false` when self-registration is closed \
-                 (`allow_self_registration` in the settings, else in `internals.js`), when the login or the email is taken, or when either \
+                 (`allow_self_registration` in the settings, else in `internals.js`), when \
+                 the e-mail is at a domain listed in the `blocked_email_domains` setting, when the login or the email is taken, or when either \
                  contains characters the user lookup cannot handle. The account is \
                  created inactive.",
             "security": [ {} ],

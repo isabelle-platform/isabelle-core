@@ -509,7 +509,7 @@ async fn finish(
     };
 
     let existing = get_user(srv, identity.email.clone()).await;
-    let allow_registration = crate::server::signin::registration_open(srv).await;
+    let allow_registration = crate::server::signin::may_register(srv, &identity.email).await;
     let resolution = resolve(existing.as_ref(), &identity, provider, allow_registration);
 
     if let Resolution::Refuse(r) = resolution {

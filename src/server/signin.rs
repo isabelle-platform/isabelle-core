@@ -44,7 +44,8 @@ pub enum Refusal {
     Denied,
     /// The provider will not vouch for the address.
     Unverified,
-    /// No account, and this deployment does not accept new ones.
+    /// No account, and this deployment does not accept new ones — at all, or
+    /// at this address's domain.
     RegistrationClosed,
     /// There is an account and it is switched off.
     Inactive,
@@ -92,6 +93,48 @@ pub async fn registration_open(srv: &crate::state::data::Data) -> bool {
         .get_internals()
         .await
         .safe_bool(SELF_REGISTRATION, true)
+}
+
+/// The setting listing the e-mail domains nobody may make an account with.
+pub const BLOCKED_EMAIL_DOMAINS: &str = "blocked_email_domains";
+
+/// Whether `email` is at one of the domains in `list`, or under one.
+///
+/// The list is what an administrator typed: domains separated by commas,
+/// spaces or new lines, in any case, with or without a leading `@` or `*.`.
+/// A domain covers its subdomains too — blocking a disposable-mail service
+/// that hands out `x.example.com` and `y.example.com` should not take a line
+/// for each.
+pub fn domain_listed(email: &str, list: &str) -> bool {
+    let Some((_, domain)) = email.trim().rsplit_once('@') else {
+        return false;
+    };
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    list.split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .map(|d| {
+            d.trim()
+                .trim_start_matches('@')
+                .trim_start_matches("*.")
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+        })
+        .filter(|d| !d.is_empty())
+        .any(|d| domain == d || domain.ends_with(&format!(".{}", d)))
+}
+
+/// Whether an administrator has blocked the domain of `email`.
+pub async fn email_domain_blocked(srv: &crate::state::data::Data, email: &str) -> bool {
+    let settings = srv.rw.get_settings().await;
+    domain_listed(email, &settings.safe_str(BLOCKED_EMAIL_DOMAINS, ""))
+}
+
+/// Whether an account may be made for `email` without anybody provisioning
+/// it: registration is open, and the address is not at a blocked domain.
+///
+/// Accounts that exist are not touched by either — this is only ever asked
+/// before one is created.
+pub async fn may_register(srv: &crate::state::data::Data, email: &str) -> bool {
+    registration_open(srv).await && !email_domain_blocked(srv, email).await
 }
 
 /// What signing in with this identity should do.
@@ -250,6 +293,27 @@ pub async fn record_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_listed_domain_and_its_subdomains_are_blocked() {
+        let list = "Mailinator.com, @yopmail.com\n*.temp.example  ";
+        assert!(domain_listed("bob@mailinator.com", list));
+        assert!(domain_listed("bob@MAILINATOR.COM", list));
+        assert!(domain_listed("bob@x.mailinator.com", list));
+        assert!(domain_listed("bob@yopmail.com", list));
+        assert!(domain_listed("bob@a.temp.example", list));
+        assert!(domain_listed("bob@temp.example", list));
+    }
+
+    #[test]
+    fn a_domain_that_only_ends_the_same_is_not_blocked() {
+        let list = "mailinator.com";
+        assert!(!domain_listed("bob@notmailinator.com", list));
+        assert!(!domain_listed("bob@mailinator.com.evil", list));
+        assert!(!domain_listed("bob@example.org", list));
+        assert!(!domain_listed("not-an-address", list));
+        assert!(!domain_listed("bob@mailinator.com", " , \n"));
+    }
 
     const GOOGLE: &str = "oauth_google_subject";
     const APPLE: &str = "oauth_apple_subject";
