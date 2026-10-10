@@ -382,18 +382,22 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
                 "Read by a login screen, so it answers without a session. A provider is \
                  listed when its entry exists in the secret store and carries everything \
                  that provider needs; nothing about the credentials themselves is \
-                 returned.",
+                 returned. `registration` says whether the deployment takes new \
+                 accounts, so the screen can leave out a sign-up it would refuse.",
             "security": [ {} ],
             "responses": {
                 "200": json_response("The configured providers.", json!({
                     "type": "object",
-                    "properties": { "providers": { "type": "array", "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "example": "google" },
-                            "name": { "type": "string", "example": "Google" },
-                        },
-                    }}},
+                    "properties": {
+                        "providers": { "type": "array", "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "example": "google" },
+                                "name": { "type": "string", "example": "Google" },
+                            },
+                        }},
+                        "registration": { "type": "boolean" },
+                    },
                 })),
             },
         }}),
@@ -582,8 +586,8 @@ fn core_paths(collections: &[String], admin_only: bool) -> serde_json::Map<Strin
             "tags": ["auth"],
             "summary": "Self-registration",
             "description":
-                "Refused with `succeeded: false` when self-registration is disabled in \
-                 `internals.js`, when the login or the email is taken, or when either \
+                "Refused with `succeeded: false` when self-registration is closed \
+                 (`allow_self_registration` in the settings, else in `internals.js`), when the login or the email is taken, or when either \
                  contains characters the user lookup cannot handle. The account is \
                  created inactive.",
             "security": [ {} ],

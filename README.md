@@ -208,7 +208,8 @@ an administrator or revive a disabled account.
 The same policy governs a directory sign-in, with the directory as the thing
 that vouched. An address the source will not vouch for is not an identity, and
 is refused. A verified one signs into the account that already holds it; if
-there is none, one is created when `allow_self_registration` permits it. The
+there is none, one is created when `allow_self_registration` permits it — an
+administrator's value in the settings, or else the one in `internals.js`. The
 provider's own identifier for the account is remembered on first sign-in, and
 a later sign-in presenting a different one for the same address is refused —
 so an address that changes hands at the provider cannot pick up the record

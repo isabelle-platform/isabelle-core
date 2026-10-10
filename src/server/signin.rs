@@ -68,6 +68,32 @@ impl Refusal {
     }
 }
 
+/// The key that opens or closes self-registration, in the settings and in
+/// `internals.js` alike.
+pub const SELF_REGISTRATION: &str = "allow_self_registration";
+
+/// Whether this deployment takes accounts nobody provisioned.
+///
+/// An administrator's answer, in the settings, wins; `internals.js` is what
+/// the flavour ships with, for as long as nobody has given one. That order is
+/// the point of having the setting at all: `internals.js` is a file on the
+/// server, and closing the door to new accounts should not need somebody
+/// with a shell on it.
+///
+/// Every way an account can come into being asks this, not only `/register` —
+/// a first sign-in with a provider or a directory creates one too, and a
+/// closed door with a side entrance is not closed.
+pub async fn registration_open(srv: &crate::state::data::Data) -> bool {
+    let settings = srv.rw.get_settings().await;
+    if let Some(v) = settings.bools.get(SELF_REGISTRATION) {
+        return *v;
+    }
+    srv.rw
+        .get_internals()
+        .await
+        .safe_bool(SELF_REGISTRATION, true)
+}
+
 /// What signing in with this identity should do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Resolution {

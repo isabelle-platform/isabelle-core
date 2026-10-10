@@ -236,11 +236,13 @@ pub(crate) fn redirect_uri(srv: &crate::state::data::Data, provider: Provider) -
     )
 }
 
-/// Which providers this deployment can sign in with.
+/// Which providers this deployment can sign in with, and whether it takes
+/// new accounts.
 ///
 /// Unauthenticated on purpose: it is read by a login screen, which by
 /// definition has nobody signed in. It says only that a provider is
-/// configured — never with what.
+/// configured — never with what. Whether registration is open is no secret
+/// either: `/register` says so to anybody who tries.
 pub async fn auth_providers(data: web::Data<State>) -> HttpResponse {
     let srv: &crate::state::data::Data = &data.server;
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -254,7 +256,10 @@ pub async fn auth_providers(data: web::Data<State>) -> HttpResponse {
             }
         }
     }
-    HttpResponse::Ok().json(serde_json::json!({ "providers": out }))
+    HttpResponse::Ok().json(serde_json::json!({
+        "providers": out,
+        "registration": crate::server::signin::registration_open(srv).await,
+    }))
 }
 
 /// What the signed-in account can be got into with.
@@ -504,11 +509,7 @@ async fn finish(
     };
 
     let existing = get_user(srv, identity.email.clone()).await;
-    let allow_registration = srv
-        .rw
-        .get_internals()
-        .await
-        .safe_bool("allow_self_registration", true);
+    let allow_registration = crate::server::signin::registration_open(srv).await;
     let resolution = resolve(existing.as_ref(), &identity, provider, allow_registration);
 
     if let Resolution::Refuse(r) = resolution {

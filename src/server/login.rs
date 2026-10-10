@@ -152,12 +152,7 @@ pub async fn register(
         return ok_json(false, "This is not an e-mail address");
     }
 
-    if !srv
-        .rw
-        .get_internals()
-        .await
-        .safe_bool("allow_self_registration", true)
-    {
+    if !crate::server::signin::registration_open(srv).await {
         info!("Self-registration is disabled, rejecting {}", login);
         return ok_json(false, "Registration is disabled");
     }
@@ -356,11 +351,7 @@ async fn directory_login(
     };
 
     let existing = get_user(srv, identity.email.clone()).await;
-    let allow_registration = srv
-        .rw
-        .get_internals()
-        .await
-        .safe_bool("allow_self_registration", true);
+    let allow_registration = crate::server::signin::registration_open(srv).await;
     // The directory authenticated them, so the address on their entry is
     // vouched for in the sense this asks about.
     let resolution = crate::server::signin::resolve_identity(
@@ -710,6 +701,63 @@ mod handler_tests {
 
         assert!(!result.succeeded);
         assert_eq!(store.count("user"), 0);
+    }
+
+    /// An administrator who closes registration in the settings closes it:
+    /// nothing is written, whatever the flavour shipped with.
+    #[actix_web::test]
+    async fn register_refuses_when_an_administrator_closed_it() {
+        let store = StoreMemory::with_collections(&["user"]);
+        let mut settings = Item::new();
+        settings.set_bool("allow_self_registration", false);
+        store.set_settings(settings).await;
+        let state = state_with(store.clone());
+
+        let result = call(
+            state,
+            "/register",
+            web::post().to(register),
+            &[
+                ("login", "bob"),
+                ("email", "bob@example.org"),
+                ("dry", "false"),
+            ],
+        )
+        .await;
+
+        assert!(!result.succeeded, "registration went through while closed");
+        assert_eq!(store.count("user"), 0);
+    }
+
+    /// The settings are the administrator's answer and win over what
+    /// `internals.js` ships with, in both directions; with no answer there,
+    /// `internals.js` decides.
+    #[actix_web::test]
+    async fn the_setting_overrides_internals() {
+        let open = |v: bool| {
+            let mut itm = Item::new();
+            itm.set_bool("allow_self_registration", v);
+            itm
+        };
+        let decide = |settings: Option<bool>, internals: Option<bool>| {
+            let store = StoreMemory::with_collections(&["user"]);
+            if let Some(v) = internals {
+                store.set_internals(open(v));
+            }
+            let mut data = Data::new();
+            data.rw = Box::new(store.clone());
+            async move {
+                if let Some(v) = settings {
+                    store.set_settings(open(v)).await;
+                }
+                crate::server::signin::registration_open(&data).await
+            }
+        };
+
+        assert!(decide(None, None).await, "open by default");
+        assert!(!decide(None, Some(false)).await);
+        assert!(!decide(Some(false), Some(true)).await);
+        assert!(decide(Some(true), Some(false)).await);
     }
 
     /// `/gen_otp` must answer identically whether or not the account exists,
