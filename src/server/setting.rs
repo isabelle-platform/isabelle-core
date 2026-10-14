@@ -131,13 +131,16 @@ pub async fn setting_list(
             };
         }
         let st = crate::server::public_read::public_settings(srv).await;
-        return HttpResponse::Ok().body(serde_json::to_string(&st).unwrap());
+        return HttpResponse::Ok()
+            .content_type("application/json")
+            .body(serde_json::to_string(&st).unwrap());
     }
 
     // Return settings finally
     let st = srv.rw.get_settings().await.clone();
 
     HttpResponse::Ok()
+        .content_type("application/json")
         .body(serde_json::to_string(&st).unwrap())
         .into()
 }

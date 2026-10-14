@@ -211,9 +211,9 @@ pub async fn secret_get(
         None => return reply::err("secret store is not initialized"),
     };
     match store.get_masked(body.id) {
-        Some(item) if me.may_touch(&item) => {
-            HttpResponse::Ok().body(serde_json::to_string(&item).unwrap())
-        }
+        Some(item) if me.may_touch(&item) => HttpResponse::Ok()
+            .content_type("application/json")
+            .body(serde_json::to_string(&item).unwrap()),
         _ => no_such_secret(),
     }
 }
@@ -281,7 +281,9 @@ pub async fn secret_list(
             .collect(),
         None => return reply::err("secret store is not initialized"),
     };
-    HttpResponse::Ok().body(serde_json::to_string(&refs).unwrap())
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .body(serde_json::to_string(&refs).unwrap())
 }
 
 #[cfg(test)]

@@ -399,7 +399,9 @@ pub async fn itm_list(
                     map: HashMap::new(),
                     total_count: 0,
                 };
-                return HttpResponse::Ok().body(serde_json::to_string(&empty).unwrap());
+                return HttpResponse::Ok()
+                    .content_type("application/json")
+                    .body(serde_json::to_string(&empty).unwrap());
             }
             None
         }
@@ -587,7 +589,9 @@ pub async fn itm_list(
         lr.total_count = lr.total_count.saturating_sub(withheld);
     }
 
-    HttpResponse::Ok().body(serde_json::to_string(&lr).unwrap())
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .body(serde_json::to_string(&lr).unwrap())
 }
 
 /// Owned collections, through a real app: the server decides the owner.
