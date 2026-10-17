@@ -35,6 +35,7 @@ use crate::server::user_control::check_role;
 use crate::state::state::State;
 use crate::state::store::Store;
 use crate::util::crypto::{get_new_salt, get_password_hash, verify_password};
+use isabelle_dm::data_model::item::Item;
 use isabelle_plugin_api::actor::{CoreHandle, CoreMessage};
 use log::trace;
 use tokio::sync::mpsc;
@@ -248,6 +249,12 @@ async fn handle_message(state: &State, msg: CoreMessage) {
                 .unwrap_or_default();
             let _ = reply.send(res);
         }
+        CoreMessage::SystemSecretSet { item, reply } => {
+            let _ = reply.send(system_secret_set(&srv, item));
+        }
+        CoreMessage::SystemSecretDel { name, reply } => {
+            let _ = reply.send(system_secret_del(&srv, &name));
+        }
 
         // -------- Features --------
         CoreMessage::FeaturesGetAll { reply } => {
@@ -281,6 +288,56 @@ fn stub_failure(reason: &str) -> isabelle_dm::data_model::process_result::Proces
         succeeded: false,
         error: reason.to_string(),
         data: std::collections::HashMap::new(),
+    }
+}
+
+/// Whether a plugin may write this name: only inside the system's space,
+/// which is the one the HTTP endpoints cannot reach.
+fn system_secret_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if !name.starts_with(crate::state::secrets::GLOBAL_PREFIX)
+        || name.len() == crate::state::secrets::GLOBAL_PREFIX.len()
+    {
+        return Err(format!(
+            "'{name}' is not a system secret: those are named '{}…'",
+            crate::state::secrets::GLOBAL_PREFIX
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Write a plugin's system secret whole, over the entry of the same name.
+///
+/// Whole rather than merged, as the screens that own the other system
+/// secrets write theirs: the plugin decides what to keep. No owner is put on
+/// it, which leaves it the administrators', like every entry in this space.
+fn system_secret_set(srv: &crate::state::data::Data, mut item: Item) -> Result<(), String> {
+    let name = system_secret_name(&item.safe_str("name", ""))?;
+    let mut secrets = srv.secrets.lock();
+    let store = secrets
+        .as_mut()
+        .ok_or_else(|| "the secret store is not available".to_string())?;
+    item.id = store.get_by_name(&name).map(|i| i.id).unwrap_or(u64::MAX);
+    item.set_str("name", &name);
+    item.ids.remove(crate::server::owner::FIELD_OWNER);
+    store
+        .set(&item, false)
+        .map(|_| ())
+        .map_err(|e| format!("the secret could not be stored: {e}"))
+}
+
+/// Remove a plugin's system secret. `Ok(false)` when there was none.
+fn system_secret_del(srv: &crate::state::data::Data, name: &str) -> Result<bool, String> {
+    let name = system_secret_name(name)?;
+    let mut secrets = srv.secrets.lock();
+    let store = secrets
+        .as_mut()
+        .ok_or_else(|| "the secret store is not available".to_string())?;
+    match store.get_by_name(&name) {
+        Some(existing) => store
+            .del(existing.id)
+            .map_err(|e| format!("the secret could not be removed: {e}")),
+        None => Ok(false),
     }
 }
 
@@ -359,6 +416,72 @@ mod tests {
             assert_eq!(names, ["git token", "lab login"]);
             let text = format!("{:?}", listed);
             assert!(!text.contains("hunter2") && !text.contains("ghp_x"));
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A plugin keeps its configuration in the system's space: written whole
+    /// over the entry of that name, read back like any secret, removed by
+    /// name — and refused anywhere outside that space.
+    #[test]
+    fn a_plugin_writes_only_system_secrets() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        let dir =
+            std::env::temp_dir().join(format!("isabelle-system-secret-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        local.block_on(&rt, async {
+            let state = State::new();
+            *state.server.secrets.lock() = Some(
+                crate::state::secrets::SecretStore::open(
+                    &dir.join(".secret-key"),
+                    &dir.join("secrets.enc"),
+                )
+                .unwrap(),
+            );
+            let handle = spawn_core_task(state);
+            let entry = |name: &str, token: &str| {
+                let mut it = Item::new();
+                it.set_str("name", name);
+                it.set_str("token", token);
+                it.ids.insert("owner".to_string(), 42);
+                it
+            };
+
+            for refused in ["lab login", "global.", "globalx"] {
+                assert!(handle.system_secret_set(entry(refused, "x")).await.is_err());
+            }
+            assert!(handle.system_secret_del("lab login").await.is_err());
+
+            handle
+                .system_secret_set(entry("global.plugin_conf", "first"))
+                .await
+                .unwrap();
+            handle
+                .system_secret_set(entry("global.plugin_conf", "second"))
+                .await
+                .unwrap();
+            let listed = handle.secret_list().await.unwrap();
+            assert_eq!(listed.len(), 1, "one entry per name: {listed:?}");
+            let stored = handle.secret_get(listed[0].0).await.unwrap();
+            assert_eq!(stored.safe_str("token", ""), "second");
+            assert!(
+                !stored.ids.contains_key("owner"),
+                "nobody owns a system secret"
+            );
+
+            assert_eq!(
+                handle.system_secret_del("global.plugin_conf").await,
+                Ok(true)
+            );
+            assert_eq!(
+                handle.system_secret_del("global.plugin_conf").await,
+                Ok(false)
+            );
         });
         std::fs::remove_dir_all(&dir).ok();
     }
