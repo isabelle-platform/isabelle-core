@@ -241,6 +241,39 @@ pub const LDAP_SECRET: &str = "global.ldap";
 /// Where a directory entry's DN is remembered on a record.
 pub const LDAP_SUBJECT_KEY: &str = "ldap_dn";
 
+/// Tell the plugins that a user record has just been made.
+///
+/// An account made by an administrator goes through the item routes, which
+/// call the post-edit hooks; one made by `/register` or by a first sign-in
+/// with a provider or a directory is written here, by the core itself, and
+/// passed nobody. A plugin that greets new accounts would have greeted only
+/// the ones somebody else made. This is the same call the item routes make,
+/// so a handler cannot tell the two apart, and does not need to.
+pub async fn announce_new_user(srv: &crate::state::data::Data, id: u64) {
+    // The store's answer when it could not write: there is no record to tell
+    // anybody about.
+    if id == u64::MAX {
+        return;
+    }
+    let cache = srv.route_cache.lock().clone();
+    let specific = cache.item_post_edit.get("user");
+    for handler in specific
+        .into_iter()
+        .flatten()
+        .chain(cache.item_post_edit_wildcard.iter())
+    {
+        crate::handler::route_call::call_item_post_edit_hook(
+            srv,
+            handler,
+            "user",
+            None,
+            id,
+            isabelle_dm::data_model::data_object_action::DataObjectAction::Create,
+        )
+        .await;
+    }
+}
+
 /// Carry out what `resolve_identity` decided, and hand back the record that
 /// is about to be signed in as.
 ///
@@ -285,6 +318,7 @@ pub async fn record_for(
             itm.set_bool("logged_once", true);
             let id = srv.rw.set_item("user", &itm, false).await;
             info!("Registered {} as id {}", email, id);
+            announce_new_user(srv, id).await;
             srv.rw.get_item("user", id).await
         }
     }

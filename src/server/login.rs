@@ -186,7 +186,8 @@ pub async fn register(
         itm.set_bool("self_registered", true);
         itm.set_bool("role_is_active", true);
 
-        srv.rw.set_item("user", &itm, false).await;
+        let id = srv.rw.set_item("user", &itm, false).await;
+        crate::server::signin::announce_new_user(srv, id).await;
     }
 
     return ok_json(true, "");
