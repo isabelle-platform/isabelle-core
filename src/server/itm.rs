@@ -199,9 +199,11 @@ pub async fn itm_edit(
                 .unwrap(),
             );
         }
-        info!("Collection {} element {} set", mc.collection, itm.id);
+        info!("Collection {} element {} set", mc.collection, r);
 
         /* call post edit hooks */
+        // With the id the store gave it, not the one asked for: a new item is
+        // asked for as u64::MAX, and a hook handed that has no record to read.
         {
             let specific = cache.item_post_edit.get(&mc.collection);
             for handler in specific
@@ -214,7 +216,7 @@ pub async fn itm_edit(
                     handler,
                     &mc.collection,
                     old_itm.clone(),
-                    itm.id,
+                    r,
                     if old_itm.is_some() {
                         DataObjectAction::Modify
                     } else {
