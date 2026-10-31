@@ -777,7 +777,10 @@ mod tests {
             let root = base.join("tmp");
 
             let (err, files) = rt()
-                .block_on(run(body(Some("{\"id\":1}"), &[("a.txt", "alpha")]), low_disk()))
+                .block_on(run(
+                    body(Some("{\"id\":1}"), &[("a.txt", "alpha")]),
+                    low_disk(),
+                ))
                 .expect_err("a file upload was accepted while the disk was low");
             assert_eq!(err, ReadError::NoSpace);
             // Nothing landed on disk: no file recorded, no upload directory.
