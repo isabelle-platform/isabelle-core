@@ -228,6 +228,15 @@ pub async fn handle_item_files(
                 post_itm.id = new_itm.id;
                 post_itm.merge(&new_itm);
             } else {
+                // A file field wants to land on disk. If the server is below
+                // its reserved free-space headroom, refuse before writing a
+                // byte: a filling disk must not cross into the reserve the host
+                // keeps for itself. An item-only POST never reaches here, so an
+                // ordinary action that writes nothing to disk still goes
+                // through while the disk is low.
+                if limits.disk_low {
+                    return Err(ReadError::NoSpace);
+                }
                 // First upload of this request: now the directory is worth
                 // creating.
                 if !dir_ready {
@@ -527,6 +536,15 @@ mod tests {
         Limits {
             deadline: Duration::from_secs(5),
             max_bytes: 1024 * 1024,
+            disk_low: false,
+        }
+    }
+
+    /// Generous bounds, but the server is below its reserved free space.
+    fn low_disk() -> Limits {
+        Limits {
+            disk_low: true,
+            ..generous()
         }
     }
 
@@ -705,6 +723,7 @@ mod tests {
             let limits = Limits {
                 deadline: Duration::from_secs(5),
                 max_bytes: 8,
+                disk_low: false,
             };
             let (err, files) = rt()
                 .block_on(run(body(Some(&"x".repeat(64)), &[]), limits))
@@ -745,6 +764,36 @@ mod tests {
                 "cleanup left {:?}",
                 entries(&root)
             );
+        });
+    }
+
+    /// Below the reserved headroom, a request's file uploads are refused with
+    /// `NoSpace` before a byte is written and no directory is created — but an
+    /// item-only POST, which touches no disk, still goes through. The reserve
+    /// is protected without breaking actions that do not grow the disk.
+    #[test]
+    fn a_file_upload_is_refused_when_disk_is_low_but_an_item_only_post_is_not() {
+        with_root(|base| {
+            let root = base.join("tmp");
+
+            let (err, files) = rt()
+                .block_on(run(body(Some("{\"id\":1}"), &[("a.txt", "alpha")]), low_disk()))
+                .expect_err("a file upload was accepted while the disk was low");
+            assert_eq!(err, ReadError::NoSpace);
+            // Nothing landed on disk: no file recorded, no upload directory.
+            assert!(files.is_empty(), "a file was recorded despite low disk");
+            assert!(
+                entries(&root).is_empty(),
+                "low disk still created {:?}",
+                entries(&root)
+            );
+
+            // An item-only body writes nothing to disk, so it is unaffected.
+            let (itm, _) = rt()
+                .block_on(run(body(Some("{\"id\":7}"), &[]), low_disk()))
+                .expect("an item-only post was refused while the disk was low");
+            assert_eq!(itm.id, 7);
+            assert!(entries(&root).is_empty());
         });
     }
 

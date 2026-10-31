@@ -69,6 +69,10 @@ pub enum ReadError {
     TooLarge(usize),
     /// The stream itself is malformed — bad framing, a truncated part header.
     Malformed(String),
+    /// The server is preserving its reserved free disk space: accepting this
+    /// upload would eat into the headroom the host keeps for itself, so the
+    /// file fields are refused. Not the client's fault — a server condition.
+    NoSpace,
 }
 
 impl std::fmt::Display for ReadError {
@@ -77,6 +81,10 @@ impl std::fmt::Display for ReadError {
             ReadError::Timeout => write!(f, "timed out while reading the body"),
             ReadError::TooLarge(n) => write!(f, "body exceeds the maximum size ({} bytes read)", n),
             ReadError::Malformed(e) => write!(f, "malformed multipart body: {}", e),
+            ReadError::NoSpace => write!(
+                f,
+                "insufficient free disk space: the server is preserving its reserved headroom"
+            ),
         }
     }
 }
@@ -88,6 +96,7 @@ impl ReadError {
     pub fn status(&self) -> actix_web::http::StatusCode {
         match self {
             ReadError::TooLarge(_) => actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+            ReadError::NoSpace => actix_web::http::StatusCode::INSUFFICIENT_STORAGE,
             _ => actix_web::http::StatusCode::BAD_REQUEST,
         }
     }
@@ -100,6 +109,11 @@ pub struct Limits {
     pub deadline: Duration,
     /// Maximum number of body bytes accepted, summed across all fields.
     pub max_bytes: usize,
+    /// Set when the server is below its reserved free-disk headroom. While it
+    /// is, a request's *file* uploads are refused (an item-only POST that
+    /// writes nothing to disk is unaffected), so a filling disk cannot cross
+    /// into the reserve the host keeps for itself.
+    pub disk_low: bool,
 }
 
 impl Limits {
@@ -110,6 +124,7 @@ impl Limits {
         Self {
             deadline: Duration::from_secs(srv.body_timeout_secs.load(Ordering::Relaxed)),
             max_bytes: srv.max_payload_bytes.load(Ordering::Relaxed),
+            disk_low: srv.disk_low.load(Ordering::Relaxed),
         }
     }
 }
@@ -294,6 +309,7 @@ mod tests {
         Limits {
             deadline: Duration::from_secs(5),
             max_bytes: 1024 * 1024,
+            disk_low: false,
         }
     }
 
@@ -318,6 +334,7 @@ mod tests {
         let limits = Limits {
             deadline: Duration::from_millis(200),
             max_bytes: 1024 * 1024,
+            disk_low: false,
         };
         let err = probe(body(&[("item", "{")], false), limits)
             .await
@@ -332,6 +349,7 @@ mod tests {
         let limits = Limits {
             deadline: Duration::from_secs(5),
             max_bytes: 16,
+            disk_low: false,
         };
         let big = "x".repeat(1024);
         let err = probe(body(&[("item", &big)], true), limits)
@@ -347,6 +365,7 @@ mod tests {
         let limits = Limits {
             deadline: Duration::from_secs(5),
             max_bytes: 20,
+            disk_low: false,
         };
         let part = "x".repeat(15);
         let err = probe(body(&[("a", &part), ("b", &part)], true), limits)

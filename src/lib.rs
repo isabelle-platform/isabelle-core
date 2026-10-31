@@ -489,6 +489,9 @@ where
     {
         let srv: &crate::state::data::Data = &state.server;
         srv.init_data_path().await;
+        // Load any persisted disk-budget policy into memory before the monitor
+        // starts, so a set from a previous run is honoured from the first tick.
+        crate::state::diskbudget::load_policy(srv).await;
     }
 
     info!("Flow: Starting server");
@@ -508,6 +511,11 @@ where
                 if datetime.timestamp() <= local.timestamp() {
                     let srv: &crate::state::data::Data = &data_clone.server;
                     if local.time().second() == 0 {
+                        // Core-native: recompute the disk budget and flip the
+                        // low-space flag before the plugin hooks run, so an
+                        // upload or job started this minute sees a current
+                        // verdict.
+                        crate::state::diskbudget::monitor(srv);
                         call_periodic_job_hook(srv, "min");
                     }
                     call_periodic_job_hook(srv, "sec");

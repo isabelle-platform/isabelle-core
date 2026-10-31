@@ -168,6 +168,13 @@ async fn handle_message(state: &State, msg: CoreMessage) {
         CoreMessage::GlobalsGetDataPath { reply } => {
             let _ = reply.send(srv.data_path.lock().clone());
         }
+        CoreMessage::GlobalsGetDiskReport { reply } => {
+            let _ = reply.send(crate::state::diskbudget::report(srv));
+        }
+        CoreMessage::GlobalsSetDiskPolicy { policy, reply } => {
+            let ok = crate::state::diskbudget::set_policy(srv, policy).await;
+            let _ = reply.send(ok);
+        }
         CoreMessage::GlobalsGetSettings { reply } => {
             let s = srv.rw.get_settings().await;
             let _ = reply.send(s);

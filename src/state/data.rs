@@ -29,7 +29,7 @@ use crate::state::store::Store;
 use crate::state::store_local::*;
 #[cfg(not(feature = "full_file_database"))]
 use crate::state::store_mongo::*;
-use isabelle_plugin_api::actor::{CoreHandle, PluginRegistry};
+use isabelle_plugin_api::actor::{CoreHandle, DiskPolicy, PluginRegistry};
 use log::info;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -78,6 +78,17 @@ pub struct Data {
     /// Deadline for reading a request body, in seconds. See
     /// `DEFAULT_BODY_TIMEOUT_SECS` for why a body needs one of its own.
     pub body_timeout_secs: std::sync::atomic::AtomicU64,
+
+    /// Set by the periodic disk monitor when the data filesystem's free space
+    /// is at or below the reserved headroom (see `state::diskbudget`). While
+    /// set, file uploads are refused, so a filling disk cannot cross into the
+    /// space the host keeps for itself. Cleared automatically on recovery.
+    pub disk_low: std::sync::atomic::AtomicBool,
+
+    /// The active disk-budget policy: how the data filesystem is shared out.
+    /// Starts at the shipped default, is loaded from settings at startup, and
+    /// is replaced by `diskbudget::set_policy`. The monitor reads it each tick.
+    pub disk_policy: Mutex<DiskPolicy>,
 
     /// Path to script invoked by POST /system/update
     pub update_script: Mutex<String>,
@@ -153,6 +164,8 @@ impl Data {
             port: std::sync::atomic::AtomicU16::new(8090),
             max_payload_bytes: std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_PAYLOAD_BYTES),
             body_timeout_secs: std::sync::atomic::AtomicU64::new(DEFAULT_BODY_TIMEOUT_SECS),
+            disk_low: std::sync::atomic::AtomicBool::new(false),
+            disk_policy: Mutex::new(DiskPolicy::default()),
             update_script: Mutex::new(String::new()),
             openapi_private: std::sync::atomic::AtomicBool::new(false),
             secrets: Mutex::new(None),

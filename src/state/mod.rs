@@ -23,6 +23,7 @@
  */
 pub mod core_task;
 pub mod data;
+pub mod diskbudget;
 pub mod features;
 pub mod merger;
 pub mod route_cache;

@@ -28,6 +28,10 @@ async-trait = "0.1.74"
 base64 = "0.22"
 bson = { version = "2.9.0", features = ["serde_with"] }
 chrono = "0.4.26"
+# statvfs(3) for the disk-budget monitor — reads total/available bytes of the
+# data filesystem so the server can keep free headroom for the host. rustix's
+# safe wrapper, because the crate is `#![forbid(unsafe_code)]`.
+rustix = { version = "0.38", features = ["fs"] }
 clap = { version = "4.5.23", features = ["derive"] }
 cron = "0.12.1"
 env_logger = "0.8.4"
@@ -40,7 +44,7 @@ ldap3 = { version = "0.12", default-features = false, features = [
 	"tls-rustls-ring",
 ] }
 isabelle-dm = { "git" = "https://github.com/isabelle-platform/isabelle-dm", tag = "1.10.0" }
-isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.28.0" }
+isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.29.0" }
 lettre = { version = "0.11.11", features = [
 	"rustls-tls",
 	"smtp-transport",
