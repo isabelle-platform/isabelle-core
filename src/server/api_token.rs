@@ -448,6 +448,17 @@ pub async fn issue(srv: &Data, owner: u64, req: &IssueRequest) -> Result<(u64, S
         return Err("a token with no scopes could not be used for anything".to_string());
     }
 
+    // A store hands out identifiers only in the collections the flavour
+    // declares. Undeclared, every token was written as id `u64::MAX`, and each
+    // new one replaced the last: issuing a token for one phone silently
+    // revoked the one on the phone before it.
+    if !srv.has_collection(COLLECTION) {
+        return Err(format!(
+            "this deployment does not declare the {} collection in its internals",
+            COLLECTION
+        ));
+    }
+
     let secret = generate_secret();
     let now = now();
 
@@ -473,6 +484,9 @@ pub async fn issue(srv: &Data, owner: u64, req: &IssueRequest) -> Result<(u64, S
     itm.set_bool(FIELD_REVOKED, false);
 
     let id = srv.rw.set_item(COLLECTION, &itm, false).await;
+    if id == u64::MAX {
+        return Err("the token could not be stored".to_string());
+    }
     Ok((id, assemble(id, &secret)))
 }
 
@@ -627,6 +641,38 @@ pub async fn api_token_revoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::store_memory::StoreMemory;
+
+    fn phone() -> IssueRequest {
+        IssueRequest {
+            name: "phone".to_string(),
+            scopes: vec!["prospects".to_string()],
+            expires_days: 0,
+        }
+    }
+
+    fn data_with(collections: &[&str]) -> Data {
+        let mut data = Data::new();
+        data.rw = Box::new(StoreMemory::with_collections(collections));
+        data
+    }
+
+    /// Two phones, two tokens: the second must not take the first one's place.
+    #[actix_web::test]
+    async fn every_token_gets_an_identifier_of_its_own() {
+        let data = data_with(&["user", COLLECTION]);
+        let (a, _) = issue(&data, 1, &phone()).await.unwrap();
+        let (b, _) = issue(&data, 2, &phone()).await.unwrap();
+        assert_ne!(a, u64::MAX);
+        assert_ne!(a, b);
+        assert_eq!(list_of(&data, 1).await.len(), 1);
+    }
+
+    #[actix_web::test]
+    async fn no_token_is_issued_where_the_collection_is_undeclared() {
+        let data = data_with(&["user"]);
+        assert!(issue(&data, 1, &phone()).await.is_err());
+    }
 
     fn stored(secret: &str) -> Item {
         let mut itm = Item::new();
