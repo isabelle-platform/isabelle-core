@@ -78,6 +78,12 @@ pub struct RouteCache {
     /// handler itself knows what it is editing, and it is the only thing on
     /// that route worth naming a scope after.
     pub collection_scopes: HashMap<String, String>,
+
+    /// Which networks may reach which routes, and through which proxies the
+    /// client's address is read. Source: `perimeter_route` in `internals.js`
+    /// and the `perimeter` feature in `features.js`, set by
+    /// `Data::rebuild_route_cache`; see `server::perimeter`.
+    pub perimeter: crate::server::perimeter::Perimeter,
 }
 
 impl RouteCache {

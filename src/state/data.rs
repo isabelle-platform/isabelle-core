@@ -213,7 +213,14 @@ impl Data {
     /// no invalidation logic is required.
     pub async fn rebuild_route_cache(&self) {
         let internals = self.rw.get_internals().await;
-        let new = Arc::new(RouteCache::from_internals(&internals));
+        let mut cache = RouteCache::from_internals(&internals);
+        // The perimeter takes its routes from internals.js and its networks
+        // from features.js, so the features have to be loaded first.
+        cache.perimeter = crate::server::perimeter::Perimeter::from_config(
+            &internals,
+            self.features().descriptor("perimeter"),
+        );
+        let new = Arc::new(cache);
         info!(
             "Route cache built: {} url + {} unprotected + {} rest + {} pre-edit ({} wildcard) + {} post-edit ({} wildcard)",
             new.url_routes.len(),
@@ -224,6 +231,9 @@ impl Data {
             new.item_post_edit.values().map(|v| v.len()).sum::<usize>(),
             new.item_post_edit_wildcard.len(),
         );
+        if new.perimeter.mode != crate::server::perimeter::Mode::Off {
+            info!("Security perimeter: {:?}", new.perimeter.mode);
+        }
         *self.route_cache.lock() = new;
     }
 

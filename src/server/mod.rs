@@ -31,6 +31,7 @@ pub mod login;
 pub mod oauth;
 pub mod openapi;
 pub mod owner;
+pub mod perimeter;
 pub mod public_read;
 pub mod secret;
 pub mod setting;

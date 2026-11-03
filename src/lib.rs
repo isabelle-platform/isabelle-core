@@ -398,14 +398,15 @@ where
         srv.init_checks().await;
         info!("Flow: performed initialization checks");
 
+        // What this deployment is allowed to do. Read once, like
+        // `internals.js`, and never written back. Before the route cache:
+        // the security perimeter in it takes its networks from here.
+        srv.load_features();
+
         // Pre-parse routing tables from internals.js so request handlers
         // can do O(1) lookups instead of re-splitting "path:method:handler"
         // strings on every request.
         srv.rebuild_route_cache().await;
-
-        // What this deployment is allowed to do. Read once, like
-        // `internals.js`, and never written back.
-        srv.load_features();
 
         // Initialize Google Calendar
         info!("Flow: initializing Google Calendar");
@@ -552,6 +553,9 @@ where
                 args.cookie_http_insecure,
                 session_key.clone(),
             ))
+            // Outermost: a request from outside the network its route needs
+            // is turned away before anything else looks at it.
+            .wrap(from_fn(crate::server::perimeter::enforce_perimeter))
             .route("/itm/edit", web::post().to(itm_edit))
             .route("/itm/del", web::post().to(itm_del))
             .route("/itm/list", web::get().to(itm_list))
