@@ -186,6 +186,17 @@ pub async fn send_email(srv: &crate::state::data::Data, to: &str, subject: &str,
     info!("Building email...");
 
     if to == "" || smtp_server == "" || smtp_login == "" || smtp_password == "" || smtp_from == "" {
+        // The installation's own mail server always wins; the platform's
+        // relay is only for an instance that was never given one. An
+        // operator who configures SMTP has said where their mail goes, and
+        // a relay that quietly took over would be second-guessing them.
+        if !to.is_empty() {
+            let data_path = srv.data_path.lock().clone();
+            if let Some(relay) = mail_relay(&data_path) {
+                send_via_relay(relay_request(&relay, to, subject, body));
+                return;
+            }
+        }
         info!("Input options not present");
         return;
     }
@@ -237,6 +248,215 @@ pub async fn send_email(srv: &crate::state::data::Data, to: &str, subject: &str,
 /// a queue of messages to a server that has gone away drains in minutes
 /// rather than hours.
 const SMTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The platform document, beside the instance's data.
+///
+/// Written by the deployment, not by anybody using the instance: how the
+/// instance reaches the platform's services is the operator's business, so it
+/// does not live in the settings its administrators edit.
+const PLATFORM_FILE: &str = "platform.json";
+
+/// The section of the platform document that says where to relay mail.
+const MAIL_SECTION: &str = "mail";
+
+/// Where to send mail when the installation has no mail server of its own.
+///
+/// An instance the platform provisioned is not given SMTP credentials — one
+/// shared mailbox password on every machine would be one leak away from
+/// every machine — so it is given a relay and a token of its own instead,
+/// which the platform can limit and revoke one machine at a time.
+#[derive(Clone, PartialEq)]
+struct MailRelay {
+    url: String,
+    token: String,
+}
+
+/// Without the token. The token is a credential, and a `{:?}` somebody adds
+/// to a log line while debugging must not be the way it reaches the log.
+impl std::fmt::Debug for MailRelay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailRelay")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// The relay this instance was given, if it was given one.
+///
+/// Read on every send rather than once at startup: sends are rare, and a
+/// document the deployment rewrites — a token rotated, a relay moved — then
+/// takes effect without anybody having to remember to restart the core.
+fn mail_relay(data_path: &str) -> Option<MailRelay> {
+    let path = format!("{}/{}", data_path.trim_end_matches('/'), PLATFORM_FILE);
+    mail_relay_from_path(&path)
+}
+
+/// The `mail` section of the document at `path`, if it is usable.
+///
+/// Every way of not being usable — no file, not JSON, not an object, no
+/// section, a section that is not an object, an empty url or token — means
+/// the same thing: no relay here. Most installations have no platform
+/// document at all, and that is the ordinary case, not an error; the
+/// warnings are for a document that exists and is wrong, which is a mistake
+/// somebody can fix.
+fn mail_relay_from_path(path: &str) -> Option<MailRelay> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => {
+            log::warn!("{} is not a JSON object; not relaying mail", path);
+            return None;
+        }
+    };
+    let section = match doc.get(MAIL_SECTION) {
+        Some(serde_json::Value::Object(m)) => m,
+        Some(_) => {
+            log::warn!(
+                "section '{}' of {} is not an object; ignoring it",
+                MAIL_SECTION,
+                path
+            );
+            return None;
+        }
+        None => return None,
+    };
+    let field = |key: &str| {
+        section
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let url = field("url");
+    let token = field("token");
+    if url.is_empty() || token.is_empty() {
+        return None;
+    }
+    Some(MailRelay { url, token })
+}
+
+/// One request to the relay, everything decided and nothing sent.
+///
+/// Built apart from the sending so that what goes over the wire can be
+/// checked without a network: the address, the credential and the body are
+/// the whole contract with the other side.
+#[derive(PartialEq)]
+struct RelayRequest {
+    url: String,
+    token: String,
+    json: serde_json::Value,
+}
+
+/// The header the relay reads this machine's token from.
+///
+/// Not `Authorization`. The relay is a plugin behind another core, and that
+/// core keeps `Authorization` to itself — it is how the core knows who is
+/// calling — so a token sent there would be gone before the relay saw it.
+const RELAY_TOKEN_HEADER: &str = "X-Platform-Mail-Token";
+
+/// What to ask the relay to send.
+///
+/// The body exactly as the caller gave it. The relay knows how to send a
+/// document as well as text, so deciding that here would be a second copy of
+/// a rule that already has a home.
+fn relay_request(relay: &MailRelay, to: &str, subject: &str, body: &str) -> RelayRequest {
+    RelayRequest {
+        url: relay.url.clone(),
+        token: relay.token.clone(),
+        json: serde_json::json!({
+            "to": to,
+            "subject": subject,
+            "body": body,
+        }),
+    }
+}
+
+/// The relay's answer, as far as anybody here needs it.
+#[derive(Debug, Default, serde::Deserialize)]
+struct RelayResponse {
+    #[serde(default)]
+    succeeded: bool,
+    #[serde(default)]
+    error: String,
+    /// Which kind of refusal: `token` (refused or revoked — the platform's
+    /// to reissue), `limit` (over this machine's allowance — to be waited
+    /// out), `request` (something in the message itself), or empty.
+    #[serde(default)]
+    reason: String,
+}
+
+/// Whether the relay sent it, or what to tell the log about why not.
+///
+/// The relay answers every request it understood with 200 and says in the
+/// body whether it sent it, because a plugin cannot choose its own status.
+/// So any other status is not the relay speaking: it is whatever stands in
+/// front of it — a proxy, a core that is restarting — and is reported as the
+/// relay not being reached at all.
+///
+/// The reason is in the log beside the error, because each one sends
+/// whoever reads it somewhere different.
+fn relay_outcome(status: u16, response: Option<RelayResponse>) -> Result<(), String> {
+    if !(200..=299).contains(&status) {
+        return Err(format!(
+            "the mail relay could not be reached: HTTP {status}"
+        ));
+    }
+    match response {
+        Some(r) if r.succeeded => Ok(()),
+        Some(r) => {
+            let reason = if r.reason.is_empty() {
+                "unspecified"
+            } else {
+                r.reason.as_str()
+            };
+            Err(format!("the relay did not send it ({reason}): {}", r.error))
+        }
+        None => Err("the relay's answer was not one it should give".to_string()),
+    }
+}
+
+/// Send through the relay, off the core task, and not waited for.
+///
+/// For the same reason as the SMTP path: a relay that stopped answering must
+/// not stop the loop that carries every plugin's reads and writes. The
+/// client is asynchronous, so this is a task of its own rather than a thread,
+/// and the deadline is the same number the SMTP conversation has.
+///
+/// The log says what happened and never with what: the token is a
+/// credential, and the recipient is not logged on the SMTP path either.
+fn send_via_relay(request: RelayRequest) {
+    actix_rt::spawn(async move {
+        let client = match reqwest::Client::builder().timeout(SMTP_TIMEOUT).build() {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Could not send email through the relay: {}", e);
+                return;
+            }
+        };
+        let answer = client
+            .post(&request.url)
+            .header(RELAY_TOKEN_HEADER, &request.token)
+            .json(&request.json)
+            .send()
+            .await;
+        let answer = match answer {
+            Ok(a) => a,
+            Err(e) => {
+                // Without the URL: reqwest's error carries it, and a URL is
+                // the one place somebody might yet put a credential.
+                error!("Could not reach the mail relay: {}", e.without_url());
+                return;
+            }
+        };
+        let status = answer.status().as_u16();
+        let response = answer.json::<RelayResponse>().await.ok();
+        match relay_outcome(status, response) {
+            Ok(()) => info!("Email sent successfully through the relay"),
+            Err(e) => error!("Could not send email: {}", e),
+        }
+    });
+}
 
 /// The message, or why there is not one.
 ///
@@ -434,6 +654,148 @@ mod tests {
     #[test]
     fn the_conversation_has_a_deadline() {
         assert_eq!(SMTP_TIMEOUT, Duration::from_secs(30));
+    }
+
+    /// A platform document in a directory of its own, for the tests below.
+    fn platform_doc(name: &str, body: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "isabelle-relay-test-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(PLATFORM_FILE), body).unwrap();
+        dir.to_str().unwrap().to_string()
+    }
+
+    /// What the platform hands a machine it provisioned.
+    #[test]
+    fn a_relay_is_read_from_the_platform_document() {
+        let dir = platform_doc(
+            "good",
+            r#"{"bublik": {"container": "c"},
+                "mail": {"url": "https://midair.dev/api/mail/send", "token": "t0k"}}"#,
+        );
+        let relay = mail_relay(&format!("{dir}/"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            relay,
+            Some(MailRelay {
+                url: "https://midair.dev/api/mail/send".to_string(),
+                token: "t0k".to_string(),
+            })
+        );
+    }
+
+    /// Most installations have no platform document, and that is the
+    /// ordinary case: no relay, and no complaint.
+    #[test]
+    fn no_document_means_no_relay() {
+        assert_eq!(mail_relay("/nonexistent/isabelle"), None);
+    }
+
+    /// A document that is there and wrong is still no relay — never half of
+    /// one, and never a panic.
+    #[test]
+    fn a_broken_document_means_no_relay() {
+        for (name, body) in [
+            ("not-json", "{ this is not"),
+            ("array", "[1, 2]"),
+            ("no-section", r#"{"bublik": {}}"#),
+            ("string-section", r#"{"mail": "https://midair.dev"}"#),
+            ("array-section", r#"{"mail": ["u", "t"]}"#),
+            (
+                "empty-token",
+                r#"{"mail": {"url": "https://a.dev", "token": ""}}"#,
+            ),
+            ("empty-url", r#"{"mail": {"url": "", "token": "t"}}"#),
+            (
+                "blank-token",
+                r#"{"mail": {"url": "https://a.dev", "token": "  "}}"#,
+            ),
+            ("no-token", r#"{"mail": {"url": "https://a.dev"}}"#),
+            (
+                "number-token",
+                r#"{"mail": {"url": "https://a.dev", "token": 7}}"#,
+            ),
+        ] {
+            let dir = platform_doc(name, body);
+            let relay = mail_relay(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(relay, None, "{body}");
+        }
+    }
+
+    /// The whole contract with the other side: where, with what, and the
+    /// body exactly as the caller wrote it.
+    #[test]
+    fn the_relay_request_is_the_contract() {
+        let relay = MailRelay {
+            url: "https://midair.dev/api/mail/send".to_string(),
+            token: "t0k".to_string(),
+        };
+        let html = "<!DOCTYPE html><html><body>Code: 1</body></html>";
+        let r = relay_request(&relay, "to@e.dev", "Your code", html);
+        assert_eq!(r.url, "https://midair.dev/api/mail/send");
+        assert_eq!(r.token, "t0k");
+        assert_eq!(RELAY_TOKEN_HEADER, "X-Platform-Mail-Token");
+        assert_eq!(
+            r.json,
+            serde_json::json!({"to": "to@e.dev", "subject": "Your code", "body": html})
+        );
+    }
+
+    /// The token is a credential; a `{:?}` added while debugging must not be
+    /// the way it reaches the log.
+    #[test]
+    fn the_token_is_not_in_the_debug_output() {
+        let relay = MailRelay {
+            url: "https://a.dev".to_string(),
+            token: "very-secret-token".to_string(),
+        };
+        let shown = format!("{relay:?}");
+        assert!(!shown.contains("very-secret-token"), "{shown}");
+        assert!(shown.contains("https://a.dev"), "{shown}");
+    }
+
+    /// Each answer the relay can give, read the way the contract says.
+    #[test]
+    fn the_relay_answer_is_read_by_the_contract() {
+        let answer = |succeeded: bool, error: &str, reason: &str| {
+            Some(RelayResponse {
+                succeeded,
+                error: error.to_string(),
+                reason: reason.to_string(),
+            })
+        };
+        assert!(relay_outcome(200, answer(true, "", "")).is_ok());
+
+        for reason in ["token", "limit", "request"] {
+            let e = relay_outcome(200, answer(false, "no", reason)).unwrap_err();
+            assert!(e.contains(reason) && e.contains("no"), "{e}");
+        }
+        let e = relay_outcome(200, answer(false, "odd", "")).unwrap_err();
+        assert!(e.contains("odd"), "{e}");
+
+        // A 200 that is not the relay's answer is not a success.
+        assert!(relay_outcome(200, None).is_err());
+        // Anything but 2xx is something in front of the relay, whatever the
+        // body says.
+        for status in [401, 429, 502] {
+            let e = relay_outcome(status, answer(true, "", "")).unwrap_err();
+            assert!(e.contains(&status.to_string()), "{e}");
+        }
+    }
+
+    /// The reason may be absent: an older relay, or one that has nothing to
+    /// add. Its answer is still read.
+    #[test]
+    fn an_answer_without_a_reason_is_still_an_answer() {
+        let r: RelayResponse =
+            serde_json::from_str(r#"{"succeeded": false, "error": "x"}"#).unwrap();
+        assert_eq!(r.reason, "");
+        assert!(relay_outcome(200, Some(r)).is_err());
     }
 
     /// An exact marker, not a guess. A message that merely mentions a tag —
