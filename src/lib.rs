@@ -62,7 +62,9 @@ use crate::handler::route::url_unprotected_post_route;
 use crate::handler::route::url_unprotected_route;
 use crate::handler::route_call::call_periodic_job_hook;
 use crate::notif::gcal::*;
-use crate::server::api_token::{api_token_issue, api_token_list, api_token_revoke};
+use crate::server::api_token::{
+    api_token_issue, api_token_list, api_token_revoke, api_token_revoke_all,
+};
 use crate::server::auth_config::*;
 use crate::server::feature::feature_list;
 use crate::server::guards::{
@@ -615,6 +617,10 @@ where
             .route("/api_token/issue", web::post().to(api_token_issue))
             .route("/api_token/list", web::get().to(api_token_list))
             .route("/api_token/revoke", web::post().to(api_token_revoke))
+            .route(
+                "/api_token/revoke_all",
+                web::post().to(api_token_revoke_all),
+            )
             // Registered before the plugin routes below, so a plugin cannot
             // shadow the description of the very surface it is part of.
             .route(OPENAPI_PATH, web::get().to(openapi_json))

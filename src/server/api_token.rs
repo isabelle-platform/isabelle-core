@@ -65,6 +65,7 @@ use actix_identity::Identity;
 use actix_web::{web, HttpResponse};
 use isabelle_dm::data_model::item::Item;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 /// The collection tokens live in.
 pub const COLLECTION: &str = "api_token";
@@ -83,6 +84,9 @@ pub const FIELD_CREATED: &str = "created";
 pub const FIELD_EXPIRES: &str = "expires";
 pub const FIELD_LAST_USED: &str = "last_used";
 pub const FIELD_REVOKED: &str = "revoked";
+/// What the program that asked for the token said about itself, as a JSON
+/// object of short strings. See [`client_of`].
+pub const FIELD_CLIENT: &str = "client";
 
 /// Every scope this instance's own routes name, for tests that need a token
 /// that holds everything there is to hold.
@@ -395,7 +399,7 @@ pub async fn touch(srv: &Data, record: &Item) {
 
 // ── The endpoints that manage tokens ────────────────────────────────────────
 //
-// All three need a session: they are in `NEVER`, so a token cannot reach them.
+// All of them need a session: they are in `NEVER`, so a token cannot reach them.
 // That is the rule that keeps a leaked token from renewing itself — whoever
 // holds one can use the API, but making another one takes the password.
 
@@ -409,12 +413,53 @@ pub struct IssueRequest {
     /// Days until it stops working; 0 or absent means it does not expire.
     #[serde(default)]
     pub expires_days: u64,
+    /// What the program asking says about itself — its name, version, the
+    /// device it runs on — so that a list of tokens says what each one is
+    /// in. Shown to the owner and administrators, never trusted: it is
+    /// whatever the caller chose to write. See [`client_of`].
+    #[serde(default)]
+    pub client: BTreeMap<String, String>,
+}
+
+/// How much of a client's description is kept: a few short fields, enough to
+/// recognise a laptop or a phone, and nothing that could carry a payload.
+const CLIENT_FIELDS: usize = 12;
+const CLIENT_KEY_LEN: usize = 32;
+const CLIENT_VALUE_LEN: usize = 200;
+
+/// A client's description as it is stored: keys of lower-case letters,
+/// digits and `_`, values on one line and cut to length, empty ones dropped.
+pub fn client_of(given: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    given
+        .iter()
+        .filter(|(k, _)| {
+            !k.is_empty()
+                && k.len() <= CLIENT_KEY_LEN
+                && k.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+        .filter_map(|(k, v)| {
+            let v: String = v
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let v: String = v.chars().take(CLIENT_VALUE_LEN).collect();
+            (!v.is_empty()).then(|| (k.clone(), v))
+        })
+        .take(CLIENT_FIELDS)
+        .collect()
 }
 
 /// One token as its owner sees it afterwards — never the secret.
 #[derive(serde::Serialize)]
 pub struct TokenView {
     pub id: u64,
+    /// The account it belongs to: one's own on one's own list, anybody's on
+    /// an administrator's list of all of them.
+    pub user: u64,
     pub name: String,
     pub shown: String,
     pub scopes: Vec<String>,
@@ -422,12 +467,14 @@ pub struct TokenView {
     pub expires: u64,
     pub last_used: u64,
     pub revoked: bool,
+    pub client: BTreeMap<String, String>,
 }
 
 impl TokenView {
     pub fn of(record: &Item) -> Self {
         TokenView {
             id: record.id,
+            user: record.safe_id(FIELD_USER, u64::MAX),
             name: record.safe_str(FIELD_NAME, ""),
             shown: record.safe_str(FIELD_SHOWN, ""),
             scopes: scopes_of(record),
@@ -435,6 +482,7 @@ impl TokenView {
             expires: record.safe_u64(FIELD_EXPIRES, 0),
             last_used: record.safe_u64(FIELD_LAST_USED, 0),
             revoked: record.safe_bool(FIELD_REVOKED, false),
+            client: serde_json::from_str(&record.safe_str(FIELD_CLIENT, "")).unwrap_or_default(),
         }
     }
 }
@@ -482,6 +530,13 @@ pub async fn issue(srv: &Data, owner: u64, req: &IssueRequest) -> Result<(u64, S
         },
     );
     itm.set_bool(FIELD_REVOKED, false);
+    let client = client_of(&req.client);
+    if !client.is_empty() {
+        itm.set_str(
+            FIELD_CLIENT,
+            &serde_json::to_string(&client).unwrap_or_default(),
+        );
+    }
 
     let id = srv.rw.set_item(COLLECTION, &itm, false).await;
     if id == u64::MAX {
@@ -492,15 +547,35 @@ pub async fn issue(srv: &Data, owner: u64, req: &IssueRequest) -> Result<(u64, S
 
 /// Every token belonging to one account, newest first.
 pub async fn list_of(srv: &Data, owner: u64) -> Vec<TokenView> {
+    list_where(srv, Some(owner)).await
+}
+
+/// Every token, or every one of `owner`'s, newest first.
+pub async fn list_where(srv: &Data, owner: Option<u64>) -> Vec<TokenView> {
     let all = srv.rw.get_all_items(COLLECTION, "id", "").await;
-    let mut mine: Vec<TokenView> = all
+    let mut out: Vec<TokenView> = all
         .map
         .values()
-        .filter(|r| r.safe_id(FIELD_USER, u64::MAX) == owner)
+        .filter(|r| owner.is_none_or(|o| r.safe_id(FIELD_USER, u64::MAX) == o))
         .map(TokenView::of)
         .collect();
-    mine.sort_by(|a, b| b.created.cmp(&a.created));
-    mine
+    out.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
+    out
+}
+
+/// Revoke every token still working — all of them, or `owner`'s — and say
+/// how many that was.
+pub async fn revoke_where(srv: &Data, owner: Option<u64>) -> usize {
+    let live: Vec<u64> = list_where(srv, owner)
+        .await
+        .into_iter()
+        .filter(|t| !t.revoked)
+        .map(|t| t.id)
+        .collect();
+    for id in &live {
+        revoke(srv, *id).await;
+    }
+    live.len()
 }
 
 /// Stop a token working, without losing the record of it having existed.
@@ -512,7 +587,7 @@ pub async fn revoke(srv: &Data, id: u64) -> bool {
     true
 }
 
-/// Answer shapes for the three endpoints.
+/// Answer shapes for the endpoints.
 #[derive(serde::Serialize)]
 struct Answer<T: serde::Serialize> {
     succeeded: bool,
@@ -590,22 +665,88 @@ pub async fn api_token_issue(
 pub struct OwnerQuery {
     #[serde(default)]
     pub user: Option<u64>,
+    /// `all=1`: everybody's tokens. For administrators.
+    #[serde(default)]
+    pub all: Option<String>,
 }
 
+/// Whether the caller is an administrator; the answer to send when not.
+async fn administrator(data: &web::Data<State>, user: &Identity) -> Result<(), HttpResponse> {
+    let srv: &Data = &data.server;
+    let me = get_user(srv, principal(user)).await;
+    if me.is_some() && check_role(srv, &me, "admin").await {
+        Ok(())
+    } else {
+        Err(failed("only an administrator sees everybody's tokens"))
+    }
+}
+
+/// `GET /api_token/list[?user=<id>|?all=1]`: one's own tokens; somebody
+/// else's, or everybody's, for an administrator.
 pub async fn api_token_list(
     user: Identity,
     data: web::Data<State>,
     query: web::Query<OwnerQuery>,
 ) -> HttpResponse {
-    let owner = match subject(&data, &user, query.user).await {
-        Ok(id) => id,
-        Err(r) => return r,
+    let owner = if query.all.as_deref() == Some("1") {
+        if let Err(r) = administrator(&data, &user).await {
+            return r;
+        }
+        None
+    } else {
+        match subject(&data, &user, query.user).await {
+            Ok(id) => Some(id),
+            Err(r) => return r,
+        }
     };
     HttpResponse::Ok().json(Answer {
         succeeded: true,
         error: String::new(),
-        data: serde_json::json!({"tokens": list_of(&data.server, owner).await}),
+        data: serde_json::json!({"tokens": list_where(&data.server, owner).await}),
     })
+}
+
+#[derive(serde::Deserialize)]
+pub struct RevokeAllRequest {
+    /// Whose: one's own when absent; somebody else's for an administrator.
+    #[serde(default)]
+    pub user: Option<u64>,
+    /// Everybody's, for an administrator: what to do when tokens may have
+    /// leaked. Sessions in browsers are not touched, so the person doing it
+    /// stays signed in to issue new ones.
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// `POST /api_token/revoke_all` (`{"user": id}` or `{"all": true}`).
+pub async fn api_token_revoke_all(
+    user: Identity,
+    data: web::Data<State>,
+    mut payload: web::Payload,
+) -> HttpResponse {
+    let limits = Limits::from_data(&data.server);
+    let body: RevokeAllRequest =
+        match read_json_body::<RevokeAllRequest>(&mut payload, limits).await {
+            Ok(v) => v,
+            Err(e) => return HttpResponse::build(e.status()).finish(),
+        };
+    let owner = if body.all {
+        if let Err(r) = administrator(&data, &user).await {
+            return r;
+        }
+        None
+    } else {
+        match subject(&data, &user, body.user).await {
+            Ok(id) => Some(id),
+            Err(r) => return r,
+        }
+    };
+    let n = revoke_where(&data.server, owner).await;
+    match owner {
+        Some(o) => log::info!("Revoked {} API tokens of user {}", n, o),
+        None => log::info!("Revoked all {} API tokens", n),
+    }
+    HttpResponse::Ok().json(serde_json::json!({"succeeded": true, "revoked": n}))
 }
 
 #[derive(serde::Deserialize)]
@@ -648,7 +789,59 @@ mod tests {
             name: "phone".to_string(),
             scopes: vec!["prospects".to_string()],
             expires_days: 0,
+            client: BTreeMap::new(),
         }
+    }
+
+    /// A token says which program and device it was issued to, as that
+    /// program told it, in a shape that cannot carry anything else.
+    #[actix_web::test]
+    async fn a_token_keeps_what_its_client_said_about_itself() {
+        let data = data_with(&["user", COLLECTION]);
+        let mut req = phone();
+        req.client = BTreeMap::from([
+            ("app".to_string(), "Field app".to_string()),
+            ("version".to_string(), "1.3.0 (7)".to_string()),
+            ("device".to_string(), "Ann's\nphone".to_string()),
+            ("Bad-Key".to_string(), "dropped".to_string()),
+            ("empty".to_string(), "   ".to_string()),
+            ("long".to_string(), "x".repeat(500)),
+        ]);
+        let (id, _) = issue(&data, 1, &req).await.unwrap();
+        let t = list_of(&data, 1)
+            .await
+            .into_iter()
+            .find(|t| t.id == id)
+            .unwrap();
+        assert_eq!(t.user, 1);
+        assert_eq!(t.client["app"], "Field app");
+        assert_eq!(t.client["device"], "Ann's phone");
+        assert_eq!(t.client["long"].len(), CLIENT_VALUE_LEN);
+        assert!(!t.client.contains_key("Bad-Key"));
+        assert!(!t.client.contains_key("empty"));
+
+        let many: BTreeMap<String, String> = (0..40)
+            .map(|i| (format!("k{i}"), "v".to_string()))
+            .collect();
+        assert_eq!(client_of(&many).len(), CLIENT_FIELDS);
+    }
+
+    /// Revoking all of one person's tokens leaves the others' working;
+    /// revoking all of them leaves none, and says how many.
+    #[actix_web::test]
+    async fn revoking_all_is_by_owner_or_everything() {
+        let data = data_with(&["user", COLLECTION]);
+        issue(&data, 1, &phone()).await.unwrap();
+        issue(&data, 1, &phone()).await.unwrap();
+        issue(&data, 2, &phone()).await.unwrap();
+        assert_eq!(list_where(&data, None).await.len(), 3);
+
+        assert_eq!(revoke_where(&data, Some(1)).await, 2);
+        assert!(list_of(&data, 1).await.iter().all(|t| t.revoked));
+        assert!(list_of(&data, 2).await.iter().all(|t| !t.revoked));
+        // Already revoked ones are not counted again.
+        assert_eq!(revoke_where(&data, None).await, 1);
+        assert!(list_where(&data, None).await.iter().all(|t| t.revoked));
     }
 
     fn data_with(collections: &[&str]) -> Data {
