@@ -495,6 +495,14 @@ pub async fn is_logged_in(_user: Option<Identity>, data: web::Data<State>) -> im
     user.username = identity;
     user.id = found.id;
 
+    // The person's display name, so the UI can greet and address them by name
+    // rather than by a slice of their e-mail. Absent for a bare account; the
+    // caller falls back to the login in that case.
+    let display_name = found.safe_str("name", "");
+    if !display_name.is_empty() {
+        user.params.insert("name".to_string(), display_name);
+    }
+
     // Roles are the `role_is_*` bool flags that are actually set. Only true
     // flags count: reading the key alone once handed "admin" to every user
     // carrying an explicit `role_is_admin: false`.
