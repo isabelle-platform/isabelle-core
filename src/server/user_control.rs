@@ -418,15 +418,19 @@ pub fn write_invalidates_sessions(
 /// `role_is_admin` has to end that account's sessions exactly as the UI does.
 ///
 /// Does nothing for other collections, and nothing for a creation.
+/// Returns the new session generation when the write revokes sessions, so the
+/// caller holding the current request can keep *that* session alive (a person
+/// changing their own password must not be thrown out of the tab they did it
+/// in); `None` when nothing was revoked.
 pub async fn apply_session_revocation(
     srv: &crate::state::data::Data,
     collection: &str,
     old_itm: Option<&Item>,
     itm: &mut Item,
     merge: bool,
-) {
+) -> Option<u64> {
     if collection != "user" {
-        return;
+        return None;
     }
     let role_prefix = srv
         .rw
@@ -434,12 +438,18 @@ pub async fn apply_session_revocation(
         .await
         .safe_str("user_role_prefix", "role_is_");
     if write_invalidates_sessions(old_itm, itm, merge, &role_prefix) {
-        let current = old_itm.map(session_generation).unwrap_or(0);
-        itm.set_u64("session_gen", current.saturating_add(1));
+        let next = old_itm
+            .map(session_generation)
+            .unwrap_or(0)
+            .saturating_add(1);
+        itm.set_u64("session_gen", next);
         log::info!(
             "Revoking sessions of user {}: credentials or roles changed",
             itm.id
         );
+        Some(next)
+    } else {
+        None
     }
 }
 

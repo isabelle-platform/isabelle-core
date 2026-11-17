@@ -22,6 +22,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 use crate::handler::route_call::*;
+use crate::server::guards::SESSION_GEN_KEY;
 use crate::server::list_filter::{field_is_allowed, redact_credentials, validate_client_filter};
 use crate::server::user_control::*;
 use crate::state::state::*;
@@ -29,6 +30,7 @@ use crate::state::store::Store;
 use crate::util::multipart::{read_fields, Limits};
 use actix_identity::Identity;
 use actix_multipart::Multipart;
+use actix_session::SessionExt;
 use actix_web::{web, HttpRequest, HttpResponse};
 use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use isabelle_dm::data_model::item::Item;
@@ -173,7 +175,7 @@ pub async fn itm_edit(
         // sessions opened under the old state running. The generation is
         // raised as part of the same write, so the guard middleware refuses
         // those cookies from the next request on.
-        apply_session_revocation(
+        let revoked_gen = apply_session_revocation(
             srv,
             &mc.collection,
             old_itm.as_ref(),
@@ -200,6 +202,24 @@ pub async fn itm_edit(
             );
         }
         info!("Collection {} element {} set", mc.collection, r);
+
+        // The write above may have revoked every session this account holds
+        // (a password or role change). When the caller edited their *own*
+        // record, keep the session this request rides on: re-stamp it with the
+        // new generation so it still matches, while every other session the
+        // account holds keeps the old one and is refused. Without this, setting
+        // your own password during first-run setup logs you straight back out
+        // and the next request (pulling the first builds, say) is a 401.
+        if let Some(new_gen) = revoked_gen {
+            if mc.collection == "user" && usr.as_ref().map(|u| u.id) == Some(itm.id) {
+                if let Err(e) = req.get_session().insert(SESSION_GEN_KEY, new_gen) {
+                    error!(
+                        "Could not refresh the current session after a self-edit: {}",
+                        e
+                    );
+                }
+            }
+        }
 
         /* call post edit hooks */
         // With the id the store gave it, not the one asked for: a new item is

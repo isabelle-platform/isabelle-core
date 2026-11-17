@@ -140,7 +140,9 @@ async fn handle_message(state: &State, msg: CoreMessage) {
             } else {
                 None
             };
-            crate::server::user_control::apply_session_revocation(
+            // A plugin actor write has no HTTP session to keep alive, so the
+            // new generation it may stamp is not needed here.
+            let _ = crate::server::user_control::apply_session_revocation(
                 srv,
                 &collection,
                 old_itm.as_ref(),
