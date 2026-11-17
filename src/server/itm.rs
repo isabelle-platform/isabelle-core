@@ -31,7 +31,7 @@ use crate::util::multipart::{read_fields, Limits};
 use actix_identity::Identity;
 use actix_multipart::Multipart;
 use actix_session::SessionExt;
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
 use isabelle_dm::data_model::data_object_action::DataObjectAction;
 use isabelle_dm::data_model::item::Item;
 use isabelle_dm::data_model::list_query::ListQuery;
@@ -203,15 +203,32 @@ pub async fn itm_edit(
         }
         info!("Collection {} element {} set", mc.collection, r);
 
-        // The write above may have revoked every session this account holds
-        // (a password or role change). When the caller edited their *own*
-        // record, keep the session this request rides on: re-stamp it with the
-        // new generation so it still matches, while every other session the
-        // account holds keeps the old one and is refused. Without this, setting
-        // your own password during first-run setup logs you straight back out
-        // and the next request (pulling the first builds, say) is a 401.
-        if let Some(new_gen) = revoked_gen {
-            if mc.collection == "user" && usr.as_ref().map(|u| u.id) == Some(itm.id) {
+        // Editing your own account must not sign you out mid-flow (the
+        // first-run wizard changes name, e-mail and password). Two things in a
+        // session break on such an edit, and both are mended here for the
+        // request's own session only — every *other* session the account holds
+        // is still correctly refused.
+        if mc.collection == "user" && usr.as_ref().map(|u| u.id) == Some(itm.id) {
+            // (1) The session principal is the e-mail. If this edit changed it,
+            // the old principal resolves to no user and every later request is
+            // unauthenticated, so re-key the identity to the record's new
+            // e-mail. Read it back so a merge that left it untouched is a no-op.
+            let new_email = srv
+                .rw
+                .get_item("user", itm.id)
+                .await
+                .map(|u| u.safe_str("email", ""))
+                .unwrap_or_default();
+            if !new_email.is_empty() && new_email != principal(&user) {
+                if let Err(e) = Identity::login(&req.extensions(), new_email) {
+                    error!("Could not re-key the session after an e-mail change: {}", e);
+                }
+            }
+
+            // (2) A password or role change bumped the generation to revoke the
+            // account's sessions; re-stamp this one with the new generation so
+            // it is not caught by that.
+            if let Some(new_gen) = revoked_gen {
                 if let Err(e) = req.get_session().insert(SESSION_GEN_KEY, new_gen) {
                     error!(
                         "Could not refresh the current session after a self-edit: {}",
