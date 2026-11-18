@@ -40,6 +40,13 @@
 //!   RECAPTCHA_MIN_SCORE    lowest score let through, 0.0 to 1.0 (default 0.5)
 //!   RECAPTCHA_VERIFY_URL   where to ask, for a test stand (default Google)
 //!
+//! An installation a platform provisioned is not given the secret key — one
+//! key on every customer's machine would be one leak away from all of them.
+//! It is given the `captcha` section of its platform document instead: the
+//! public key, the platform's address that checks a token, and the machine's
+//! own token there. The platform asks Google and passes the answer back.
+//! Keys in the environment win over the document.
+//!
 //! Two rules decide every case. A submission Google calls a robot, or one
 //! with no usable token, is refused. A check that could not be made — Google
 //! not answering, or answering that our own key is wrong — lets the
@@ -70,13 +77,77 @@ pub const REFUSED: &str =
 /// The form field the token travels in.
 pub const FIELD: &str = "captcha";
 
+/// Who is asked what a token is worth.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Via {
+    /// Google, with the secret key.
+    Google,
+    /// The platform that provisioned this installation, with the machine's
+    /// token; it holds the secret key and asks Google.
+    Platform,
+}
+
 /// The check as this deployment is set up to make it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Config {
     pub site_key: String,
+    /// The secret key, or the machine's token on the platform.
     secret: String,
     min_score: f64,
     verify_url: String,
+    via: Via,
+}
+
+/// Without the secret: a `{:?}` in a log line must not be how it gets there.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("site_key", &self.site_key)
+            .field("secret", &"<redacted>")
+            .field("min_score", &self.min_score)
+            .field("verify_url", &self.verify_url)
+            .field("via", &self.via)
+            .finish()
+    }
+}
+
+/// The platform document, beside the instance's data, and its section here.
+const PLATFORM_FILE: &str = "platform.json";
+const PLATFORM_SECTION: &str = "captcha";
+
+/// The header the machine's token travels in — the one the platform already
+/// knows this machine by, for its mail.
+const PLATFORM_TOKEN_HEADER: &str = "X-Platform-Mail-Token";
+
+/// The check the platform document at `path` describes, if it describes one.
+///
+/// No file, no section, or a section with a part missing all mean the same:
+/// no check from here. Most installations have no platform document.
+fn config_from_platform(path: &str, min_score: Option<String>) -> Option<Config> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let section = doc.get(PLATFORM_SECTION)?.as_object()?;
+    let field = |key: &str| {
+        section
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let (site_key, url, token) = (field("site_key")?, field("url")?, field("token")?);
+    Some(Config {
+        site_key,
+        secret: token,
+        min_score: parse_min_score(min_score),
+        verify_url: url,
+        via: Via::Platform,
+    })
+}
+
+fn parse_min_score(v: Option<String>) -> f64 {
+    v.and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(MIN_SCORE)
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -100,11 +171,14 @@ pub async fn active(srv: &crate::state::data::Data) -> Option<Config> {
         .get(ENABLED)
         .copied()
         .unwrap_or(false);
-    if on {
-        config()
-    } else {
-        None
+    if !on {
+        return None;
     }
+    config().or_else(|| {
+        let data_path = srv.data_path.lock().clone();
+        let path = format!("{}/{}", data_path.trim_end_matches('/'), PLATFORM_FILE);
+        config_from_platform(&path, env_opt(MIN_SCORE_VAR))
+    })
 }
 
 /// The check as the environment describes it, switched on or not.
@@ -146,15 +220,12 @@ fn config_from(
             return None;
         }
     };
-    let min_score = min_score
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| (0.0..=1.0).contains(v))
-        .unwrap_or(MIN_SCORE);
     Some(Config {
         site_key,
         secret,
-        min_score,
+        min_score: parse_min_score(min_score),
         verify_url: verify_url.unwrap_or_else(|| VERIFY_URL.to_string()),
+        via: Via::Google,
     })
 }
 
@@ -195,9 +266,14 @@ fn judge(answer: &Answer, action: &str, min_score: f64) -> Judgement {
     if !answer.success {
         // Google names the secret when the secret is what is wrong. That is
         // this deployment's mistake and not the visitor's.
-        if answer.error_codes.iter().any(|c| c.contains("secret")) {
+        // "unavailable" is the platform saying it could not ask Google.
+        if answer
+            .error_codes
+            .iter()
+            .any(|c| c.contains("secret") || c == "unavailable")
+        {
             return Judgement::Broken(format!(
-                "the secret key was not accepted ({})",
+                "the check could not be made with our key or token ({})",
                 answer.error_codes.join(", ")
             ));
         }
@@ -246,7 +322,7 @@ async fn check_with(cfg: Option<Config>, token: &str, action: &str) -> Result<()
         info!("captcha: {} refused: no token", action);
         return Err(REFUSED);
     }
-    let answer = match ask(&cfg, token).await {
+    let answer = match ask(&cfg, token, action).await {
         Ok(a) => a,
         Err(e) => {
             warn!(
@@ -272,14 +348,21 @@ async fn check_with(cfg: Option<Config>, token: &str, action: &str) -> Result<()
     }
 }
 
-async fn ask(cfg: &Config, token: &str) -> Result<Answer, String> {
+async fn ask(cfg: &Config, token: &str, action: &str) -> Result<Answer, String> {
     let client = reqwest::Client::builder()
         .timeout(WAIT_FOR)
         .build()
         .map_err(|e| format!("building an HTTP client: {}", e))?;
-    let resp = client
-        .post(&cfg.verify_url)
-        .form(&[("secret", cfg.secret.as_str()), ("response", token)])
+    let request = match cfg.via {
+        Via::Google => client
+            .post(&cfg.verify_url)
+            .form(&[("secret", cfg.secret.as_str()), ("response", token)]),
+        Via::Platform => client
+            .post(&cfg.verify_url)
+            .header(PLATFORM_TOKEN_HEADER, &cfg.secret)
+            .json(&serde_json::json!({ "response": token, "action": action })),
+    };
+    let resp = request
         .send()
         .await
         // Without the address: the secret is in the body, not there, but an
@@ -416,7 +499,80 @@ mod tests {
             secret: "secret".into(),
             min_score: MIN_SCORE,
             verify_url: url,
+            via: Via::Google,
         })
+    }
+
+    fn platform_doc(body: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PLATFORM_FILE);
+        std::fs::write(&path, body).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        (dir, path)
+    }
+
+    #[test]
+    fn a_provisioned_installation_takes_the_check_from_its_platform_document() {
+        let (_d, path) = platform_doc(
+            r#"{"mail":{"url":"https://p/api/mail/send","token":"t"},
+                "captcha":{"site_key":" 6Lsite ","url":"https://p/api/captcha/verify","token":"m-tok"}}"#,
+        );
+        let c = config_from_platform(&path, None).unwrap();
+        assert_eq!(c.site_key, "6Lsite");
+        assert_eq!(c.verify_url, "https://p/api/captcha/verify");
+        assert_eq!(c.via, Via::Platform);
+        assert_eq!(c.min_score, MIN_SCORE);
+        // The machine's token is a credential.
+        assert!(!format!("{c:?}").contains("m-tok"));
+    }
+
+    #[test]
+    fn a_document_without_a_whole_section_describes_no_check() {
+        for body in [
+            r#"{"mail":{"url":"u","token":"t"}}"#,
+            r#"{"captcha":{"site_key":"k","url":"u"}}"#,
+            r#"{"captcha":{"site_key":"k","url":" ","token":"t"}}"#,
+            r#"{"captcha":"yes"}"#,
+            "not json",
+        ] {
+            let (_d, path) = platform_doc(body);
+            assert!(config_from_platform(&path, None).is_none(), "{body}");
+        }
+        assert!(config_from_platform("/nonexistent/platform.json", None).is_none());
+    }
+
+    #[actix_web::test]
+    async fn the_platform_is_asked_with_the_machines_token_and_its_answer_is_judged() {
+        let via_platform = |url: String| {
+            Some(Config {
+                site_key: "site".into(),
+                secret: "m-tok".into(),
+                min_score: MIN_SCORE,
+                verify_url: url,
+                via: Via::Platform,
+            })
+        };
+        let person = stand_in(r#"{"succeeded":true,"success":true,"score":0.9,"action":"login"}"#);
+        assert_eq!(
+            check_with(via_platform(person), "tok", "login").await,
+            Ok(())
+        );
+        let robot = stand_in(r#"{"succeeded":true,"success":true,"score":0.1,"action":"login"}"#);
+        assert_eq!(
+            check_with(via_platform(robot), "tok", "login").await,
+            Err(REFUSED)
+        );
+        // The platform does not know the token, or could not ask Google:
+        // nobody at this installation is locked out for that.
+        for body in [
+            r#"{"succeeded":false,"success":false,"error-codes":["invalid-input-secret"]}"#,
+            r#"{"succeeded":false,"success":false,"error-codes":["unavailable"]}"#,
+        ] {
+            assert_eq!(
+                check_with(via_platform(stand_in(body)), "tok", "login").await,
+                Ok(())
+            );
+        }
     }
 
     #[actix_web::test]
