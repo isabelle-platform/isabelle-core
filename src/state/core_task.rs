@@ -177,6 +177,27 @@ async fn handle_message(state: &State, msg: CoreMessage) {
             let ok = crate::state::diskbudget::set_policy(srv, policy).await;
             let _ = reply.send(ok);
         }
+        // -------- Maintenance --------
+        CoreMessage::OperationBegin {
+            title,
+            resumed,
+            reply,
+        } => {
+            let _ = reply.send(crate::state::maintenance::begin(&title, resumed));
+        }
+        CoreMessage::OperationEnd { token } => {
+            crate::state::maintenance::end(token);
+        }
+        CoreMessage::MaintenanceGet { reply } => {
+            let _ = reply.send(crate::state::maintenance::info());
+        }
+        CoreMessage::MaintenanceAsk { by, reason, reply } => {
+            crate::server::maintenance::refresh_defaults(srv).await;
+            let _ = reply.send(crate::state::maintenance::ask(&by, &reason, None, None));
+        }
+        CoreMessage::MaintenanceReopen { by, reply } => {
+            let _ = reply.send(crate::state::maintenance::reopen(&by));
+        }
         CoreMessage::GlobalsGetSettings { reply } => {
             let s = srv.rw.get_settings().await;
             let _ = reply.send(s);

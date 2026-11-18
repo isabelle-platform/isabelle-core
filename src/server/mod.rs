@@ -29,6 +29,7 @@ pub mod guards;
 pub mod itm;
 pub mod list_filter;
 pub mod login;
+pub mod maintenance;
 pub mod oauth;
 pub mod openapi;
 pub mod owner;

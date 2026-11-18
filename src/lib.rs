@@ -495,6 +495,9 @@ where
         // Load any persisted disk-budget policy into memory before the monitor
         // starts, so a set from a previous run is honoured from the first tick.
         crate::state::diskbudget::load_policy(srv).await;
+        // Closed for an update when it stopped, closed when it starts.
+        crate::state::maintenance::load(&srv.data_path.lock().clone());
+        crate::server::maintenance::refresh_defaults(srv).await;
     }
 
     info!("Flow: Starting server");
@@ -521,6 +524,9 @@ where
                         crate::state::diskbudget::monitor(srv);
                         call_periodic_job_hook(srv, "min");
                     }
+                    // Core-native too: a request to close for an update,
+                    // the quiet moment it waits for, and the reopening.
+                    crate::state::maintenance::tick();
                     call_periodic_job_hook(srv, "sec");
                 }
             }
@@ -596,6 +602,14 @@ where
             )
             .route("/setting/edit", web::post().to(setting_edit))
             .route("/setting/list", web::get().to(setting_list))
+            .route(
+                "/maintenance",
+                web::get().to(crate::server::maintenance::maintenance_get),
+            )
+            .route(
+                "/maintenance/set",
+                web::post().to(crate::server::maintenance::maintenance_set),
+            )
             // Read-only by construction: `features.js` is edited on disk, so
             // there is no edit route here to leave out of `NEVER`.
             .route("/feature/list", web::get().to(feature_list))
