@@ -259,6 +259,9 @@ pub async fn auth_providers(data: web::Data<State>) -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({
         "providers": out,
         "registration": crate::server::signin::registration_open(srv).await,
+        // The public half of the sign-in check, or null when there is none:
+        // the screens need the key before anybody has signed in.
+        "captcha": crate::server::captcha::public_view(srv).await,
     }))
 }
 

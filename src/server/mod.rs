@@ -23,6 +23,7 @@
  */
 pub mod api_token;
 pub mod auth_config;
+pub mod captcha;
 pub mod feature;
 pub mod guards;
 pub mod itm;

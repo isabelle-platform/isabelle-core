@@ -22,6 +22,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 use crate::handler::route_call::*;
+use crate::server::captcha;
 use crate::server::guards::SESSION_GEN_KEY;
 use crate::server::user_control::*;
 use crate::state::state::*;
@@ -73,6 +74,13 @@ pub async fn gen_otp(
             return result_json(e.status(), false, "Malformed request");
         }
     };
+    // Somebody already signed in asks for a code to change their own
+    // password: they have been through the check once, at the door.
+    if _user.is_none() {
+        if let Err(msg) = captcha::check(srv, &field_str(&fields, captcha::FIELD), "otp").await {
+            return ok_json(false, msg);
+        }
+    }
     let lu = LoginUser {
         username: field_str(&fields, "username"),
         password: "".to_string(),
@@ -138,6 +146,15 @@ pub async fn register(
     let dry = field_str(&fields, "dry");
 
     info!("User name: {}", login);
+
+    // A dry run only says whether a name is free, as the form is typed into;
+    // the submission that makes the account is the one that is checked.
+    if dry != "true" {
+        if let Err(msg) = captcha::check(srv, &field_str(&fields, captcha::FIELD), "register").await
+        {
+            return ok_json(false, msg);
+        }
+    }
 
     // Reject logins/emails that `get_user` cannot look up. Without this a
     // login containing `$` or `{` reports as free (the lookup returns None),
@@ -217,6 +234,12 @@ pub async fn login(
     };
 
     info!("User name: {}", lu.username.clone());
+
+    // Before any credential is looked at: a robot learns nothing about the
+    // account from being turned away here.
+    if let Err(msg) = captcha::check(srv, &field_str(&fields, captcha::FIELD), "login").await {
+        return ok_json(false, msg);
+    }
 
     // The local check first, so a deployment that has always worked keeps
     // working whatever state the directory is in — and so an administrator
