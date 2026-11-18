@@ -1,6 +1,6 @@
 [package]
 name = "isabelle-core"
-version = "2.13.0"
+version = "2.14.0"
 edition = "2021"
 
 # Core ships as both a library (`isabelle_core::run`) and a thin dev
@@ -44,7 +44,7 @@ ldap3 = { version = "0.12", default-features = false, features = [
 	"tls-rustls-ring",
 ] }
 isabelle-dm = { "git" = "https://github.com/isabelle-platform/isabelle-dm", tag = "1.10.0" }
-isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.29.0" }
+isabelle-plugin-api = { "git" = "https://github.com/isabelle-platform/isabelle-plugin-api", tag = "1.30.0" }
 lettre = { version = "0.11.11", features = [
 	"rustls-tls",
 	"smtp-transport",
